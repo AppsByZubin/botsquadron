@@ -4,6 +4,7 @@ import time as t
 import asyncio
 import json
 from datetime import datetime, time
+from turtle import pd
 from zoneinfo import ZoneInfo
 import nats
 
@@ -116,7 +117,43 @@ async def nifty50_engine(strategy, mode, param_data):
             data = get_instrument_intraday_data(upstox, constants.NIFTY50_SYMBOL)
             data.reverse()
             intraday_day_1min_candles.extend(data)
+            future_data = get_instrument_intraday_data(upstox, future_contract["instrument_key"])
+            future_data.reverse()
+            intraday_day_future_candles.extend(future_data)
 
+
+        columns = ["time", "open", "high", "low", "close", "volume", "oi"]
+        
+        df_nifty = pd.DataFrame()
+        if intraday_day_1min_candles:
+            df_nifty = pd.DataFrame(intraday_day_1min_candles, columns=columns)
+            df_nifty.drop(columns=["volume", "oi"], inplace=True)
+
+            last_timestamp = df_nifty["time"].iloc[-1]
+            dt = datetime.fromisoformat(last_timestamp).astimezone(ist)
+            minutes_processed[dt.strftime("%Y-%m-%d %H:%M")] = True
+
+            close_price = intraday_day_1min_candles[-1][4]
+            atm_price = int(round(close_price / 50) * 50)
+            selected_contracts = get_nifty_option_instruments(atm_price, sp.get("trade_expiry"))
+
+        df_future = pd.DataFrame()
+        if intraday_day_future_candles:
+            df_future = pd.DataFrame(intraday_day_future_candles, columns=columns)
+            future_last_timestamp = df_future["time"].iloc[-1]
+            future_dt = datetime.fromisoformat(future_last_timestamp).astimezone(ist)
+            future_minutes_processed[future_dt.strftime("%Y-%m-%d %H:%M")] = True
+
+        # instruments list
+        list_of_instruments = []
+        selected_contracts["Nifty_Future"] = future_contract
+
+        for key, value in selected_contracts.items():
+            if key == "Nifty_Future":
+                list_of_instruments.append(value["instrument_key"])
+                continue
+            for contract in value:
+                list_of_instruments.append(contract["instrument_key"])
 
         # Extract instrument keys from selected contracts
         instrument_keys = []

@@ -1,0 +1,51 @@
+strategy-parameters:
+  trade-per-day: 3
+  max-open-trades: 1
+
+  # PERCENT values as fractions
+  take-profit: 0.5     # +50%
+  stop-loss: 0.113       # -10%
+  max_daily_loss_pct_of_initial_cash: 0.02  # Stop new trades for the day after 2% realized loss
+
+  min_atr_14: 10
+
+  trailing-stop: true
+  trailing-stop-distance: 10  # SL trails by 10 points once trailing starts
+  trail-start-after-points: 0.1 # start trailing only after +5 points move
+
+  break-even-point: 3
+
+  sl-limit-gap: 1.0
+  # 100 points at NIFTY 23335 ~= 0.42854%
+  orb_gap_side_override_threshold_pct: 0.4285
+
+  itm_strike_range: 400
+
+  trade_expiry: "2026-04-14"
+  pcr_expiry: "2026-04-07"
+  pcr_poll_interval_sec: 120
+
+  max_atr_for_contract: 20
+  min_atr_for_contract: 13
+
+  trade_within_day_open_limits: False
+  ltp_open_max_distance_points: 210
+
+  lot-size:
+    small: 6
+    medium: 8
+    large: 10
+
+  trade-window:
+    start: "09:45"
+    end: "15:00"
+
+historical-trends: &historical_trends
+  weekly: "super_bearish"
+  daily: "super_bearish"
+  trader-sentiment: "super_bearish"
+
+# Backward-compatible alias
+historical-trend: *historical_trends
+
+

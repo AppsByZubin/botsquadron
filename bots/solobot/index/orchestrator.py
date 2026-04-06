@@ -15,12 +15,11 @@
 
 import asyncio
 from pathlib import Path
-import os
 import sys
 from common import constants
 from logger import create_logger
 from index.nifty50.nifty50_engine import nifty50_engine
-import yaml
+from utils.bot_utils import load_param_data
 
 logger = create_logger("OrchestratorLogger")
 
@@ -48,17 +47,10 @@ def orchestrator(instruments, strategy, mode=None):
         path = Path(constants.PROD_FOLDER_PATH)
         path.mkdir(parents=True, exist_ok=True)
     
-    # if not os.path.exists(constants.PARAM_PATH):
-    #     logger.error(f"Param file not found {constants.PARAM_PATH}")
-    #     sys.exit(constants.FAIL_CODE)
-
-    param_data=None
-    # with open(constants.PARAM_PATH, 'r') as file:
-    #     param_data = yaml.safe_load(file)
-
-    # if param_data is None:
-    #     logger.error(f"Param data not sourced path {constants.PARAM_PATH}")
-    #     sys.exit(constants.FAIL_CODE)
+    param_data = load_param_data(mode)
+    if param_data is None:
+        logger.error("Param data not found in kubernetes config or local param.yaml fallback.")
+        sys.exit(constants.FAIL_CODE)
 
     if instruments.lower() == constants.NIFTY50:
         asyncio.run(nifty50_engine(strategy, mode, param_data))
