@@ -1,0 +1,28 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: marketfeeder
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: marketfeeder
+  template:
+    metadata:
+      labels:
+        app: marketfeeder
+    spec:
+      containers:
+      - name: marketfeeder
+        image: marketfeeder:latest
+        ports:
+        - containerPort: 8080
+        env:
+        - name: NATS_URL
+          value: "nats://nats:4222"
+        - name: UPSTOX_API_ACCESS_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: upstox-secrets
+              key: api-token

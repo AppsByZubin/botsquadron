@@ -1,0 +1,8 @@
+
+botsquadron/
+logs/
+.codex
+
+__pycache__
+solobot/files/execution_results
+solobot/logs

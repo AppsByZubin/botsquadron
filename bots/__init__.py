@@ -1,0 +1,1 @@
+# BotSquadron bots package
