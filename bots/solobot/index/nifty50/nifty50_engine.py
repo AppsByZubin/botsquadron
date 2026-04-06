@@ -3,8 +3,9 @@ import os
 import time as t
 import asyncio
 import json
+import threading
 from datetime import datetime, time
-from turtle import pd
+import pandas as pd
 from zoneinfo import ZoneInfo
 import nats
 
@@ -33,6 +34,20 @@ async def nifty50_engine(strategy, mode, param_data):
     logger.info("Connected to NATS")
 
     try:
+
+        sp = {}
+        try:
+            sp = (param_data or {}).get("strategy-parameters", {}) if isinstance(param_data, dict) else {}
+        except Exception:
+            sp = {}
+
+        def _safe_int(value, default):
+            try:
+                return int(float(value))
+            except (TypeError, ValueError):
+                return int(default)
+
+
         # Implement the logic to fetch data, analyze, and execute trades based on the strategy and
 
         api_token = os.getenv(constants.UPSTOX_API_ACCESS_TOKEN)
@@ -108,7 +123,7 @@ async def nifty50_engine(strategy, mode, param_data):
                 logger.error("Failed to fetch nifty 50 spot price at market open.")
                 sys.exit(constants.FAIL_CODE)
             
-            selected_contracts = get_nifty_option_instruments(spot_price, "2026-04-07")
+            selected_contracts = get_nifty_option_instruments(spot_price, sp.get("trade_expiry"))
 
             logger.info(f"Market open now. with spot price: {spot_price}. Bootstrapping intraday candles from market open.")
 
@@ -155,6 +170,33 @@ async def nifty50_engine(strategy, mode, param_data):
             for contract in value:
                 list_of_instruments.append(contract["instrument_key"])
 
+        # init bot
+        strategy_key = str(strategy or "").strip().lower()
+        pcr_vwap_ema_orb_key = str(constants.PCR_VWAP_EMA_ORB).strip().lower()
+
+        strategy_cls = None
+        if strategy_key == pcr_vwap_ema_orb_key:
+            from index.nifty50.strategy.pcr_vwma_ema_orb import PCRVwapEmaOrbStrategy
+            strategy_cls = PCRVwapEmaOrbStrategy
+        
+        if strategy_cls is None:
+            logger.error(f"Unsupported strategy: {strategy}. Exiting.")
+            sys.exit(constants.FAIL_CODE)
+
+        bot = strategy_cls(
+                    upstox, trend, selected_contracts, order_manager=None,
+                    option_exipry_date=sp.get("trade_expiry"),
+                    params=param_data,
+                    index_minutes_processed=minutes_processed,
+                    future_minutes_processed=future_minutes_processed,
+                    intraday_index_candles=intraday_day_1min_candles,
+                    intraday_future_candles=intraday_day_future_candles,
+                )
+
+        if bot is None:
+            logger.error(f"Strategy {strategy} bot not initialized.")
+            sys.exit(constants.FAIL_CODE)
+
         # Extract instrument keys from selected contracts
         instrument_keys = []
         for strike_price, contracts in selected_contracts.items():
@@ -172,36 +214,98 @@ async def nifty50_engine(strategy, mode, param_data):
         await nc.publish(constants.NATS_SUBJECT_INSTRUMENT_KEYS, json.dumps(instrument_data).encode())
         logger.info(f"Published instrument keys to marketfeeder for bot {bot_id}: {len(instrument_keys)} instruments: {instrument_keys}")
 
+        # NATS tick heartbeat/watchdog (equivalent intent to old WS last-msg tracking).
+        instrument_keys_set = set(instrument_keys)
+        last_msg_lock = threading.Lock()
+        last_msg_epoch = {"t": t.time()}
+        watchdog_state = {"last_resubscribe_t": 0.0}
+
+        tick_watchdog_enabled = bool(sp.get("nats_tick_watchdog_enabled", True))
+        tick_watchdog_check_sec = max(1, _safe_int(sp.get("nats_tick_watchdog_check_sec", 5), 5))
+        tick_idle_timeout_sec = max(
+            5,
+            _safe_int(
+                sp.get("nats_tick_idle_timeout_sec", sp.get("ws_idle_timeout_sec", 45)),
+                45,
+            ),
+        )
+        tick_resubscribe_cooldown_sec = max(
+            5,
+            _safe_int(
+                sp.get("nats_tick_resubscribe_cooldown_sec", tick_idle_timeout_sec),
+                tick_idle_timeout_sec,
+            ),
+        )
+
         # Subscribe to tick data
         async def tick_data_handler(msg):
+            with last_msg_lock:
+                last_msg_epoch["t"] = t.time()
             try:
-                tick_data = json.loads(msg.data.decode())
-                logger.debug(f"Received tick data: {tick_data}")
-                    
-                # Check if this tick data is for our instruments
-                instrument_key = tick_data.get('instrument_key')
-                if instrument_key in instrument_keys:
-                    # Process tick data for trading logic
-                    price = tick_data.get('price', 0)
-                    volume = tick_data.get('volume', 0)
-                    timestamp = tick_data.get('timestamp')
-                        
-                    logger.info(f"Processing tick for {instrument_key}: price={price}, volume={volume}")
-                        
-                    # TODO: Implement trading logic based on tick data
-                    # This is where you would implement your strategy logic
-                        
+                payload = json.loads(msg.data.decode())
+                if not isinstance(payload, dict):
+                    return
+
+                # Strategy expects full-feed envelope with "feeds".
+                if "feeds" in payload:
+                    bot.on_ws_message(msg)
+                    return
+
+                # Heartbeat update already happened. Ignore non-feed payloads.
+                if payload.get("instrument_key") in instrument_keys_set:
+                    return
             except json.JSONDecodeError as e:
                 logger.error(f"Failed to decode tick data: {e}")
             except Exception as e:
                 logger.error(f"Error processing tick data: {e}")
 
-            sub = await nc.subscribe(constants.NATS_SUBJECT_TICK_DATA, cb=tick_data_handler)
-            logger.info("Subscribed to tick data from marketfeeder")
+        async def nats_tick_watchdog():
+            while True:
+                await asyncio.sleep(tick_watchdog_check_sec)
+                now_epoch = t.time()
+                with last_msg_lock:
+                    idle_for = now_epoch - float(last_msg_epoch["t"])
 
+                if idle_for < tick_idle_timeout_sec:
+                    continue
+
+                if (now_epoch - watchdog_state["last_resubscribe_t"]) < tick_resubscribe_cooldown_sec:
+                    continue
+
+                watchdog_state["last_resubscribe_t"] = now_epoch
+                logger.warning(
+                    f"[NATS Watchdog] No tick payload for {idle_for:.1f}s. "
+                    f"Re-publishing subscribe for bot_id={bot_id}."
+                )
+                try:
+                    await nc.publish(constants.NATS_SUBJECT_INSTRUMENT_KEYS, json.dumps(instrument_data).encode())
+                except Exception as pub_exc:
+                    logger.warning(f"[NATS Watchdog] Failed to republish instrument subscription: {pub_exc}")
+
+        sub = await nc.subscribe(constants.NATS_SUBJECT_TICK_DATA, cb=tick_data_handler)
+        logger.info("Subscribed to tick data from marketfeeder")
+        logger.info(
+            f"NATS tick watchdog enabled={tick_watchdog_enabled}, "
+            f"idle_timeout_sec={tick_idle_timeout_sec}, check_sec={tick_watchdog_check_sec}, "
+            f"resubscribe_cooldown_sec={tick_resubscribe_cooldown_sec}"
+        )
+
+        watchdog_task = None
+        if tick_watchdog_enabled:
+            watchdog_task = asyncio.create_task(nats_tick_watchdog(), name="nats_tick_watchdog")
+
+        try:
             # Keep the connection alive and process messages
             while True:
                 await asyncio.sleep(1)
+        finally:
+            if watchdog_task is not None:
+                watchdog_task.cancel()
+                try:
+                    await watchdog_task
+                except asyncio.CancelledError:
+                    pass
+            await sub.unsubscribe()
                 
     except Exception as e:
         logger.error(f"Error in nifty50_engine: {e}")

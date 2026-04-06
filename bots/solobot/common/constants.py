@@ -82,7 +82,7 @@ SMA_CROSSOVER = "sma_crossover"
 RSI_EMA_ANGLE = "rsi_ema_angle"
 ORB = "opening_range_breakout"
 RSI_EMA_ANGLE = "rsi_ema_angle"
-PCR_VWAP_EMA="pcr_vwap_ema"
+PCR_VWAP_EMA_ORB="pcr_vwap_ema_orb"
 
 BUY="BUY"
 SELL="SELL"

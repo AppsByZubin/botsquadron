@@ -55,7 +55,7 @@ class PCRVwmaEmaOrbStrategy:
         uptox_client,
         previous_day_trend: str,
         selected_contracts: Dict[str, Any],
-        order_manager,
+        order_manager=None,
         option_exipry_date: Optional[str] = None,
         params: Optional[Dict[str, Any]] = None,
         index_minutes_processed: Optional[Dict[str, bool]] = None,
