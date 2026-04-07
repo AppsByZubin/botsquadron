@@ -1,12 +1,20 @@
-.PHONY: build docker-build deploy-nats deploy-marketfeeder deploy-all clean test-nats install-python-deps
+.PHONY: build build-ordersystem docker-build docker-build-ordersystem deploy-nats deploy-marketfeeder deploy-all clean test-nats install-python-deps
 
 # Build the Go binary
 build:
 	cd services/marketfeeder && go build -o marketfeeder .
 
+# Build the order system Go binary
+build-ordersystem:
+	cd services/ordersystem && go build -o ordersystem ./cmd
+
 # Build the Docker image
 docker-build: build
 	cd services/marketfeeder && docker build -t marketfeeder:latest .
+
+# Build the order system Docker image
+docker-build-ordersystem: build-ordersystem
+	cd services/ordersystem && docker build -t ordersystem:latest .
 
 # Install Python dependencies
 install-python-deps:

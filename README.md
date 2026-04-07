@@ -7,13 +7,16 @@ BotSquadron is a distributed trading bot platform that uses NATS for communicati
 ### Components
 
 1. **solobot** (Python): Trading bot that implements trading strategies
+2. **ordersystem** (Go): HTTP OMS that stores trades in PostgreSQL, places production orders via Upstox, and polls SL status
 3. **marketfeeder** (Go): Market data feeder that connects to Upstox **v3** websockets
-3. **NATS**: Message broker for communication between components
+4. **NATS**: Message broker for communication between components
 
 ### Communication Flow
 
 ```
+solobot → ordersystem → PostgreSQL
 solobot → NATS → marketfeeder → Upstox WebSocket → NATS → solobot
+ordersystem (production mode) → Upstox Orders API
 ```
 
 1. solobot sends instrument keys to subscribe to marketfeeder via NATS
@@ -56,6 +59,11 @@ export UPSTOX_API_ACCESS_TOKEN="your_upstox_token"
    make docker-build
    ```
 
+4. **Build ordersystem:**
+   ```bash
+   make build-ordersystem
+   ```
+
 ## Usage
 
 ### Running NATS Server
@@ -84,6 +92,25 @@ docker run -e NATS_URL=nats://host.docker.internal:4222 -e UPSTOX_API_ACCESS_TOK
 ```
 
 **Note:** marketfeeder is configured to use Upstox **v3 websocket API**. Please verify the endpoint URL, authentication, and message formats with the official Upstox v3 documentation, as the implementation may need adjustments based on the actual API specifications.
+
+### Running ordersystem
+
+```bash
+export DATABASE_URL="postgresql://omsuser:change-me@localhost:5432/omsdb?sslmode=disable"
+export APP_MODE="mock"   # use production to enable Upstox order placement
+./services/ordersystem/ordersystem
+```
+
+Or from source:
+
+```bash
+cd services/ordersystem
+go run ./cmd
+```
+
+API docs and examples:
+
+`services/ordersystem/README.md`
 
 ### Running solobot
 
