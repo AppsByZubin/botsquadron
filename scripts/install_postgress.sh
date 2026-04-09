@@ -198,17 +198,109 @@ ALTER TABLE IF EXISTS trades ADD COLUMN IF NOT EXISTS taxes NUMERIC(18,6);
 
 CREATE TABLE IF NOT EXISTS accounts (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    bot_name TEXT,
-    year INTEGER,
-    month INTEGER,
-    initial_cash NUMERIC(18,6),
+    botname TEXT,
+    month_year TEXT,
+    init_cash NUMERIC(18,6),
+    current_date TEXT,
     profit NUMERIC(18,6),
-    max_dradown NUMERIC(18,6)
+    max_drawdown NUMERIC(18,6)
 );
 
 ALTER TABLE accounts OWNER TO "${DB_USER}";
 GRANT ALL PRIVILEGES ON TABLE accounts TO "${DB_USER}";
-CREATE INDEX IF NOT EXISTS idx_accounts_bot_year_month ON accounts (bot_name, year, month);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_accounts_bot_month_date ON accounts (botname, month_year, current_date);
+CREATE INDEX IF NOT EXISTS idx_accounts_bot_month_year ON accounts (botname, month_year);
+SQL
+
+sudo -u postgres psql -d "$DB_NAME" <<SQL
+ALTER TABLE IF EXISTS accounts ADD COLUMN IF NOT EXISTS botname TEXT;
+ALTER TABLE IF EXISTS accounts ADD COLUMN IF NOT EXISTS month_year TEXT;
+ALTER TABLE IF EXISTS accounts ADD COLUMN IF NOT EXISTS init_cash NUMERIC(18,6);
+ALTER TABLE IF EXISTS accounts ADD COLUMN IF NOT EXISTS current_date TEXT;
+ALTER TABLE IF EXISTS accounts ADD COLUMN IF NOT EXISTS profit NUMERIC(18,6);
+ALTER TABLE IF EXISTS accounts ADD COLUMN IF NOT EXISTS max_drawdown NUMERIC(18,6);
+
+DO \
+\$\$\
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = 'accounts'
+      AND column_name = 'bot_name'
+  ) THEN
+    UPDATE accounts
+    SET botname = COALESCE(NULLIF(BTRIM(botname), ''), NULLIF(BTRIM(bot_name), ''))
+    WHERE botname IS NULL OR BTRIM(botname) = '';
+  END IF;
+
+  IF EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = 'accounts'
+      AND column_name = 'initial_cash'
+  ) THEN
+    UPDATE accounts
+    SET init_cash = COALESCE(init_cash, initial_cash)
+    WHERE init_cash IS NULL;
+  END IF;
+
+  IF EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = 'accounts'
+      AND column_name = 'max_dradown'
+  ) THEN
+    UPDATE accounts
+    SET max_drawdown = COALESCE(
+      max_drawdown,
+      CASE
+        WHEN max_dradown > 0 THEN -ABS(max_dradown)
+        ELSE max_dradown
+      END
+    )
+    WHERE max_drawdown IS NULL;
+  END IF;
+
+  IF EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = 'accounts'
+      AND column_name = 'year'
+  ) AND EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = 'accounts'
+      AND column_name = 'month'
+  ) THEN
+    UPDATE accounts
+    SET month_year = COALESCE(
+          NULLIF(BTRIM(month_year), ''),
+          LPAD(month::text, 2, '0') || year::text
+        ),
+        current_date = COALESCE(
+          NULLIF(BTRIM(current_date), ''),
+          TO_CHAR(MAKE_DATE(year, month, 1), 'DD-MM-YYYY')
+        )
+    WHERE year IS NOT NULL
+      AND month IS NOT NULL
+      AND month BETWEEN 1 AND 12
+      AND (
+        month_year IS NULL OR BTRIM(month_year) = ''
+        OR current_date IS NULL OR BTRIM(current_date) = ''
+      );
+  END IF;
+
+  UPDATE accounts
+  SET profit = COALESCE(profit, 0),
+      max_drawdown = COALESCE(max_drawdown, 0);
+END
+\$\$;
 SQL
 
 sudo -u postgres psql -d "$DB_NAME" <<SQL

@@ -20,6 +20,7 @@ type Client struct {
 	baseURL          string
 	accessToken      string
 	orderPlacePath   string
+	orderModifyPath  string
 	orderDetailsPath string
 	apiVersion       string
 }
@@ -44,6 +45,21 @@ type PlaceOrderResult struct {
 	RawData json.RawMessage
 }
 
+type ModifyOrderRequest struct {
+	Quantity     int     `json:"quantity"`
+	Validity     string  `json:"validity"`
+	Price        float64 `json:"price"`
+	OrderID      string  `json:"order_id"`
+	OrderType    string  `json:"order_type"`
+	DisclosedQty int     `json:"disclosed_quantity,omitempty"`
+	TriggerPrice float64 `json:"trigger_price,omitempty"`
+}
+
+type ModifyOrderResult struct {
+	OrderID string
+	RawData json.RawMessage
+}
+
 type OrderStatus struct {
 	OrderID      string
 	Status       string
@@ -62,6 +78,7 @@ func NewClient(cfg config.Config) *Client {
 		baseURL:          cfg.UpstoxBaseURL,
 		accessToken:      cfg.UpstoxAccessToken,
 		orderPlacePath:   cfg.UpstoxOrderPlacePath,
+		orderModifyPath:  cfg.UpstoxOrderModifyPath,
 		orderDetailsPath: cfg.UpstoxOrderDetailsPath,
 		apiVersion:       cfg.UpstoxAPIVersion,
 	}
@@ -118,6 +135,61 @@ func (c *Client) PlaceOrder(ctx context.Context, req PlaceOrderRequest) (PlaceOr
 	}
 
 	return PlaceOrderResult{OrderID: orderID, RawData: data}, nil
+}
+
+func (c *Client) ModifyOrder(ctx context.Context, req ModifyOrderRequest) (ModifyOrderResult, error) {
+	if !c.Enabled() {
+		return ModifyOrderResult{}, fmt.Errorf("upstox client is not configured")
+	}
+	if strings.TrimSpace(req.OrderID) == "" {
+		return ModifyOrderResult{}, fmt.Errorf("order id is required")
+	}
+	if req.Quantity <= 0 {
+		return ModifyOrderResult{}, fmt.Errorf("quantity must be > 0")
+	}
+
+	body, err := json.Marshal(req)
+	if err != nil {
+		return ModifyOrderResult{}, fmt.Errorf("marshal modify order request: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.buildURL(c.orderModifyPath, ""), bytes.NewReader(body))
+	if err != nil {
+		return ModifyOrderResult{}, fmt.Errorf("create modify order request: %w", err)
+	}
+
+	c.setHeaders(httpReq)
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	httpResp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return ModifyOrderResult{}, fmt.Errorf("modify order request failed: %w", err)
+	}
+	defer httpResp.Body.Close()
+
+	payload, err := io.ReadAll(io.LimitReader(httpResp.Body, 2<<20))
+	if err != nil {
+		return ModifyOrderResult{}, fmt.Errorf("read modify order response: %w", err)
+	}
+
+	if httpResp.StatusCode >= 300 {
+		return ModifyOrderResult{}, fmt.Errorf("upstox modify order failed (%d): %s", httpResp.StatusCode, strings.TrimSpace(string(payload)))
+	}
+
+	status, data, err := decodeEnvelope(payload)
+	if err != nil {
+		return ModifyOrderResult{}, fmt.Errorf("decode modify order response: %w", err)
+	}
+	if status != "" && !strings.EqualFold(status, "success") {
+		return ModifyOrderResult{}, fmt.Errorf("upstox modify order non-success status: %s", status)
+	}
+
+	orderID := extractOrderID(data)
+	if orderID == "" {
+		orderID = strings.TrimSpace(req.OrderID)
+	}
+
+	return ModifyOrderResult{OrderID: orderID, RawData: data}, nil
 }
 
 func (c *Client) GetOrderStatus(ctx context.Context, orderID string) (OrderStatus, error) {

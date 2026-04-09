@@ -5,21 +5,23 @@
 ## Features
 
 - `POST /v1/trades` to create trade records from bots
+- `POST /v1/trades/{id}/modify` to modify all SL broker orders for a trade
 - Writes/updates PostgreSQL tables:
   - `trades`
   - `accounts`
   - `trades.account_id` links to `accounts.id` after the trade is closed
 - In `APP_MODE=production`:
   - places entry order via Upstox Orders API
-  - places SL order (when `stoploss` is provided)
+  - places SL order (when `sl_trigger` is provided)
   - periodically polls SL order status
   - closes trade in DB when SL is completed
-  - updates monthly `accounts.profit` and `accounts.max_dradown`
+  - updates daily `accounts.profit` and `accounts.max_drawdown`
 
 ## API Endpoints
 
 - `GET /healthz`
 - `POST /v1/trades`
+- `POST /v1/trades/{id}/modify`
 - `GET /v1/trades/{id}`
 
 ### Create Trade Request Example
@@ -27,6 +29,8 @@
 ```json
 {
   "bot_name": "nifty50_pcr_vwap_ema_orb",
+  "init_cash": 100000,
+  "month_year": "042026",
   "mode": "production",
   "symbol": "NIFTY24APR23500CE",
   "instrument_token": "NSE_FO|12345",
@@ -36,12 +40,26 @@
   "validity": "DAY",
   "entry_price": 102.5,
   "target": 130,
-  "stoploss": 90,
+  "sl_trigger": 90,
   "sl_limit": 89.5,
+  "spot_trail_anchor": 22350,
   "taxes": 0,
   "tag_entry": "bot-entry",
   "tag_sl": "bot-sl",
   "description": "PCR VWAP setup"
+}
+```
+
+### Modify Trade Request Example
+
+```json
+{
+  "mode": "production",
+  "validity": "DAY",
+  "order_type": "SL",
+  "trigger_price": 91,
+  "price": 90.5,
+  "spot_trail_anchor": 22375
 }
 ```
 
@@ -65,6 +83,7 @@ Upstox:
 - `UPSTOX_API_ACCESS_TOKEN` required when `APP_MODE=production`
 - `UPSTOX_API_BASE_URL` default `https://api.upstox.com`
 - `UPSTOX_ORDER_PLACE_PATH` default `/v3/order/place`
+- `UPSTOX_ORDER_MODIFY_PATH` default `/v3/order/modify`
 - `UPSTOX_ORDER_DETAILS_PATH` default `/v2/order/details`
 - `UPSTOX_API_VERSION` default `2.0`
 

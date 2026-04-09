@@ -20,6 +20,7 @@ type Config struct {
 	UpstoxBaseURL          string
 	UpstoxAccessToken      string
 	UpstoxOrderPlacePath   string
+	UpstoxOrderModifyPath  string
 	UpstoxOrderDetailsPath string
 	UpstoxAPIVersion       string
 }
@@ -36,6 +37,7 @@ func Load() (Config, error) {
 		UpstoxBaseURL:          strings.TrimRight(getEnv("UPSTOX_API_BASE_URL", "https://api.upstox.com"), "/"),
 		UpstoxAccessToken:      strings.TrimSpace(os.Getenv("UPSTOX_API_ACCESS_TOKEN")),
 		UpstoxOrderPlacePath:   normalizePath(getEnv("UPSTOX_ORDER_PLACE_PATH", "/v3/order/place")),
+		UpstoxOrderModifyPath:  normalizePath(getEnv("UPSTOX_ORDER_MODIFY_PATH", "/v3/order/modify")),
 		UpstoxOrderDetailsPath: normalizePath(getEnv("UPSTOX_ORDER_DETAILS_PATH", "/v2/order/details")),
 		UpstoxAPIVersion:       strings.TrimSpace(getEnv("UPSTOX_API_VERSION", "2.0")),
 	}

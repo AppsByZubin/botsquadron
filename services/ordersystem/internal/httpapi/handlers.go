@@ -29,6 +29,7 @@ func (h *Handler) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", h.handleHealth)
 	mux.HandleFunc("POST /v1/trades", h.handleCreateTrade)
+	mux.HandleFunc("POST /v1/trades/{id}/modify", h.handleModifyTrade)
 	mux.HandleFunc("GET /v1/trades/{id}", h.handleGetTradeByID)
 	return mux
 }
@@ -61,6 +62,41 @@ func (h *Handler) handleCreateTrade(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusCreated, resp)
+}
+
+func (h *Handler) handleModifyTrade(w http.ResponseWriter, r *http.Request) {
+	tradeID := strings.TrimSpace(r.PathValue("id"))
+	if tradeID == "" {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "trade id is required"})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), h.requestTimeout)
+	defer cancel()
+
+	defer r.Body.Close()
+	var req model.ModifyTradeRequest
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid request body: " + err.Error()})
+		return
+	}
+
+	resp, err := h.svc.ModifyTrade(ctx, tradeID, req)
+	if err != nil {
+		statusCode := http.StatusInternalServerError
+		if strings.Contains(strings.ToLower(err.Error()), "required") || strings.Contains(strings.ToLower(err.Error()), "must be") {
+			statusCode = http.StatusBadRequest
+		}
+		if strings.Contains(strings.ToLower(err.Error()), "no rows") {
+			statusCode = http.StatusNotFound
+		}
+		writeJSON(w, statusCode, errorResponse{Error: err.Error()})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (h *Handler) handleGetTradeByID(w http.ResponseWriter, r *http.Request) {

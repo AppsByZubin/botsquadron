@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/AppsByZubin/botsquadron/services/ordersystem/internal/model"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -41,6 +42,7 @@ type CreateTradeParams struct {
 	StartTrailAfter *float64
 	EntrySpot       *float64
 	SpotLTP         *float64
+	SpotTrailAnchor *float64
 	TrailPoints     *float64
 	Status          string
 	Taxes           *float64
@@ -48,6 +50,14 @@ type CreateTradeParams struct {
 	TagSL           string
 	Description     string
 	SLOrderQtyMap   map[string]int
+}
+
+type AccountSnapshotParams struct {
+	BotName     string
+	MonthYear   string
+	InitCash    *float64
+	CurrentTime time.Time
+	ProfitDelta float64
 }
 
 func New(pool *pgxpool.Pool, timezone string, accountInitialCash float64) (*Store, error) {
@@ -131,20 +141,127 @@ CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades (symbol);
 	if _, err := s.pool.Exec(ctx, fmt.Sprintf(`ALTER TABLE %s ADD COLUMN IF NOT EXISTS bot_name TEXT`, s.tradesTable)); err != nil {
 		return fmt.Errorf("ensure trades.bot_name column: %w", err)
 	}
+	if _, err := s.pool.Exec(ctx, fmt.Sprintf(`ALTER TABLE %s ADD COLUMN IF NOT EXISTS spot_trail_anchor NUMERIC(18,6)`, s.tradesTable)); err != nil {
+		return fmt.Errorf("ensure trades.spot_trail_anchor column: %w", err)
+	}
 
 	if _, err := s.pool.Exec(ctx, `
 CREATE TABLE IF NOT EXISTS accounts (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    bot_name TEXT,
-    year INTEGER,
-    month INTEGER,
-    initial_cash NUMERIC(18,6),
+    botname TEXT,
+    month_year TEXT,
+    init_cash NUMERIC(18,6),
+    current_date TEXT,
     profit NUMERIC(18,6),
-    max_dradown NUMERIC(18,6)
+    max_drawdown NUMERIC(18,6)
 );
-CREATE UNIQUE INDEX IF NOT EXISTS uq_accounts_bot_year_month ON accounts (bot_name, year, month);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_accounts_bot_month_date ON accounts (botname, month_year, current_date);
+CREATE INDEX IF NOT EXISTS idx_accounts_bot_month_year ON accounts (botname, month_year);
 `); err != nil {
 		return fmt.Errorf("ensure accounts table: %w", err)
+	}
+
+	if _, err := s.pool.Exec(ctx, `ALTER TABLE accounts ADD COLUMN IF NOT EXISTS botname TEXT`); err != nil {
+		return fmt.Errorf("ensure accounts.botname column: %w", err)
+	}
+	if _, err := s.pool.Exec(ctx, `ALTER TABLE accounts ADD COLUMN IF NOT EXISTS month_year TEXT`); err != nil {
+		return fmt.Errorf("ensure accounts.month_year column: %w", err)
+	}
+	if _, err := s.pool.Exec(ctx, `ALTER TABLE accounts ADD COLUMN IF NOT EXISTS init_cash NUMERIC(18,6)`); err != nil {
+		return fmt.Errorf("ensure accounts.init_cash column: %w", err)
+	}
+	if _, err := s.pool.Exec(ctx, `ALTER TABLE accounts ADD COLUMN IF NOT EXISTS current_date TEXT`); err != nil {
+		return fmt.Errorf("ensure accounts.current_date column: %w", err)
+	}
+	if _, err := s.pool.Exec(ctx, `ALTER TABLE accounts ADD COLUMN IF NOT EXISTS profit NUMERIC(18,6)`); err != nil {
+		return fmt.Errorf("ensure accounts.profit column: %w", err)
+	}
+	if _, err := s.pool.Exec(ctx, `ALTER TABLE accounts ADD COLUMN IF NOT EXISTS max_drawdown NUMERIC(18,6)`); err != nil {
+		return fmt.Errorf("ensure accounts.max_drawdown column: %w", err)
+	}
+
+	if _, err := s.pool.Exec(ctx, `
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'accounts'
+          AND column_name = 'bot_name'
+    ) THEN
+        UPDATE accounts
+        SET botname = COALESCE(NULLIF(BTRIM(botname), ''), NULLIF(BTRIM(bot_name), ''))
+        WHERE botname IS NULL OR BTRIM(botname) = '';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'accounts'
+          AND column_name = 'initial_cash'
+    ) THEN
+        UPDATE accounts
+        SET init_cash = COALESCE(init_cash, initial_cash)
+        WHERE init_cash IS NULL;
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'accounts'
+          AND column_name = 'max_dradown'
+    ) THEN
+        UPDATE accounts
+        SET max_drawdown = COALESCE(
+            max_drawdown,
+            CASE
+                WHEN max_dradown > 0 THEN -ABS(max_dradown)
+                ELSE max_dradown
+            END
+        )
+        WHERE max_drawdown IS NULL;
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'accounts'
+          AND column_name = 'year'
+    ) AND EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'accounts'
+          AND column_name = 'month'
+    ) THEN
+        UPDATE accounts
+        SET month_year = COALESCE(
+                NULLIF(BTRIM(month_year), ''),
+                LPAD(month::text, 2, '0') || year::text
+            ),
+            current_date = COALESCE(
+                NULLIF(BTRIM(current_date), ''),
+                TO_CHAR(MAKE_DATE(year, month, 1), 'DD-MM-YYYY')
+            )
+        WHERE year IS NOT NULL
+          AND month IS NOT NULL
+          AND month BETWEEN 1 AND 12
+          AND (
+                month_year IS NULL OR BTRIM(month_year) = ''
+                OR current_date IS NULL OR BTRIM(current_date) = ''
+          );
+    END IF;
+
+    UPDATE accounts
+    SET profit = COALESCE(profit, 0),
+        max_drawdown = COALESCE(max_drawdown, 0);
+END
+$$;`); err != nil {
+		return fmt.Errorf("backfill accounts daily columns: %w", err)
 	}
 
 	if _, err := s.pool.Exec(ctx, fmt.Sprintf(`ALTER TABLE %s ADD COLUMN IF NOT EXISTS account_id UUID`, s.tradesTable)); err != nil {
@@ -172,6 +289,42 @@ $$;`, tradesTableName, s.tradesTable)); err != nil {
 	}
 
 	return nil
+}
+
+func (s *Store) UpsertAccountSnapshot(ctx context.Context, params AccountSnapshotParams) (string, error) {
+	currentTime := params.CurrentTime
+	if currentTime.IsZero() {
+		currentTime = time.Now()
+	}
+	currentTime = currentTime.In(s.loc)
+
+	botName := normalizeBotName(params.BotName)
+	monthYear := normalizeMonthYear(params.MonthYear, currentTime)
+	currentDate := currentTime.Format("02-01-2006")
+
+	initCash, err := s.resolveAccountInitCash(ctx, botName, monthYear, params.InitCash)
+	if err != nil {
+		return "", err
+	}
+
+	var accountID string
+	if err := s.pool.QueryRow(ctx, `
+INSERT INTO accounts (botname, month_year, init_cash, current_date, profit, max_drawdown)
+VALUES ($1, $2, $3, $4, $5, CASE WHEN $5 < 0 THEN $5 ELSE 0 END)
+ON CONFLICT (botname, month_year, current_date)
+DO UPDATE SET
+    init_cash = CASE
+        WHEN COALESCE(accounts.init_cash, 0) = 0 AND EXCLUDED.init_cash > 0 THEN EXCLUDED.init_cash
+        ELSE accounts.init_cash
+    END,
+    profit = COALESCE(accounts.profit, 0) + EXCLUDED.profit,
+    max_drawdown = LEAST(COALESCE(accounts.max_drawdown, 0), COALESCE(accounts.profit, 0) + EXCLUDED.profit)
+RETURNING id::text
+`, botName, monthYear, initCash, currentDate, params.ProfitDelta).Scan(&accountID); err != nil {
+		return "", fmt.Errorf("upsert account snapshot: %w", err)
+	}
+
+	return accountID, nil
 }
 
 func (s *Store) normalizeTradesTable(ctx context.Context) error {
@@ -247,6 +400,7 @@ INSERT INTO %s (
     start_trail_after,
     entry_spot,
     spot_ltp,
+    spot_trail_anchor,
     trail_points,
     status,
     taxes,
@@ -259,7 +413,7 @@ INSERT INTO %s (
     $8::jsonb,
     $9::jsonb,
     $10,$11,$12,$13,$14,$15,
-    $16,$17,$18,$19,$20,$21,$22,$23,$24,$25::jsonb
+    $16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26::jsonb
 )
 RETURNING id::text`, s.tradesTable)
 
@@ -283,6 +437,7 @@ RETURNING id::text`, s.tradesTable)
 		nullFloatPtr(params.StartTrailAfter),
 		nullFloatPtr(params.EntrySpot),
 		nullFloatPtr(params.SpotLTP),
+		nullFloatPtr(params.SpotTrailAnchor),
 		nullFloatPtr(params.TrailPoints),
 		nullIfEmpty(params.Status),
 		nullFloatPtr(params.Taxes),
@@ -311,6 +466,7 @@ SELECT
     COALESCE(validity, ''),
     COALESCE(entry_order_ids, '[]'::jsonb),
     COALESCE(sl_order_ids, '[]'::jsonb),
+    COALESCE(sl_order_qty_map, '{}'::jsonb),
     COALESCE(target_order_id, ''),
     COALESCE(entry_price, 0)::float8,
     COALESCE(target, 0)::float8,
@@ -320,6 +476,7 @@ SELECT
     COALESCE(start_trail_after, 0)::float8,
     COALESCE(entry_spot, 0)::float8,
     COALESCE(spot_ltp, 0)::float8,
+    COALESCE(spot_trail_anchor, 0)::float8,
     COALESCE(trail_points, 0)::float8,
     COALESCE(status, ''),
     COALESCE("timestamp", NOW()),
@@ -337,6 +494,7 @@ LIMIT 1`, s.tradesTable)
 	var trade model.Trade
 	var entryOrderIDsRaw []byte
 	var slOrderIDsRaw []byte
+	var slOrderQtyMapRaw []byte
 	var exitTime sql.NullTime
 
 	err := s.pool.QueryRow(ctx, query, strings.TrimSpace(tradeID)).Scan(
@@ -351,6 +509,7 @@ LIMIT 1`, s.tradesTable)
 		&trade.Validity,
 		&entryOrderIDsRaw,
 		&slOrderIDsRaw,
+		&slOrderQtyMapRaw,
 		&trade.TargetOrderID,
 		&trade.EntryPrice,
 		&trade.Target,
@@ -360,6 +519,7 @@ LIMIT 1`, s.tradesTable)
 		&trade.StartTrailAfter,
 		&trade.EntrySpot,
 		&trade.SpotLTP,
+		&trade.SpotTrailAnchor,
 		&trade.TrailPoints,
 		&trade.Status,
 		&trade.Timestamp,
@@ -380,6 +540,9 @@ LIMIT 1`, s.tradesTable)
 	}
 	if len(slOrderIDsRaw) > 0 {
 		_ = json.Unmarshal(slOrderIDsRaw, &trade.SLOrderIDs)
+	}
+	if len(slOrderQtyMapRaw) > 0 {
+		_ = json.Unmarshal(slOrderQtyMapRaw, &trade.SLOrderQtyMap)
 	}
 	if exitTime.Valid {
 		t := exitTime.Time
@@ -454,6 +617,27 @@ func (s *Store) UpdateTradeStatus(ctx context.Context, tradeID string, status st
 	return nil
 }
 
+func (s *Store) UpdateTrailingStateByTradeID(ctx context.Context, tradeID string, stoploss *float64, slLimit *float64, spotTrailAnchor *float64) error {
+	if strings.TrimSpace(tradeID) == "" {
+		return fmt.Errorf("trade id is required")
+	}
+
+	query := fmt.Sprintf(`
+UPDATE %s
+SET
+    stoploss = COALESCE($2::numeric, stoploss),
+    sl_limit = COALESCE($3::numeric, sl_limit),
+    spot_trail_anchor = COALESCE($4::numeric, spot_trail_anchor)
+WHERE exit_time IS NULL
+  AND id::text = $1`, s.tradesTable)
+
+	if _, err := s.pool.Exec(ctx, query, strings.TrimSpace(tradeID), nullFloatPtr(stoploss), nullFloatPtr(slLimit), nullFloatPtr(spotTrailAnchor)); err != nil {
+		return fmt.Errorf("update trailing state by trade id: %w", err)
+	}
+
+	return nil
+}
+
 func (s *Store) MarkTradeClosedFromSL(ctx context.Context, tradeID string, exitPrice float64, additionalTaxes float64, exitStatus string) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -511,31 +695,31 @@ WHERE id::text = $1
 		return nil
 	}
 
-	botName = strings.TrimSpace(botName)
-	if botName == "" {
-		botName = "default"
-	}
-
 	now := time.Now().In(s.loc)
-	year, month, _ := now.Date()
+	botName = normalizeBotName(botName)
+	monthYear := normalizeMonthYear("", now)
+	currentDate := now.Format("02-01-2006")
+
+	initCash, err := s.resolveAccountInitCashTx(ctx, tx, botName, monthYear, nil)
+	if err != nil {
+		return err
+	}
 
 	var accountID string
 	if err := tx.QueryRow(ctx, `
-INSERT INTO accounts (bot_name, year, month, initial_cash, profit, max_dradown)
-VALUES ($1, $2, $3, $4, $5, CASE WHEN $5 < 0 THEN ABS($5) ELSE 0 END)
-ON CONFLICT (bot_name, year, month)
+INSERT INTO accounts (botname, month_year, init_cash, current_date, profit, max_drawdown)
+VALUES ($1, $2, $3, $4, $5, CASE WHEN $5 < 0 THEN $5 ELSE 0 END)
+ON CONFLICT (botname, month_year, current_date)
 DO UPDATE SET
-    profit = accounts.profit + EXCLUDED.profit,
-    max_dradown = GREATEST(
-        accounts.max_dradown,
-        CASE
-            WHEN (accounts.profit + EXCLUDED.profit) < 0 THEN ABS(accounts.profit + EXCLUDED.profit)
-            ELSE 0
-        END
-    )
+    init_cash = CASE
+        WHEN COALESCE(accounts.init_cash, 0) = 0 AND EXCLUDED.init_cash > 0 THEN EXCLUDED.init_cash
+        ELSE accounts.init_cash
+    END,
+    profit = COALESCE(accounts.profit, 0) + EXCLUDED.profit,
+    max_drawdown = LEAST(COALESCE(accounts.max_drawdown, 0), COALESCE(accounts.profit, 0) + EXCLUDED.profit)
 RETURNING id::text
-`, botName, year, int(month), s.accountInitialCash, pnl).Scan(&accountID); err != nil {
-		return fmt.Errorf("upsert accounts pnl: %w", err)
+`, botName, monthYear, initCash, currentDate, pnl).Scan(&accountID); err != nil {
+		return fmt.Errorf("upsert account daily pnl: %w", err)
 	}
 
 	if _, err := tx.Exec(ctx, fmt.Sprintf(`UPDATE %s SET account_id = $2 WHERE id::text = $1`, s.tradesTable), strings.TrimSpace(tradeID), accountID); err != nil {
@@ -583,4 +767,64 @@ func nullStringPtr(value *string) any {
 		return nil
 	}
 	return trimmed
+}
+
+func normalizeBotName(botName string) string {
+	trimmed := strings.TrimSpace(botName)
+	if trimmed == "" {
+		return "default"
+	}
+	return trimmed
+}
+
+func normalizeMonthYear(monthYear string, currentTime time.Time) string {
+	digitsOnly := strings.Map(func(r rune) rune {
+		if r >= '0' && r <= '9' {
+			return r
+		}
+		return -1
+	}, strings.TrimSpace(monthYear))
+	if len(digitsOnly) == 6 {
+		return digitsOnly
+	}
+	return currentTime.Format("012006")
+}
+
+func (s *Store) resolveAccountInitCash(ctx context.Context, botName string, monthYear string, requested *float64) (float64, error) {
+	var existing float64
+	if err := s.pool.QueryRow(ctx, `
+SELECT COALESCE(MAX(init_cash), 0)::float8
+FROM accounts
+WHERE botname = $1
+  AND month_year = $2`, botName, monthYear).Scan(&existing); err != nil {
+		return 0, fmt.Errorf("resolve account init_cash: %w", err)
+	}
+
+	return resolveInitCashValue(requested, existing, s.accountInitialCash), nil
+}
+
+func (s *Store) resolveAccountInitCashTx(ctx context.Context, tx pgx.Tx, botName string, monthYear string, requested *float64) (float64, error) {
+	var existing float64
+	if err := tx.QueryRow(ctx, `
+SELECT COALESCE(MAX(init_cash), 0)::float8
+FROM accounts
+WHERE botname = $1
+  AND month_year = $2`, botName, monthYear).Scan(&existing); err != nil {
+		return 0, fmt.Errorf("resolve account init_cash in tx: %w", err)
+	}
+
+	return resolveInitCashValue(requested, existing, s.accountInitialCash), nil
+}
+
+func resolveInitCashValue(requested *float64, existing float64, fallback float64) float64 {
+	if requested != nil && *requested > 0 {
+		return *requested
+	}
+	if existing > 0 {
+		return existing
+	}
+	if fallback > 0 {
+		return fallback
+	}
+	return 0
 }
