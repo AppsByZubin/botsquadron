@@ -6,8 +6,9 @@
 
 - `POST /v1/trades` to create trade records from bots
 - Writes/updates PostgreSQL tables:
-  - `Trades` (or `trades` if lowercase exists)
+  - `trades`
   - `accounts`
+  - `trades.account_id` links to `accounts.id` after the trade is closed
 - In `APP_MODE=production`:
   - places entry order via Upstox Orders API
   - places SL order (when `stoploss` is provided)

@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 # Installs PostgreSQL on the VM, configures remote access for K3s pods,
-# creates database/user, and creates the "Trades" table.
+# creates database/user, and creates the "trades" table.
 #
 # Example:
 #   sudo DB_NAME=omsdb DB_USER=omsuser DB_PASS='change-me' \
@@ -24,7 +24,12 @@ K8S_NAMESPACE="${K8S_NAMESPACE:-botspace}"
 K8S_SERVICE_NAME="${K8S_SERVICE_NAME:-postgres-oms}"
 NODE_IP="${NODE_IP:-$(ip route get 1.1.1.1 | awk '{for(i=1;i<=NF;i++) if ($i=="src") {print $(i+1); exit}}')}"
 BIND_ADDRESS="${BIND_ADDRESS:-*}"
-OUTPUT_DIR="${OUTPUT_DIR:-$(pwd)}"
+INITIAL_DIR="$(pwd -P)"
+OUTPUT_DIR="${OUTPUT_DIR:-$INITIAL_DIR}"
+
+if [[ "$OUTPUT_DIR" != /* ]]; then
+  OUTPUT_DIR="${INITIAL_DIR}/${OUTPUT_DIR}"
+fi
 
 if [[ $EUID -ne 0 ]]; then
   echo "Run this script as root or with sudo."
@@ -66,6 +71,12 @@ fi
 
 systemctl enable postgresql
 systemctl start postgresql
+
+# `sudo -u postgres` preserves the current working directory. When the script is
+# launched from a user home/repo path, the postgres user may not be able to
+# traverse that directory, which causes noisy "could not change directory"
+# warnings even though the SQL succeeds.
+cd /
 
 PG_CONF="$(sudo -u postgres psql -tAc 'SHOW config_file;' | xargs)"
 PG_HBA="$(sudo -u postgres psql -tAc 'SHOW hba_file;' | xargs)"
@@ -122,18 +133,26 @@ GRANT USAGE, CREATE ON SCHEMA public TO "${DB_USER}";
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 SQL
 
-if sudo -u postgres psql -d "$DB_NAME" -tAc "SELECT EXISTS (
-  SELECT 1
-  FROM pg_class c
-  JOIN pg_namespace n ON n.oid = c.relnamespace
-  WHERE n.nspname = 'public'
-    AND c.relkind = 'r'
-    AND lower(c.relname) = lower('Trades')
-);" | grep -q t; then
+sudo -u postgres psql -d "$DB_NAME" <<SQL
+DO \
+\$\$\
+BEGIN
+  IF to_regclass('public."Trades"') IS NOT NULL AND to_regclass('public.trades') IS NOT NULL THEN
+    RAISE EXCEPTION 'Both public."Trades" and public.trades exist. Consolidate them before rerunning this script.';
+  END IF;
+
+  IF to_regclass('public."Trades"') IS NOT NULL THEN
+    ALTER TABLE "Trades" RENAME TO trades;
+  END IF;
+END
+\$\$;
+SQL
+
+if sudo -u postgres psql -d "$DB_NAME" -tAc "SELECT to_regclass('public.trades') IS NOT NULL;" | grep -q t; then
   echo "A trades table already exists in database \"${DB_NAME}\". Skipping table creation."
 else
   sudo -u postgres psql -d "$DB_NAME" <<SQL
-CREATE TABLE "Trades" (
+CREATE TABLE trades (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     symbol TEXT,
     instrument_token TEXT,
@@ -166,16 +185,15 @@ CREATE TABLE "Trades" (
     sl_order_qty_map JSONB DEFAULT '{}'::jsonb
 );
 
-ALTER TABLE "Trades" OWNER TO "${DB_USER}";
-GRANT ALL PRIVILEGES ON TABLE "Trades" TO "${DB_USER}";
-CREATE INDEX IF NOT EXISTS idx_trades_timestamp ON "Trades" ("timestamp");
-CREATE INDEX IF NOT EXISTS idx_trades_status ON "Trades" (status);
-CREATE INDEX IF NOT EXISTS idx_trades_symbol ON "Trades" (symbol);
+ALTER TABLE trades OWNER TO "${DB_USER}";
+GRANT ALL PRIVILEGES ON TABLE trades TO "${DB_USER}";
+CREATE INDEX IF NOT EXISTS idx_trades_timestamp ON trades ("timestamp");
+CREATE INDEX IF NOT EXISTS idx_trades_status ON trades (status);
+CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades (symbol);
 SQL
 fi
 
 sudo -u postgres psql -d "$DB_NAME" <<SQL
-ALTER TABLE IF EXISTS "Trades" ADD COLUMN IF NOT EXISTS taxes NUMERIC(18,6);
 ALTER TABLE IF EXISTS trades ADD COLUMN IF NOT EXISTS taxes NUMERIC(18,6);
 
 CREATE TABLE IF NOT EXISTS accounts (
@@ -197,27 +215,6 @@ sudo -u postgres psql -d "$DB_NAME" <<SQL
 DO \
 \$\$\
 BEGIN
-  IF to_regclass('public."Trades"') IS NOT NULL AND EXISTS (
-    SELECT 1
-    FROM information_schema.columns
-    WHERE table_schema = 'public'
-      AND table_name = 'Trades'
-      AND column_name = 'id'
-  ) THEN
-    IF EXISTS (
-      SELECT 1
-      FROM information_schema.columns
-      WHERE table_schema = 'public'
-        AND table_name = 'Trades'
-        AND column_name = 'id'
-        AND udt_name <> 'uuid'
-    ) THEN
-      ALTER TABLE "Trades" ALTER COLUMN id DROP DEFAULT;
-      ALTER TABLE "Trades" ALTER COLUMN id TYPE uuid USING gen_random_uuid();
-    END IF;
-    ALTER TABLE "Trades" ALTER COLUMN id SET DEFAULT gen_random_uuid();
-  END IF;
-
   IF to_regclass('public.trades') IS NOT NULL AND EXISTS (
     SELECT 1
     FROM information_schema.columns
@@ -258,6 +255,27 @@ BEGIN
       ALTER TABLE accounts ALTER COLUMN id TYPE uuid USING gen_random_uuid();
     END IF;
     ALTER TABLE accounts ALTER COLUMN id SET DEFAULT gen_random_uuid();
+  END IF;
+END
+\$\$;
+SQL
+
+sudo -u postgres psql -d "$DB_NAME" <<SQL
+ALTER TABLE IF EXISTS trades ADD COLUMN IF NOT EXISTS account_id UUID;
+CREATE INDEX IF NOT EXISTS idx_trades_account_id ON trades (account_id);
+
+DO \
+\$\$\
+BEGIN
+  IF to_regclass('public.trades') IS NOT NULL AND NOT EXISTS (
+    SELECT 1
+    FROM pg_constraint
+    WHERE conname = 'fk_trades_account_id'
+      AND conrelid = to_regclass('public.trades')
+  ) THEN
+    ALTER TABLE trades
+      ADD CONSTRAINT fk_trades_account_id
+      FOREIGN KEY (account_id) REFERENCES accounts(id);
   END IF;
 END
 \$\$;
@@ -332,5 +350,5 @@ Then in your OMS deployment, import env from the generated secret:
         name: ${K8S_SERVICE_NAME}-secret
 
 SQL check:
-  sudo -u postgres psql -d ${DB_NAME} -c '\\d+ "Trades"'
+  sudo -u postgres psql -d ${DB_NAME} -c '\\d+ trades'
 EOF2

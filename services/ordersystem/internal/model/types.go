@@ -38,6 +38,7 @@ type CreateTradeResponse struct {
 
 type Trade struct {
 	ID              string     `json:"id"`
+	AccountID       string     `json:"account_id,omitempty"`
 	BotName         string     `json:"bot_name,omitempty"`
 	Symbol          string     `json:"symbol"`
 	InstrumentToken string     `json:"instrument_token"`

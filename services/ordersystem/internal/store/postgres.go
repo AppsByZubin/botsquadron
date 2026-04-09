@@ -13,6 +13,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+const tradesTableName = "trades"
+
 type Store struct {
 	pool               *pgxpool.Pool
 	tradesTable        string
@@ -71,14 +73,18 @@ func (s *Store) EnsureSchema(ctx context.Context) error {
 		return fmt.Errorf("ensure pgcrypto extension: %w", err)
 	}
 
+	if err := s.normalizeTradesTable(ctx); err != nil {
+		return err
+	}
+
 	if err := s.detectTradesTable(ctx); err != nil {
 		return err
 	}
 
 	if s.tradesTable == "" {
-		s.tradesTable = `"Trades"`
+		s.tradesTable = tradesTableName
 		if _, err := s.pool.Exec(ctx, `
-CREATE TABLE IF NOT EXISTS "Trades" (
+CREATE TABLE IF NOT EXISTS trades (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     bot_name TEXT,
     symbol TEXT,
@@ -111,11 +117,11 @@ CREATE TABLE IF NOT EXISTS "Trades" (
     description TEXT,
     sl_order_qty_map JSONB DEFAULT '{}'::jsonb
 );
-CREATE INDEX IF NOT EXISTS idx_trades_timestamp ON "Trades" ("timestamp");
-CREATE INDEX IF NOT EXISTS idx_trades_status ON "Trades" (status);
-CREATE INDEX IF NOT EXISTS idx_trades_symbol ON "Trades" (symbol);
+CREATE INDEX IF NOT EXISTS idx_trades_timestamp ON trades ("timestamp");
+CREATE INDEX IF NOT EXISTS idx_trades_status ON trades (status);
+CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades (symbol);
 `); err != nil {
-			return fmt.Errorf("create Trades table: %w", err)
+			return fmt.Errorf("create trades table: %w", err)
 		}
 	}
 
@@ -141,6 +147,55 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_accounts_bot_year_month ON accounts (bot_na
 		return fmt.Errorf("ensure accounts table: %w", err)
 	}
 
+	if _, err := s.pool.Exec(ctx, fmt.Sprintf(`ALTER TABLE %s ADD COLUMN IF NOT EXISTS account_id UUID`, s.tradesTable)); err != nil {
+		return fmt.Errorf("ensure trades.account_id column: %w", err)
+	}
+	if _, err := s.pool.Exec(ctx, fmt.Sprintf(`CREATE INDEX IF NOT EXISTS idx_trades_account_id ON %s (account_id)`, s.tradesTable)); err != nil {
+		return fmt.Errorf("ensure trades.account_id index: %w", err)
+	}
+	if _, err := s.pool.Exec(ctx, fmt.Sprintf(`
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'fk_trades_account_id'
+          AND conrelid = to_regclass('public.%s')
+    ) THEN
+        ALTER TABLE %s
+        ADD CONSTRAINT fk_trades_account_id
+        FOREIGN KEY (account_id) REFERENCES accounts(id);
+    END IF;
+END
+$$;`, tradesTableName, s.tradesTable)); err != nil {
+		return fmt.Errorf("ensure trades.account_id foreign key: %w", err)
+	}
+
+	return nil
+}
+
+func (s *Store) normalizeTradesTable(ctx context.Context) error {
+	var hasQuoted bool
+	var hasLower bool
+
+	err := s.pool.QueryRow(ctx, `
+SELECT
+    to_regclass('public."Trades"') IS NOT NULL,
+    to_regclass('public.trades') IS NOT NULL`).Scan(&hasQuoted, &hasLower)
+	if err != nil {
+		return fmt.Errorf("check trades table variants: %w", err)
+	}
+
+	if hasQuoted && hasLower {
+		return fmt.Errorf(`both public."Trades" and public.trades exist; consolidate them before starting ordersystem`)
+	}
+
+	if hasQuoted {
+		if _, err := s.pool.Exec(ctx, `ALTER TABLE "Trades" RENAME TO trades`); err != nil {
+			return fmt.Errorf(`rename public."Trades" to public.trades: %w`, err)
+		}
+	}
+
 	return nil
 }
 
@@ -148,7 +203,6 @@ func (s *Store) detectTradesTable(ctx context.Context) error {
 	var table string
 	err := s.pool.QueryRow(ctx, `
 SELECT CASE
-    WHEN to_regclass('public."Trades"') IS NOT NULL THEN '"Trades"'
     WHEN to_regclass('public.trades') IS NOT NULL THEN 'trades'
     ELSE ''
 END`).Scan(&table)
@@ -247,6 +301,7 @@ func (s *Store) GetTradeByID(ctx context.Context, tradeID string) (model.Trade, 
 	query := fmt.Sprintf(`
 SELECT
     id::text,
+    COALESCE(account_id::text, ''),
     COALESCE(bot_name, ''),
     COALESCE(symbol, ''),
     COALESCE(instrument_token, ''),
@@ -286,6 +341,7 @@ LIMIT 1`, s.tradesTable)
 
 	err := s.pool.QueryRow(ctx, query, strings.TrimSpace(tradeID)).Scan(
 		&trade.ID,
+		&trade.AccountID,
 		&trade.BotName,
 		&trade.Symbol,
 		&trade.InstrumentToken,
@@ -463,7 +519,8 @@ WHERE id::text = $1
 	now := time.Now().In(s.loc)
 	year, month, _ := now.Date()
 
-	if _, err := tx.Exec(ctx, `
+	var accountID string
+	if err := tx.QueryRow(ctx, `
 INSERT INTO accounts (bot_name, year, month, initial_cash, profit, max_dradown)
 VALUES ($1, $2, $3, $4, $5, CASE WHEN $5 < 0 THEN ABS($5) ELSE 0 END)
 ON CONFLICT (bot_name, year, month)
@@ -476,8 +533,13 @@ DO UPDATE SET
             ELSE 0
         END
     )
-`, botName, year, int(month), s.accountInitialCash, pnl); err != nil {
+RETURNING id::text
+`, botName, year, int(month), s.accountInitialCash, pnl).Scan(&accountID); err != nil {
 		return fmt.Errorf("upsert accounts pnl: %w", err)
+	}
+
+	if _, err := tx.Exec(ctx, fmt.Sprintf(`UPDATE %s SET account_id = $2 WHERE id::text = $1`, s.tradesTable), strings.TrimSpace(tradeID), accountID); err != nil {
+		return fmt.Errorf("link trade to account: %w", err)
 	}
 
 	if err := tx.Commit(ctx); err != nil {

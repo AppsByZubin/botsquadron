@@ -1,0 +1,36 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-oms
+  namespace: botspace
+spec:
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: postgres-oms
+  namespace: botspace
+subsets:
+  - addresses:
+      - ip: 192.168.59.137
+    ports:
+      - name: postgres
+        port: 5432
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: postgres-oms-secret
+  namespace: botspace
+type: Opaque
+stringData:
+  POSTGRES_HOST: postgres-oms.botspace.svc.cluster.local
+  POSTGRES_PORT: "5432"
+  POSTGRES_DB: omsdb
+  POSTGRES_USER: omsuser
+  POSTGRES_PASSWORD: password123
+  DATABASE_URL: postgresql://omsuser:password123@postgres-oms.botspace.svc.cluster.local:5432/omsdb?sslmode=disable
