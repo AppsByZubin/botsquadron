@@ -104,6 +104,9 @@ func (s *Store) EnsureSchema(ctx context.Context) error {
 	if err := s.ensureTradesSchema(ctx); err != nil {
 		return err
 	}
+	if err := s.ensureAccountUniqueness(ctx); err != nil {
+		return err
+	}
 	if err := s.ensureOrdersSchema(ctx); err != nil {
 		return err
 	}
@@ -213,6 +216,94 @@ BEGIN
 END
 $$;`); err != nil {
 		return fmt.Errorf("backfill accounts columns: %w", err)
+	}
+
+	return nil
+}
+
+func (s *Store) ensureAccountUniqueness(ctx context.Context) error {
+	if strings.TrimSpace(s.tradesTable) == "" {
+		return fmt.Errorf("trades table is not detected")
+	}
+
+	if _, err := s.pool.Exec(ctx, fmt.Sprintf(`
+WITH ranked AS (
+    SELECT
+        id,
+        FIRST_VALUE(id) OVER account_key AS keeper_id,
+        ROW_NUMBER() OVER account_key AS row_num
+    FROM accounts
+    WHERE NULLIF(BTRIM(botname), '') IS NOT NULL
+      AND NULLIF(BTRIM(curr_date), '') IS NOT NULL
+    WINDOW account_key AS (
+        PARTITION BY botname, curr_date
+        ORDER BY id::text
+    )
+),
+grouped AS (
+    SELECT
+        keeper_id,
+        SUM(COALESCE(a.net_profit, 0)) AS net_profit,
+        MAX(CASE WHEN COALESCE(a.init_cash, 0) > 0 THEN a.init_cash ELSE NULL END) AS init_cash
+    FROM ranked AS r
+    JOIN accounts AS a ON a.id = r.id
+    GROUP BY keeper_id
+)
+UPDATE accounts AS a
+SET
+    net_profit = COALESCE(grouped.net_profit, 0),
+    init_cash = CASE
+        WHEN COALESCE(a.init_cash, 0) > 0 THEN a.init_cash
+        WHEN grouped.init_cash IS NOT NULL THEN grouped.init_cash
+        ELSE a.init_cash
+    END
+FROM grouped
+WHERE a.id = grouped.keeper_id;
+
+WITH ranked AS (
+    SELECT
+        id,
+        FIRST_VALUE(id) OVER account_key AS keeper_id,
+        ROW_NUMBER() OVER account_key AS row_num
+    FROM accounts
+    WHERE NULLIF(BTRIM(botname), '') IS NOT NULL
+      AND NULLIF(BTRIM(curr_date), '') IS NOT NULL
+    WINDOW account_key AS (
+        PARTITION BY botname, curr_date
+        ORDER BY id::text
+    )
+)
+UPDATE %s AS t
+SET acct_id = ranked.keeper_id
+FROM ranked
+WHERE ranked.row_num > 1
+  AND t.acct_id = ranked.id;
+
+WITH ranked AS (
+    SELECT
+        id,
+        ROW_NUMBER() OVER account_key AS row_num
+    FROM accounts
+    WHERE NULLIF(BTRIM(botname), '') IS NOT NULL
+      AND NULLIF(BTRIM(curr_date), '') IS NOT NULL
+    WINDOW account_key AS (
+        PARTITION BY botname, curr_date
+        ORDER BY id::text
+    )
+)
+DELETE FROM accounts AS a
+USING ranked
+WHERE a.id = ranked.id
+  AND ranked.row_num > 1;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_accounts_bot_curr_date
+ON accounts (botname, curr_date)
+WHERE botname IS NOT NULL
+  AND BTRIM(botname) <> ''
+  AND curr_date IS NOT NULL
+  AND BTRIM(curr_date) <> '';
+`, s.tradesTable)); err != nil {
+		return fmt.Errorf("ensure account uniqueness: %w", err)
 	}
 
 	return nil
@@ -442,65 +533,58 @@ func (s *Store) createAccountTx(ctx context.Context, tx pgx.Tx, params CreateAcc
 	}
 
 	var account model.Account
-	err = tx.QueryRow(ctx, `
-SELECT id::text, COALESCE(botname, ''), COALESCE(curr_date, ''), COALESCE(month_year, ''), COALESCE(init_cash, 0)::float8, COALESCE(net_profit, 0)::float8
-FROM accounts
-WHERE botname = $1
-  AND curr_date = $2
-ORDER BY id
-LIMIT 1
-FOR UPDATE`, botName, currDate).Scan(&account.ID, &account.BotName, &account.CurrDate, &account.MonthYear, &account.InitCash, &account.NetProfit)
-	if err != nil && err != pgx.ErrNoRows {
-		return model.Account{}, fmt.Errorf("load account: %w", err)
-	}
-	if err == pgx.ErrNoRows {
-		if err := tx.QueryRow(ctx, `
+	if err := tx.QueryRow(ctx, `
 INSERT INTO accounts (botname, curr_date, month_year, init_cash, net_profit)
 VALUES ($1, $2, $3, $4, 0)
+ON CONFLICT (botname, curr_date)
+WHERE botname IS NOT NULL
+  AND BTRIM(botname) <> ''
+  AND curr_date IS NOT NULL
+  AND BTRIM(curr_date) <> ''
+DO UPDATE SET
+    init_cash = CASE
+        WHEN COALESCE(accounts.init_cash, 0) > 0 THEN accounts.init_cash
+        WHEN COALESCE(EXCLUDED.init_cash, 0) > 0 THEN EXCLUDED.init_cash
+        ELSE accounts.init_cash
+    END,
+    month_year = EXCLUDED.month_year,
+    net_profit = COALESCE(accounts.net_profit, 0)
 RETURNING id::text, COALESCE(botname, ''), COALESCE(curr_date, ''), COALESCE(month_year, ''), COALESCE(init_cash, 0)::float8, COALESCE(net_profit, 0)::float8`,
-			botName, currDate, monthYear, initCash,
-		).Scan(&account.ID, &account.BotName, &account.CurrDate, &account.MonthYear, &account.InitCash, &account.NetProfit); err != nil {
-			return model.Account{}, fmt.Errorf("insert account: %w", err)
-		}
-		return account, nil
-	}
-
-	if account.InitCash > 0 {
-		initCash = account.InitCash
-	}
-	if err := tx.QueryRow(ctx, `
-UPDATE accounts
-SET init_cash = $2,
-    month_year = $3
-WHERE id::text = $1
-RETURNING id::text, COALESCE(botname, ''), COALESCE(curr_date, ''), COALESCE(month_year, ''), COALESCE(init_cash, 0)::float8, COALESCE(net_profit, 0)::float8`,
-		account.ID, initCash, monthYear,
+		botName, currDate, monthYear, initCash,
 	).Scan(&account.ID, &account.BotName, &account.CurrDate, &account.MonthYear, &account.InitCash, &account.NetProfit); err != nil {
-		return model.Account{}, fmt.Errorf("update account: %w", err)
+		return model.Account{}, fmt.Errorf("upsert account: %w", err)
 	}
 
 	return account, nil
 }
 
 func (s *Store) GetAccountIDForBotDate(ctx context.Context, botName string, currDate string) (string, error) {
+	account, err := s.GetAccountByBotDate(ctx, botName, currDate)
+	if err != nil {
+		return "", err
+	}
+	return account.ID, nil
+}
+
+func (s *Store) GetAccountByBotDate(ctx context.Context, botName string, currDate string) (model.Account, error) {
 	currentTime := time.Now().In(s.loc)
 	botName = normalizeBotName(botName)
 	currDate = normalizeCurrDate(currDate, currentTime)
 
-	var accountID string
+	var account model.Account
 	if err := s.pool.QueryRow(ctx, `
-SELECT id::text
+SELECT id::text, COALESCE(botname, ''), COALESCE(curr_date, ''), COALESCE(month_year, ''), COALESCE(init_cash, 0)::float8, COALESCE(net_profit, 0)::float8
 FROM accounts
 WHERE botname = $1
   AND curr_date = $2
 ORDER BY id
-LIMIT 1`, botName, currDate).Scan(&accountID); err != nil {
+LIMIT 1`, botName, currDate).Scan(&account.ID, &account.BotName, &account.CurrDate, &account.MonthYear, &account.InitCash, &account.NetProfit); err != nil {
 		if err == pgx.ErrNoRows {
-			return "", fmt.Errorf("account row is required for bot_name=%s curr_date=%s; call POST /v1/accounts before creating trades", botName, currDate)
+			return model.Account{}, fmt.Errorf("account row not found for bot_name=%s curr_date=%s", botName, currDate)
 		}
-		return "", fmt.Errorf("load account for bot/date: %w", err)
+		return model.Account{}, fmt.Errorf("load account for bot/date: %w", err)
 	}
-	return accountID, nil
+	return account, nil
 }
 
 func (s *Store) refreshAccountNetProfitFromOrdersTx(ctx context.Context, tx pgx.Tx, accountID string) error {
@@ -747,6 +831,88 @@ LIMIT 1`, s.tradesTable)
 	applyOrderSummary(&trade)
 
 	return trade, nil
+}
+
+func (s *Store) ListTradesByAccountID(ctx context.Context, accountID string) ([]model.Trade, error) {
+	accountID = strings.TrimSpace(accountID)
+	if accountID == "" {
+		return nil, fmt.Errorf("account id is required")
+	}
+
+	rows, err := s.pool.Query(ctx, fmt.Sprintf(`
+SELECT
+    t.id::text,
+    COALESCE(t.acct_id::text, ''),
+    COALESCE(a.botname, ''),
+    COALESCE(t.symbol, ''),
+    COALESCE(t.instrument_token, ''),
+    COALESCE(t.side, ''),
+    COALESCE(t.qty, 0),
+    COALESCE(t.product, ''),
+    COALESCE(t.validity, ''),
+    COALESCE(t.tsl_active, false),
+    COALESCE(t.start_trail_after, 0)::float8,
+    COALESCE(t.entry_spot, 0)::float8,
+    COALESCE(t.spot_ltp, 0)::float8,
+    COALESCE(t.spot_trail_anchor, 0)::float8,
+    COALESCE(t.trail_points, 0)::float8,
+    COALESCE(t.status, ''),
+    COALESCE(t."timestamp", NOW()),
+    COALESCE(t.total_brokerage, 0)::float8,
+    COALESCE(t.tag_entry, ''),
+    COALESCE(t.tag_sl, ''),
+    COALESCE(t.description, '')
+FROM %s AS t
+LEFT JOIN accounts AS a ON a.id = t.acct_id
+WHERE t.acct_id::text = $1
+ORDER BY t."timestamp", t.id`, s.tradesTable), accountID)
+	if err != nil {
+		return nil, fmt.Errorf("query account trades: %w", err)
+	}
+	defer rows.Close()
+
+	trades := make([]model.Trade, 0)
+	for rows.Next() {
+		var trade model.Trade
+		if err := rows.Scan(
+			&trade.ID,
+			&trade.AccountID,
+			&trade.BotName,
+			&trade.Symbol,
+			&trade.InstrumentToken,
+			&trade.Side,
+			&trade.Qty,
+			&trade.Product,
+			&trade.Validity,
+			&trade.TSLActive,
+			&trade.StartTrailAfter,
+			&trade.EntrySpot,
+			&trade.SpotLTP,
+			&trade.SpotTrailAnchor,
+			&trade.TrailPoints,
+			&trade.Status,
+			&trade.Timestamp,
+			&trade.TotalBrokerage,
+			&trade.TagEntry,
+			&trade.TagSL,
+			&trade.Description,
+		); err != nil {
+			return nil, fmt.Errorf("scan account trade: %w", err)
+		}
+
+		orders, err := s.listOrdersByTradeID(ctx, trade.ID)
+		if err != nil {
+			return nil, err
+		}
+		trade.Orders = orders
+		applyOrderSummary(&trade)
+		trades = append(trades, trade)
+	}
+	if rows.Err() != nil {
+		return nil, fmt.Errorf("iterate account trades: %w", rows.Err())
+	}
+
+	return trades, nil
 }
 
 func (s *Store) listOrdersByTradeID(ctx context.Context, tradeID string) ([]model.Order, error) {

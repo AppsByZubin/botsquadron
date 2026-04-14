@@ -56,6 +56,39 @@ func (s *Service) CreateAccount(ctx context.Context, req model.CreateAccountRequ
 	}, nil
 }
 
+func (s *Service) GetAccountDetails(ctx context.Context, req model.GetAccountDetailsRequest) (model.AccountDetailsResponse, error) {
+	if strings.TrimSpace(req.BotName) == "" {
+		return model.AccountDetailsResponse{}, fmt.Errorf("bot_name is required")
+	}
+	if strings.TrimSpace(req.CurrDate) == "" {
+		return model.AccountDetailsResponse{}, fmt.Errorf("curr_date is required")
+	}
+	if s.store == nil {
+		return model.AccountDetailsResponse{}, fmt.Errorf("store is not configured")
+	}
+
+	account, err := s.store.GetAccountByBotDate(ctx, req.BotName, req.CurrDate)
+	if err != nil {
+		return model.AccountDetailsResponse{}, err
+	}
+
+	trades, err := s.store.ListTradesByAccountID(ctx, account.ID)
+	if err != nil {
+		return model.AccountDetailsResponse{}, fmt.Errorf("load account trades: %w", err)
+	}
+
+	return model.AccountDetailsResponse{
+		AccountID: account.ID,
+		BotName:   account.BotName,
+		CurrDate:  account.CurrDate,
+		MonthYear: account.MonthYear,
+		InitCash:  account.InitCash,
+		NetProfit: account.NetProfit,
+		Trades:    trades,
+		Message:   "account details loaded",
+	}, nil
+}
+
 func (s *Service) CreateTrade(ctx context.Context, req model.CreateTradeRequest) (model.CreateTradeResponse, error) {
 	if strings.TrimSpace(req.BotName) == "" {
 		return model.CreateTradeResponse{}, fmt.Errorf("bot_name is required")
@@ -154,7 +187,7 @@ func (s *Service) CreateTrade(ctx context.Context, req model.CreateTradeRequest)
 		}
 	}
 
-	accountID, err := s.store.GetAccountIDForBotDate(ctx, req.BotName, "")
+	accountID, err := s.store.GetAccountIDForBotDate(ctx, req.BotName, req.CurrDate)
 	if err != nil {
 		return model.CreateTradeResponse{}, fmt.Errorf("load account for trade: %w", err)
 	}

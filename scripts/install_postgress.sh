@@ -381,6 +381,82 @@ sudo -u postgres psql -d "$DB_NAME" <<SQL
 ALTER TABLE IF EXISTS trades ADD COLUMN IF NOT EXISTS acct_id UUID;
 CREATE INDEX IF NOT EXISTS idx_trades_acct_id ON trades (acct_id);
 
+WITH ranked AS (
+  SELECT
+    id,
+    FIRST_VALUE(id) OVER account_key AS keeper_id,
+    ROW_NUMBER() OVER account_key AS row_num
+  FROM accounts
+  WHERE NULLIF(BTRIM(botname), '') IS NOT NULL
+    AND NULLIF(BTRIM(curr_date), '') IS NOT NULL
+  WINDOW account_key AS (
+    PARTITION BY botname, curr_date
+    ORDER BY id::text
+  )
+),
+grouped AS (
+  SELECT
+    keeper_id,
+    SUM(COALESCE(a.net_profit, 0)) AS net_profit,
+    MAX(CASE WHEN COALESCE(a.init_cash, 0) > 0 THEN a.init_cash ELSE NULL END) AS init_cash
+  FROM ranked AS r
+  JOIN accounts AS a ON a.id = r.id
+  GROUP BY keeper_id
+)
+UPDATE accounts AS a
+SET
+  net_profit = COALESCE(grouped.net_profit, 0),
+  init_cash = CASE
+    WHEN COALESCE(a.init_cash, 0) > 0 THEN a.init_cash
+    WHEN grouped.init_cash IS NOT NULL THEN grouped.init_cash
+    ELSE a.init_cash
+  END
+FROM grouped
+WHERE a.id = grouped.keeper_id;
+
+WITH ranked AS (
+  SELECT
+    id,
+    FIRST_VALUE(id) OVER account_key AS keeper_id,
+    ROW_NUMBER() OVER account_key AS row_num
+  FROM accounts
+  WHERE NULLIF(BTRIM(botname), '') IS NOT NULL
+    AND NULLIF(BTRIM(curr_date), '') IS NOT NULL
+  WINDOW account_key AS (
+    PARTITION BY botname, curr_date
+    ORDER BY id::text
+  )
+)
+UPDATE trades AS t
+SET acct_id = ranked.keeper_id
+FROM ranked
+WHERE ranked.row_num > 1
+  AND t.acct_id = ranked.id;
+
+WITH ranked AS (
+  SELECT
+    id,
+    ROW_NUMBER() OVER account_key AS row_num
+  FROM accounts
+  WHERE NULLIF(BTRIM(botname), '') IS NOT NULL
+    AND NULLIF(BTRIM(curr_date), '') IS NOT NULL
+  WINDOW account_key AS (
+    PARTITION BY botname, curr_date
+    ORDER BY id::text
+  )
+)
+DELETE FROM accounts AS a
+USING ranked
+WHERE a.id = ranked.id
+  AND ranked.row_num > 1;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_accounts_bot_curr_date
+ON accounts (botname, curr_date)
+WHERE botname IS NOT NULL
+  AND BTRIM(botname) <> ''
+  AND curr_date IS NOT NULL
+  AND BTRIM(curr_date) <> '';
+
 DO \
 \$\$\
 BEGIN

@@ -4,6 +4,7 @@
 
 ## Features
 
+- `POST /v1/accounts` to idempotently prepare a daily account row for a bot
 - `POST /v1/trades` to create trade records from bots
 - `POST /v1/trades/{id}/modify` to modify all SL broker orders for a trade
 - Writes/updates PostgreSQL tables:
@@ -22,16 +23,47 @@
 ## API Endpoints
 
 - `GET /healthz`
+- `POST /v1/accounts`
+- `GET /v1/accounts?bot_name=<bot>&curr_date=<DD-MM-YYYY>`
 - `POST /v1/trades`
 - `POST /v1/trades/{id}/modify`
 - `GET /v1/trades/{id}`
 
+### Create Account Request Example
+
+Repeated calls with the same `bot_name` and `curr_date` return the same account row.
+
+```json
+{
+  "bot_name": "nifty50_pcr_vwap_ema_orb",
+  "curr_date": "14-04-2026",
+  "init_cash": 100000
+}
+```
+
+Response includes account fields only:
+
+- `account_id`, `bot_name`, `curr_date`, `month_year`, `init_cash`, `net_profit`
+
+### Get Account Details
+
+Use this after a bot restart to resync the bot's local state from OMS.
+
+```bash
+curl 'http://localhost:8081/v1/accounts?bot_name=nifty50_pcr_vwap_ema_orb&curr_date=14-04-2026'
+```
+
+Response includes account fields plus `trades`, with each trade carrying its nested `orders`.
+
 ### Create Trade Request Example
+
+Trade creation also prepares the daily account row for the bot before storing the trade.
 
 ```json
 {
   "bot_name": "nifty50_pcr_vwap_ema_orb",
   "init_cash": 100000,
+  "curr_date": "14-04-2026",
   "month_year": "042026",
   "mode": "production",
   "symbol": "NIFTY24APR23500CE",

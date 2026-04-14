@@ -5,6 +5,7 @@ import "time"
 type CreateTradeRequest struct {
 	BotName         string   `json:"bot_name"`
 	InitCash        *float64 `json:"init_cash,omitempty"`
+	CurrDate        string   `json:"curr_date,omitempty"`
 	MonthYear       string   `json:"month_year,omitempty"`
 	Mode            string   `json:"mode,omitempty"`
 	Symbol          string   `json:"symbol"`
@@ -46,6 +47,11 @@ type CreateAccountRequest struct {
 	InitCash  *float64 `json:"init_cash,omitempty"`
 }
 
+type GetAccountDetailsRequest struct {
+	BotName  string `json:"bot_name"`
+	CurrDate string `json:"curr_date"`
+}
+
 type AccountResponse struct {
 	AccountID string  `json:"account_id"`
 	BotName   string  `json:"bot_name"`
@@ -53,6 +59,17 @@ type AccountResponse struct {
 	MonthYear string  `json:"month_year"`
 	InitCash  float64 `json:"init_cash"`
 	NetProfit float64 `json:"net_profit"`
+	Message   string  `json:"message,omitempty"`
+}
+
+type AccountDetailsResponse struct {
+	AccountID string  `json:"account_id"`
+	BotName   string  `json:"bot_name"`
+	CurrDate  string  `json:"curr_date"`
+	MonthYear string  `json:"month_year"`
+	InitCash  float64 `json:"init_cash"`
+	NetProfit float64 `json:"net_profit"`
+	Trades    []Trade `json:"trades"`
 	Message   string  `json:"message,omitempty"`
 }
 

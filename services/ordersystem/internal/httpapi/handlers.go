@@ -9,26 +9,34 @@ import (
 	"time"
 
 	"github.com/AppsByZubin/botsquadron/services/ordersystem/internal/model"
-	"github.com/AppsByZubin/botsquadron/services/ordersystem/internal/service"
 )
 
 type Handler struct {
-	svc            *service.Service
+	business       Business
 	requestTimeout time.Duration
+}
+
+type Business interface {
+	CreateAccount(context.Context, model.CreateAccountRequest) (model.AccountResponse, error)
+	CreateTrade(context.Context, model.CreateTradeRequest) (model.CreateTradeResponse, error)
+	GetAccountDetails(context.Context, model.GetAccountDetailsRequest) (model.AccountDetailsResponse, error)
+	GetTradeByID(context.Context, string) (model.Trade, error)
+	ModifyTrade(context.Context, string, model.ModifyTradeRequest) (model.ModifyTradeResponse, error)
 }
 
 type errorResponse struct {
 	Error string `json:"error"`
 }
 
-func New(svc *service.Service, requestTimeout time.Duration) *Handler {
-	return &Handler{svc: svc, requestTimeout: requestTimeout}
+func New(business Business, requestTimeout time.Duration) *Handler {
+	return &Handler{business: business, requestTimeout: requestTimeout}
 }
 
 func (h *Handler) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", h.handleHealth)
 	mux.HandleFunc("POST /v1/accounts", h.handleCreateAccount)
+	mux.HandleFunc("GET /v1/accounts", h.handleGetAccountDetails)
 	mux.HandleFunc("POST /v1/trades", h.handleCreateTrade)
 	mux.HandleFunc("POST /v1/trades/{id}/modify", h.handleModifyTrade)
 	mux.HandleFunc("GET /v1/trades/{id}", h.handleGetTradeByID)
@@ -52,7 +60,7 @@ func (h *Handler) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp, err := h.svc.CreateAccount(ctx, req)
+	resp, err := h.business.CreateAccount(ctx, req)
 	if err != nil {
 		statusCode := http.StatusInternalServerError
 		if strings.Contains(strings.ToLower(err.Error()), "required") || strings.Contains(strings.ToLower(err.Error()), "must be") {
@@ -63,6 +71,37 @@ func (h *Handler) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusCreated, resp)
+}
+
+func (h *Handler) handleGetAccountDetails(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), h.requestTimeout)
+	defer cancel()
+
+	query := r.URL.Query()
+	botName := strings.TrimSpace(query.Get("bot_name"))
+	if botName == "" {
+		botName = strings.TrimSpace(query.Get("botname"))
+	}
+	req := model.GetAccountDetailsRequest{
+		BotName:  botName,
+		CurrDate: strings.TrimSpace(query.Get("curr_date")),
+	}
+
+	resp, err := h.business.GetAccountDetails(ctx, req)
+	if err != nil {
+		statusCode := http.StatusInternalServerError
+		lowerErr := strings.ToLower(err.Error())
+		if strings.Contains(lowerErr, "required") || strings.Contains(lowerErr, "must be") {
+			statusCode = http.StatusBadRequest
+		}
+		if strings.Contains(lowerErr, "not found") || strings.Contains(lowerErr, "no rows") {
+			statusCode = http.StatusNotFound
+		}
+		writeJSON(w, statusCode, errorResponse{Error: err.Error()})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (h *Handler) handleCreateTrade(w http.ResponseWriter, r *http.Request) {
@@ -78,7 +117,7 @@ func (h *Handler) handleCreateTrade(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp, err := h.svc.CreateTrade(ctx, req)
+	resp, err := h.business.CreateTrade(ctx, req)
 	if err != nil {
 		statusCode := http.StatusInternalServerError
 		if strings.Contains(strings.ToLower(err.Error()), "required") || strings.Contains(strings.ToLower(err.Error()), "must be") {
@@ -110,7 +149,7 @@ func (h *Handler) handleModifyTrade(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp, err := h.svc.ModifyTrade(ctx, tradeID, req)
+	resp, err := h.business.ModifyTrade(ctx, tradeID, req)
 	if err != nil {
 		statusCode := http.StatusInternalServerError
 		if strings.Contains(strings.ToLower(err.Error()), "required") || strings.Contains(strings.ToLower(err.Error()), "must be") {
@@ -136,7 +175,7 @@ func (h *Handler) handleGetTradeByID(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), h.requestTimeout)
 	defer cancel()
 
-	trade, err := h.svc.GetTradeByID(ctx, tradeID)
+	trade, err := h.business.GetTradeByID(ctx, tradeID)
 	if err != nil {
 		log.Printf("get trade failed for trade_id=%s: %v", tradeID, err)
 		if strings.Contains(strings.ToLower(err.Error()), "no rows") {
