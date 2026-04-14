@@ -118,6 +118,7 @@ Optional:
 - `APP_TIMEZONE` default `Asia/Kolkata`
 - `ORDERSYSTEM_REQUEST_TIMEOUT` default `15s`
 - `ORDERSYSTEM_SL_POLL_INTERVAL` default `5s`
+- `ORDERSYSTEM_SL_REFRESH_MIN_INTERVAL` default `3s`
 - `ACCOUNT_INITIAL_CASH` default `0`
 
 Upstox:
@@ -127,7 +128,10 @@ Upstox:
 - `UPSTOX_ORDER_PLACE_PATH` default `/v3/order/place`
 - `UPSTOX_ORDER_MODIFY_PATH` default `/v3/order/modify`
 - `UPSTOX_ORDER_DETAILS_PATH` default `/v2/order/details`
+- `UPSTOX_ORDER_TRADES_PATH` default `/v2/order/trades`
 - `UPSTOX_API_VERSION` default `2.0`
+- `ORDERSYSTEM_UPSTOX_STATUS_REQUEST_GAP` default `500ms`
+- `ORDERSYSTEM_UPSTOX_STATUS_CACHE_TTL` default `2s`
 
 ## Run
 

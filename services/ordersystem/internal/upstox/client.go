@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/AppsByZubin/botsquadron/services/ordersystem/internal/config"
@@ -22,7 +24,15 @@ type Client struct {
 	orderPlacePath   string
 	orderModifyPath  string
 	orderDetailsPath string
+	orderTradesPath  string
 	apiVersion       string
+
+	statusLimiter  *requestGate
+	statusCacheTTL time.Duration
+	brokerCacheMu  sync.Mutex
+	brokerCache    map[string]brokerCacheEntry
+	brokerNextOK   map[string]time.Time
+	brokerBackoff  map[string]time.Duration
 }
 
 type PlaceOrderRequest struct {
@@ -68,9 +78,46 @@ type OrderStatus struct {
 	RawData      json.RawMessage
 }
 
+type OrderTrades struct {
+	OrderID      string
+	Filled       bool
+	Status       string
+	AveragePrice *float64
+	RawData      json.RawMessage
+}
+
 type envelope struct {
 	Status string          `json:"status"`
 	Data   json.RawMessage `json:"data"`
+}
+
+type brokerCacheEntry struct {
+	fetchedAt time.Time
+	data      json.RawMessage
+}
+
+type requestGate struct {
+	mu       sync.Mutex
+	next     time.Time
+	interval time.Duration
+}
+
+type RateLimitedError struct {
+	Operation string
+	OrderID   string
+	RetryAt   time.Time
+}
+
+func (e RateLimitedError) Error() string {
+	if !e.RetryAt.IsZero() {
+		return fmt.Sprintf("upstox %s rate limited for order_id=%s; retry after %s", e.Operation, e.OrderID, time.Until(e.RetryAt).Round(time.Millisecond))
+	}
+	return fmt.Sprintf("upstox %s rate limited for order_id=%s", e.Operation, e.OrderID)
+}
+
+func IsRateLimited(err error) bool {
+	var rateErr RateLimitedError
+	return errors.As(err, &rateErr)
 }
 
 func NewClient(cfg config.Config) *Client {
@@ -81,7 +128,13 @@ func NewClient(cfg config.Config) *Client {
 		orderPlacePath:   cfg.UpstoxOrderPlacePath,
 		orderModifyPath:  cfg.UpstoxOrderModifyPath,
 		orderDetailsPath: cfg.UpstoxOrderDetailsPath,
+		orderTradesPath:  cfg.UpstoxOrderTradesPath,
 		apiVersion:       cfg.UpstoxAPIVersion,
+		statusLimiter:    newRequestGate(cfg.UpstoxStatusRequestGap),
+		statusCacheTTL:   cfg.UpstoxStatusCacheTTL,
+		brokerCache:      make(map[string]brokerCacheEntry),
+		brokerNextOK:     make(map[string]time.Time),
+		brokerBackoff:    make(map[string]time.Duration),
 	}
 }
 
@@ -201,43 +254,18 @@ func (c *Client) GetOrderStatus(ctx context.Context, orderID string) (OrderStatu
 		return OrderStatus{}, fmt.Errorf("order id is required")
 	}
 
-	requestURL := c.buildURL(c.orderDetailsPath, orderID)
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
+	data, err := c.getBrokerData(ctx, brokerGETRequest{
+		path:      c.orderDetailsPath,
+		orderID:   orderID,
+		cacheKey:  "order-details:" + strings.TrimSpace(orderID),
+		operation: "order status",
+	})
 	if err != nil {
-		return OrderStatus{}, fmt.Errorf("create order status request: %w", err)
-	}
-
-	c.setHeaders(httpReq)
-
-	httpResp, err := c.httpClient.Do(httpReq)
-	if err != nil {
-		return OrderStatus{}, fmt.Errorf("order status request failed: %w", err)
-	}
-	defer httpResp.Body.Close()
-
-	payload, err := io.ReadAll(io.LimitReader(httpResp.Body, 2<<20))
-	if err != nil {
-		return OrderStatus{}, fmt.Errorf("read order status response: %w", err)
-	}
-
-	if httpResp.StatusCode >= 300 {
-		return OrderStatus{}, fmt.Errorf("upstox order status failed (%d): %s", httpResp.StatusCode, strings.TrimSpace(string(payload)))
-	}
-
-	statusEnvelope, data, err := decodeEnvelope(payload)
-	if err != nil {
-		return OrderStatus{}, fmt.Errorf("decode order status response: %w", err)
-	}
-	if statusEnvelope != "" && !strings.EqualFold(statusEnvelope, "success") {
-		return OrderStatus{}, fmt.Errorf("upstox order status non-success status: %s", statusEnvelope)
+		return OrderStatus{}, err
 	}
 
 	obj := firstObject(data)
 	orderStatus := strings.TrimSpace(extractString(obj, "status", "order_status", "state"))
-	if orderStatus == "" {
-		orderStatus = strings.TrimSpace(statusEnvelope)
-	}
-
 	avgPrice := extractFloat(obj, "average_price", "avg_price", "price")
 
 	return OrderStatus{
@@ -248,10 +276,41 @@ func (c *Client) GetOrderStatus(ctx context.Context, orderID string) (OrderStatu
 	}, nil
 }
 
+func (c *Client) GetOrderTrades(ctx context.Context, orderID string) (OrderTrades, error) {
+	if !c.Enabled() {
+		return OrderTrades{}, fmt.Errorf("upstox client is not configured")
+	}
+	if strings.TrimSpace(orderID) == "" {
+		return OrderTrades{}, fmt.Errorf("order id is required")
+	}
+
+	data, err := c.getBrokerData(ctx, brokerGETRequest{
+		path:      c.orderTradesPath,
+		orderID:   orderID,
+		cacheKey:  "order-trades:" + strings.TrimSpace(orderID),
+		operation: "order trades",
+	})
+	if err != nil {
+		return OrderTrades{}, err
+	}
+
+	filled, avgPrice := extractTradesFill(data)
+	obj := firstObject(data)
+	status := strings.TrimSpace(extractString(obj, "status", "order_status", "state"))
+
+	return OrderTrades{
+		OrderID:      orderID,
+		Filled:       filled,
+		Status:       status,
+		AveragePrice: avgPrice,
+		RawData:      data,
+	}, nil
+}
+
 func IsTerminalOrderStatus(status string) bool {
 	s := normalizeStatus(status)
 	switch s {
-	case "complete", "rejected", "cancelled", "canceled", "not cancelled", "not modified":
+	case "complete", "completed", "rejected", "cancelled", "canceled", "not cancelled", "not modified":
 		return true
 	default:
 		return false
@@ -259,11 +318,209 @@ func IsTerminalOrderStatus(status string) bool {
 }
 
 func IsFilledOrderStatus(status string) bool {
-	return normalizeStatus(status) == "complete"
+	switch normalizeStatus(status) {
+	case "complete", "completed", "filled", "executed":
+		return true
+	default:
+		return false
+	}
 }
 
 func normalizeStatus(status string) string {
 	return strings.ToLower(strings.TrimSpace(status))
+}
+
+type brokerGETRequest struct {
+	path      string
+	orderID   string
+	cacheKey  string
+	operation string
+}
+
+func newRequestGate(interval time.Duration) *requestGate {
+	if interval <= 0 {
+		return nil
+	}
+	return &requestGate{interval: interval}
+}
+
+func (g *requestGate) Wait(ctx context.Context) error {
+	if g == nil || g.interval <= 0 {
+		return nil
+	}
+
+	g.mu.Lock()
+	now := time.Now()
+	wait := g.next.Sub(now)
+	if wait <= 0 {
+		g.next = now.Add(g.interval)
+		g.mu.Unlock()
+		return nil
+	}
+	g.next = g.next.Add(g.interval)
+	g.mu.Unlock()
+
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func (c *Client) getBrokerData(ctx context.Context, req brokerGETRequest) (json.RawMessage, error) {
+	req.orderID = strings.TrimSpace(req.orderID)
+	req.path = strings.TrimSpace(req.path)
+	if req.orderID == "" {
+		return nil, fmt.Errorf("order id is required")
+	}
+	if req.path == "" {
+		return nil, fmt.Errorf("upstox %s path is not configured", req.operation)
+	}
+	if req.cacheKey == "" {
+		req.cacheKey = req.operation + ":" + req.orderID
+	}
+	if req.operation == "" {
+		req.operation = "broker data"
+	}
+
+	if data, ok, err := c.cachedBrokerData(req); ok || err != nil {
+		return data, err
+	}
+
+	if c.statusLimiter != nil {
+		if err := c.statusLimiter.Wait(ctx); err != nil {
+			return nil, fmt.Errorf("wait for upstox %s rate limiter: %w", req.operation, err)
+		}
+	}
+
+	requestURL := c.buildURL(req.path, req.orderID)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create %s request: %w", req.operation, err)
+	}
+
+	c.setHeaders(httpReq)
+
+	httpResp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("%s request failed: %w", req.operation, err)
+	}
+	defer httpResp.Body.Close()
+
+	payload, err := io.ReadAll(io.LimitReader(httpResp.Body, 2<<20))
+	if err != nil {
+		return nil, fmt.Errorf("read %s response: %w", req.operation, err)
+	}
+
+	if httpResp.StatusCode >= 300 {
+		if httpResp.StatusCode == http.StatusTooManyRequests {
+			return c.rememberBrokerRateLimit(req, httpResp.Header.Get("Retry-After"))
+		}
+		return nil, fmt.Errorf("upstox %s failed (%d): %s", req.operation, httpResp.StatusCode, strings.TrimSpace(string(payload)))
+	}
+
+	statusEnvelope, data, err := decodeEnvelope(payload)
+	if err != nil {
+		return nil, fmt.Errorf("decode %s response: %w", req.operation, err)
+	}
+	if statusEnvelope != "" && !strings.EqualFold(statusEnvelope, "success") {
+		return nil, fmt.Errorf("upstox %s non-success status: %s", req.operation, statusEnvelope)
+	}
+
+	c.rememberBrokerData(req.cacheKey, data)
+	return cloneRawMessage(data), nil
+}
+
+func (c *Client) cachedBrokerData(req brokerGETRequest) (json.RawMessage, bool, error) {
+	c.brokerCacheMu.Lock()
+	defer c.brokerCacheMu.Unlock()
+
+	now := time.Now()
+	if retryAt, ok := c.brokerNextOK[req.cacheKey]; ok && now.Before(retryAt) {
+		if cached, hasCached := c.brokerCache[req.cacheKey]; hasCached {
+			return cloneRawMessage(cached.data), true, nil
+		}
+		return nil, true, RateLimitedError{Operation: req.operation, OrderID: req.orderID, RetryAt: retryAt}
+	}
+
+	if c.statusCacheTTL > 0 {
+		if cached, ok := c.brokerCache[req.cacheKey]; ok && now.Sub(cached.fetchedAt) < c.statusCacheTTL {
+			return cloneRawMessage(cached.data), true, nil
+		}
+	}
+
+	return nil, false, nil
+}
+
+func (c *Client) rememberBrokerData(cacheKey string, data json.RawMessage) {
+	c.brokerCacheMu.Lock()
+	defer c.brokerCacheMu.Unlock()
+
+	c.brokerCache[cacheKey] = brokerCacheEntry{
+		fetchedAt: time.Now(),
+		data:      cloneRawMessage(data),
+	}
+	delete(c.brokerBackoff, cacheKey)
+	delete(c.brokerNextOK, cacheKey)
+}
+
+func (c *Client) rememberBrokerRateLimit(req brokerGETRequest, retryAfterHeader string) (json.RawMessage, error) {
+	c.brokerCacheMu.Lock()
+	defer c.brokerCacheMu.Unlock()
+
+	now := time.Now()
+	backoff := nextBackoff(c.brokerBackoff[req.cacheKey])
+	if retryAfter := parseRetryAfter(retryAfterHeader, now); retryAfter > backoff {
+		backoff = retryAfter
+	}
+
+	retryAt := now.Add(backoff)
+	c.brokerBackoff[req.cacheKey] = backoff
+	c.brokerNextOK[req.cacheKey] = retryAt
+
+	if cached, ok := c.brokerCache[req.cacheKey]; ok {
+		return cloneRawMessage(cached.data), nil
+	}
+
+	return nil, RateLimitedError{Operation: req.operation, OrderID: req.orderID, RetryAt: retryAt}
+}
+
+func nextBackoff(previous time.Duration) time.Duration {
+	if previous <= 0 {
+		return 2 * time.Second
+	}
+	next := previous * 2
+	if next > time.Minute {
+		return time.Minute
+	}
+	return next
+}
+
+func parseRetryAfter(header string, now time.Time) time.Duration {
+	header = strings.TrimSpace(header)
+	if header == "" {
+		return 0
+	}
+	if seconds, err := strconv.Atoi(header); err == nil && seconds > 0 {
+		return time.Duration(seconds) * time.Second
+	}
+	if retryAt, err := http.ParseTime(header); err == nil && retryAt.After(now) {
+		return retryAt.Sub(now)
+	}
+	return 0
+}
+
+func cloneRawMessage(data json.RawMessage) json.RawMessage {
+	if len(data) == 0 {
+		return nil
+	}
+	cloned := make(json.RawMessage, len(data))
+	copy(cloned, data)
+	return cloned
 }
 
 func (c *Client) buildURL(path string, orderID string) string {
@@ -396,6 +653,74 @@ func firstObject(data json.RawMessage) map[string]any {
 	return nil
 }
 
+func extractTradesFill(data json.RawMessage) (bool, *float64) {
+	trades := tradeObjects(data)
+	if len(trades) == 0 {
+		obj := firstObject(data)
+		if obj == nil {
+			return false, nil
+		}
+		if IsFilledOrderStatus(extractString(obj, "status", "order_status", "state")) {
+			return true, extractFloat(obj, "average_price", "avg_price", "price")
+		}
+		return false, nil
+	}
+
+	totalQty := 0
+	totalValue := 0.0
+	sawTrade := false
+	for _, trade := range trades {
+		if len(trade) == 0 {
+			continue
+		}
+		sawTrade = true
+		qty := extractInt(trade, "quantity", "qty", "filled_quantity", "traded_quantity")
+		price := extractFloat(trade, "traded_price", "trade_price", "average_price", "avg_price", "price")
+		if qty <= 0 || price == nil || *price <= 0 {
+			continue
+		}
+		totalQty += qty
+		totalValue += *price * float64(qty)
+	}
+
+	if totalQty <= 0 {
+		return sawTrade, nil
+	}
+
+	avg := totalValue / float64(totalQty)
+	return true, &avg
+}
+
+func tradeObjects(data json.RawMessage) []map[string]any {
+	if len(data) == 0 {
+		return nil
+	}
+
+	var list []map[string]any
+	if err := json.Unmarshal(data, &list); err == nil {
+		return list
+	}
+
+	var obj map[string]any
+	if err := json.Unmarshal(data, &obj); err != nil || obj == nil {
+		return nil
+	}
+
+	rawTrades, ok := obj["trades"]
+	if !ok {
+		return nil
+	}
+
+	encoded, err := json.Marshal(rawTrades)
+	if err != nil {
+		return nil
+	}
+	if err := json.Unmarshal(encoded, &list); err == nil {
+		return list
+	}
+	return nil
+}
+
 func extractString(obj map[string]any, keys ...string) string {
 	for _, key := range keys {
 		if v, ok := obj[key]; ok {
@@ -446,4 +771,32 @@ func extractFloat(obj map[string]any, keys ...string) *float64 {
 		}
 	}
 	return nil
+}
+
+func extractInt(obj map[string]any, keys ...string) int {
+	for _, key := range keys {
+		if v, ok := obj[key]; ok {
+			switch tv := v.(type) {
+			case int:
+				return tv
+			case int64:
+				return int(tv)
+			case float64:
+				return int(tv)
+			case float32:
+				return int(tv)
+			case json.Number:
+				parsed, err := tv.Int64()
+				if err == nil {
+					return int(parsed)
+				}
+			case string:
+				parsed, err := strconv.Atoi(strings.TrimSpace(tv))
+				if err == nil {
+					return parsed
+				}
+			}
+		}
+	}
+	return 0
 }

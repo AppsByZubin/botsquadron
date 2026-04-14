@@ -1095,6 +1095,19 @@ func (s *Store) UpdateTradeStatus(ctx context.Context, tradeID string, status st
 	return nil
 }
 
+func (s *Store) DisableTrailingByTradeID(ctx context.Context, tradeID string) error {
+	query := fmt.Sprintf(`
+UPDATE %s
+SET tsl_active = false
+WHERE id::text = $1
+  AND (status IS NULL OR UPPER(status) IN ('OPEN', 'PLACED', 'ENTRY_PLACED'))`, s.tradesTable)
+	_, err := s.pool.Exec(ctx, query, strings.TrimSpace(tradeID))
+	if err != nil {
+		return fmt.Errorf("disable trailing by trade id: %w", err)
+	}
+	return nil
+}
+
 func (s *Store) UpdateTrailingStateByTradeID(ctx context.Context, tradeID string, stoploss *float64, slLimit *float64, spotTrailAnchor *float64) error {
 	if strings.TrimSpace(tradeID) == "" {
 		return fmt.Errorf("trade id is required")

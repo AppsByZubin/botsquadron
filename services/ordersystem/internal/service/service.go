@@ -6,6 +6,8 @@ import (
 	"log"
 	"math"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/AppsByZubin/botsquadron/services/ordersystem/internal/config"
 	"github.com/AppsByZubin/botsquadron/services/ordersystem/internal/model"
@@ -14,16 +16,19 @@ import (
 )
 
 type Service struct {
-	cfg    config.Config
-	store  *store.Store
-	upstox *upstox.Client
+	cfg           config.Config
+	store         *store.Store
+	upstox        *upstox.Client
+	slRefreshMu   sync.Mutex
+	slRefreshLast map[string]time.Time
 }
 
 func New(cfg config.Config, st *store.Store, upClient *upstox.Client) *Service {
 	return &Service{
-		cfg:    cfg,
-		store:  st,
-		upstox: upClient,
+		cfg:           cfg,
+		store:         st,
+		upstox:        upClient,
+		slRefreshLast: make(map[string]time.Time),
 	}
 }
 
@@ -375,35 +380,95 @@ func (s *Service) PollStopLossOrders(ctx context.Context) error {
 	}
 
 	for _, trade := range trades {
-		for _, slOrder := range trade.SLOrders {
-			statusResp, err := s.upstox.GetOrderStatus(ctx, slOrder.OrderID)
-			if err != nil {
-				log.Printf("poll sl order status failed for trade_id=%s order_id=%s: %v", trade.ID, slOrder.OrderID, err)
-				continue
-			}
-			if !upstox.IsTerminalOrderStatus(statusResp.Status) {
-				continue
-			}
-
-			if upstox.IsFilledOrderStatus(statusResp.Status) {
-				exitPrice := slOrder.Stoploss
-				if statusResp.AveragePrice != nil && *statusResp.AveragePrice > 0 {
-					exitPrice = *statusResp.AveragePrice
-				}
-				if err := s.store.MarkTradeClosedFromSL(ctx, trade.ID, slOrder.OrderID, exitPrice, 0, "STOPLOSS HIT"); err != nil {
-					log.Printf("close trade on SL failed for trade_id=%s: %v", trade.ID, err)
-				}
-			} else {
-				dbStatus := "SL_" + strings.ToUpper(strings.ReplaceAll(strings.TrimSpace(statusResp.Status), " ", "_"))
-				if err := s.store.UpdateTradeStatus(ctx, trade.ID, dbStatus); err != nil {
-					log.Printf("update non-filled SL status failed for trade_id=%s status=%s: %v", trade.ID, dbStatus, err)
-				}
-			}
-			break
+		if !s.shouldRefreshStopLossTrade(trade.ID) {
+			continue
 		}
+		s.refreshStopLossTrade(ctx, trade)
 	}
 
 	return nil
+}
+
+func (s *Service) shouldRefreshStopLossTrade(tradeID string) bool {
+	interval := s.cfg.SLRefreshMinInterval
+	if interval <= 0 {
+		return true
+	}
+
+	now := time.Now()
+	s.slRefreshMu.Lock()
+	defer s.slRefreshMu.Unlock()
+
+	last := s.slRefreshLast[tradeID]
+	if !last.IsZero() && now.Sub(last) < interval {
+		return false
+	}
+	s.slRefreshLast[tradeID] = now
+	return true
+}
+
+func (s *Service) refreshStopLossTrade(ctx context.Context, trade model.TradeForSLPolling) {
+	for _, slOrder := range trade.SLOrders {
+		orderID := strings.TrimSpace(slOrder.OrderID)
+		if orderID == "" {
+			continue
+		}
+
+		tradesResp, err := s.upstox.GetOrderTrades(ctx, orderID)
+		if err != nil {
+			if upstox.IsRateLimited(err) {
+				log.Printf("poll sl order trades rate-limited for trade_id=%s order_id=%s: %v", trade.ID, orderID, err)
+				continue
+			} else {
+				log.Printf("poll sl order trades failed for trade_id=%s order_id=%s: %v", trade.ID, orderID, err)
+			}
+		} else if tradesResp.Filled {
+			s.closeTradeFromStopLoss(ctx, trade, orderID, slOrder.Stoploss, tradesResp.AveragePrice)
+			return
+		} else if upstox.IsTerminalOrderStatus(tradesResp.Status) {
+			s.handleTerminalUnfilledStopLoss(ctx, trade.ID, orderID, tradesResp.Status)
+			return
+		}
+
+		statusResp, err := s.upstox.GetOrderStatus(ctx, orderID)
+		if err != nil {
+			if upstox.IsRateLimited(err) {
+				log.Printf("poll sl order status rate-limited for trade_id=%s order_id=%s: %v", trade.ID, orderID, err)
+			} else {
+				log.Printf("poll sl order status failed for trade_id=%s order_id=%s: %v", trade.ID, orderID, err)
+			}
+			continue
+		}
+		if !upstox.IsTerminalOrderStatus(statusResp.Status) {
+			continue
+		}
+
+		if upstox.IsFilledOrderStatus(statusResp.Status) {
+			s.closeTradeFromStopLoss(ctx, trade, orderID, slOrder.Stoploss, statusResp.AveragePrice)
+			return
+		}
+
+		s.handleTerminalUnfilledStopLoss(ctx, trade.ID, orderID, statusResp.Status)
+		return
+	}
+}
+
+func (s *Service) closeTradeFromStopLoss(ctx context.Context, trade model.TradeForSLPolling, orderID string, fallbackExitPrice float64, averagePrice *float64) {
+	exitPrice := fallbackExitPrice
+	if averagePrice != nil && *averagePrice > 0 {
+		exitPrice = *averagePrice
+	}
+	if err := s.store.MarkTradeClosedFromSL(ctx, trade.ID, orderID, exitPrice, 0, "STOPLOSS HIT"); err != nil {
+		log.Printf("close trade on SL failed for trade_id=%s: %v", trade.ID, err)
+	}
+}
+
+func (s *Service) handleTerminalUnfilledStopLoss(ctx context.Context, tradeID string, orderID string, status string) {
+	if err := s.store.DisableTrailingByTradeID(ctx, tradeID); err != nil {
+		log.Printf("disable trailing after terminal SL failed for trade_id=%s order_id=%s status=%s: %v", tradeID, orderID, status, err)
+		return
+	}
+	log.Printf("sl order terminal but not filled; disabled trailing and kept trade open trade_id=%s order_id=%s status=%s", tradeID, orderID, status)
 }
 
 func validateModifyTradeRequest(req model.ModifyTradeRequest, stoploss *float64, slLimit *float64, spotTrailAnchor *float64, validity string, orderType string) error {

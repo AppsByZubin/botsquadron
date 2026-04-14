@@ -16,13 +16,17 @@ type Config struct {
 	AppTimezone            string
 	RequestTimeout         time.Duration
 	SLPollInterval         time.Duration
+	SLRefreshMinInterval   time.Duration
 	AccountInitialCash     float64
 	UpstoxBaseURL          string
 	UpstoxAccessToken      string
 	UpstoxOrderPlacePath   string
 	UpstoxOrderModifyPath  string
 	UpstoxOrderDetailsPath string
+	UpstoxOrderTradesPath  string
 	UpstoxAPIVersion       string
+	UpstoxStatusRequestGap time.Duration
+	UpstoxStatusCacheTTL   time.Duration
 }
 
 func Load() (Config, error) {
@@ -33,13 +37,17 @@ func Load() (Config, error) {
 		AppTimezone:            strings.TrimSpace(getEnv("APP_TIMEZONE", "Asia/Kolkata")),
 		RequestTimeout:         parseDurationEnv("ORDERSYSTEM_REQUEST_TIMEOUT", 15*time.Second),
 		SLPollInterval:         parseDurationEnv("ORDERSYSTEM_SL_POLL_INTERVAL", 5*time.Second),
+		SLRefreshMinInterval:   parseDurationEnv("ORDERSYSTEM_SL_REFRESH_MIN_INTERVAL", 3*time.Second),
 		AccountInitialCash:     parseFloatEnv("ACCOUNT_INITIAL_CASH", 0),
 		UpstoxBaseURL:          strings.TrimRight(getEnv("UPSTOX_API_BASE_URL", "https://api.upstox.com"), "/"),
 		UpstoxAccessToken:      strings.TrimSpace(os.Getenv("UPSTOX_API_ACCESS_TOKEN")),
 		UpstoxOrderPlacePath:   normalizePath(getEnv("UPSTOX_ORDER_PLACE_PATH", "/v3/order/place")),
 		UpstoxOrderModifyPath:  normalizePath(getEnv("UPSTOX_ORDER_MODIFY_PATH", "/v3/order/modify")),
 		UpstoxOrderDetailsPath: normalizePath(getEnv("UPSTOX_ORDER_DETAILS_PATH", "/v2/order/details")),
+		UpstoxOrderTradesPath:  normalizePath(getEnv("UPSTOX_ORDER_TRADES_PATH", "/v2/order/trades")),
 		UpstoxAPIVersion:       strings.TrimSpace(getEnv("UPSTOX_API_VERSION", "2.0")),
+		UpstoxStatusRequestGap: parseDurationEnv("ORDERSYSTEM_UPSTOX_STATUS_REQUEST_GAP", 500*time.Millisecond),
+		UpstoxStatusCacheTTL:   parseDurationEnv("ORDERSYSTEM_UPSTOX_STATUS_CACHE_TTL", 2*time.Second),
 	}
 
 	if cfg.DatabaseURL == "" {
@@ -54,8 +62,20 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("ORDERSYSTEM_SL_POLL_INTERVAL must be > 0")
 	}
 
+	if cfg.SLRefreshMinInterval < 0 {
+		return Config{}, fmt.Errorf("ORDERSYSTEM_SL_REFRESH_MIN_INTERVAL must be >= 0")
+	}
+
 	if cfg.RequestTimeout <= 0 {
 		return Config{}, fmt.Errorf("ORDERSYSTEM_REQUEST_TIMEOUT must be > 0")
+	}
+
+	if cfg.UpstoxStatusRequestGap < 0 {
+		return Config{}, fmt.Errorf("ORDERSYSTEM_UPSTOX_STATUS_REQUEST_GAP must be >= 0")
+	}
+
+	if cfg.UpstoxStatusCacheTTL < 0 {
+		return Config{}, fmt.Errorf("ORDERSYSTEM_UPSTOX_STATUS_CACHE_TTL must be >= 0")
 	}
 
 	return cfg, nil

@@ -136,3 +136,99 @@ func TestClientPlaceOrderCapturesSlicedOrderIDs(t *testing.T) {
 		t.Fatalf("order ids = %#v, want [order-1 order-2]", resp.OrderIDs)
 	}
 }
+
+func TestClientGetOrderTradesComputesAveragePrice(t *testing.T) {
+	t.Parallel()
+
+	var gotMethod string
+	var gotPath string
+	var gotOrderID string
+	var gotAPIVersion string
+
+	client := NewClient(config.Config{
+		UpstoxBaseURL:         "https://api.example.com",
+		UpstoxAccessToken:     "test-token",
+		UpstoxOrderTradesPath: "/v2/order/trades",
+		UpstoxAPIVersion:      "2.0",
+	})
+	client.httpClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		gotOrderID = r.URL.Query().Get("order_id")
+		gotAPIVersion = r.Header.Get("Api-Version")
+
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{"status":"success","data":[{"quantity":25,"traded_price":100},{"quantity":75,"traded_price":102}]}`)),
+		}, nil
+	})}
+
+	resp, err := client.GetOrderTrades(context.Background(), "sl-123")
+	if err != nil {
+		t.Fatalf("GetOrderTrades returned error: %v", err)
+	}
+
+	if gotMethod != http.MethodGet {
+		t.Fatalf("method = %s, want %s", gotMethod, http.MethodGet)
+	}
+	if gotPath != "/v2/order/trades" {
+		t.Fatalf("path = %s, want /v2/order/trades", gotPath)
+	}
+	if gotOrderID != "sl-123" {
+		t.Fatalf("order_id query = %s, want sl-123", gotOrderID)
+	}
+	if gotAPIVersion != "2.0" {
+		t.Fatalf("Api-Version header = %s, want 2.0", gotAPIVersion)
+	}
+	if !resp.Filled {
+		t.Fatalf("filled = false, want true")
+	}
+	if resp.AveragePrice == nil || *resp.AveragePrice != 101.5 {
+		t.Fatalf("average price = %v, want 101.5", resp.AveragePrice)
+	}
+}
+
+func TestClientGetOrderStatusReturnsCachedDataOn429(t *testing.T) {
+	t.Parallel()
+
+	calls := 0
+	client := NewClient(config.Config{
+		UpstoxBaseURL:          "https://api.example.com",
+		UpstoxAccessToken:      "test-token",
+		UpstoxOrderDetailsPath: "/v2/order/details",
+		UpstoxAPIVersion:       "2.0",
+		UpstoxStatusCacheTTL:   0,
+	})
+	client.httpClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		calls++
+		if calls == 1 {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"status":"success","data":{"status":"open","average_price":0}}`)),
+			}, nil
+		}
+		return &http.Response{
+			StatusCode: http.StatusTooManyRequests,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{"errors":[{"message":"Too Many Requests"}]}`)),
+		}, nil
+	})}
+
+	first, err := client.GetOrderStatus(context.Background(), "sl-123")
+	if err != nil {
+		t.Fatalf("first GetOrderStatus returned error: %v", err)
+	}
+	second, err := client.GetOrderStatus(context.Background(), "sl-123")
+	if err != nil {
+		t.Fatalf("second GetOrderStatus returned error: %v", err)
+	}
+
+	if calls != 2 {
+		t.Fatalf("calls = %d, want 2", calls)
+	}
+	if first.Status != "open" || second.Status != "open" {
+		t.Fatalf("statuses = %q/%q, want open/open", first.Status, second.Status)
+	}
+}
