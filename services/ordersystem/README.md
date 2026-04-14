@@ -17,6 +17,8 @@
   - places entry order via Upstox Orders API
   - places SL order (when `sl_trigger` is provided)
   - periodically polls SL order status
+  - syncs actual filled entry/exit prices from Upstox order details
+  - calculates per-order and trade-level brokerage from Upstox charges
   - closes trade in DB when SL is completed
   - updates daily `accounts.net_profit`
 
@@ -129,6 +131,7 @@ Upstox:
 - `UPSTOX_ORDER_MODIFY_PATH` default `/v3/order/modify`
 - `UPSTOX_ORDER_DETAILS_PATH` default `/v2/order/details`
 - `UPSTOX_ORDER_TRADES_PATH` default `/v2/order/trades`
+- `UPSTOX_BROKERAGE_PATH` default `/v2/charges/brokerage`
 - `UPSTOX_API_VERSION` default `2.0`
 - `ORDERSYSTEM_UPSTOX_STATUS_REQUEST_GAP` default `500ms`
 - `ORDERSYSTEM_UPSTOX_STATUS_CACHE_TTL` default `2s`
@@ -150,4 +153,6 @@ go build -o ordersystem ./cmd
 ## Upstox References
 
 - Orders API: https://upstox.com/developer/api-documentation/orders
+- Order Details API: https://upstox.com/developer/api-documentation/get-order-details/
+- Brokerage API: https://upstox.com/developer/api-documentation/get-brokerage/
 - Order status values: https://upstox.com/developer/api-documentation/appendix/order-status/

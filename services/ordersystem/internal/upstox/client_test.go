@@ -187,6 +187,111 @@ func TestClientGetOrderTradesComputesAveragePrice(t *testing.T) {
 	if resp.AveragePrice == nil || *resp.AveragePrice != 101.5 {
 		t.Fatalf("average price = %v, want 101.5", resp.AveragePrice)
 	}
+	if resp.FilledQuantity != 100 {
+		t.Fatalf("filled quantity = %d, want 100", resp.FilledQuantity)
+	}
+}
+
+func TestClientGetOrderStatusExtractsExecutionFields(t *testing.T) {
+	t.Parallel()
+
+	client := NewClient(config.Config{
+		UpstoxBaseURL:          "https://api.example.com",
+		UpstoxAccessToken:      "test-token",
+		UpstoxOrderDetailsPath: "/v2/order/details",
+	})
+	client.httpClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if got := r.URL.Query().Get("order_id"); got != "entry-123" {
+			t.Fatalf("order_id query = %s, want entry-123", got)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body: io.NopCloser(strings.NewReader(`{"status":"success","data":{
+				"status":"complete",
+				"price":100,
+				"average_price":102,
+				"quantity":75,
+				"filled_quantity":75,
+				"instrument_token":"NSE_FO|123",
+				"product":"D",
+				"transaction_type":"BUY",
+				"order_type":"MARKET"
+			}}`)),
+		}, nil
+	})}
+
+	resp, err := client.GetOrderStatus(context.Background(), "entry-123")
+	if err != nil {
+		t.Fatalf("GetOrderStatus returned error: %v", err)
+	}
+	if resp.Status != "complete" {
+		t.Fatalf("status = %s, want complete", resp.Status)
+	}
+	if resp.AveragePrice == nil || *resp.AveragePrice != 102 {
+		t.Fatalf("average price = %v, want 102", resp.AveragePrice)
+	}
+	if resp.Price == nil || *resp.Price != 100 {
+		t.Fatalf("price = %v, want 100", resp.Price)
+	}
+	if resp.Quantity != 75 || resp.FilledQuantity != 75 {
+		t.Fatalf("quantities = %d/%d, want 75/75", resp.Quantity, resp.FilledQuantity)
+	}
+	if resp.InstrumentToken != "NSE_FO|123" || resp.Product != "D" || resp.TransactionType != "BUY" || resp.OrderType != "MARKET" {
+		t.Fatalf("execution fields = %#v", resp)
+	}
+}
+
+func TestClientGetBrokerageReadsChargesTotal(t *testing.T) {
+	t.Parallel()
+
+	var gotPath string
+	var gotInstrument string
+	var gotQuantity string
+	var gotProduct string
+	var gotTransactionType string
+	var gotPrice string
+
+	client := NewClient(config.Config{
+		UpstoxBaseURL:       "https://api.example.com",
+		UpstoxAccessToken:   "test-token",
+		UpstoxBrokeragePath: "/v2/charges/brokerage",
+		UpstoxAPIVersion:    "2.0",
+	})
+	client.httpClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		gotPath = r.URL.Path
+		gotInstrument = r.URL.Query().Get("instrument_token")
+		gotQuantity = r.URL.Query().Get("quantity")
+		gotProduct = r.URL.Query().Get("product")
+		gotTransactionType = r.URL.Query().Get("transaction_type")
+		gotPrice = r.URL.Query().Get("price")
+
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{"status":"success","data":{"charges":{"total":208.27,"brokerage":0}}}`)),
+		}, nil
+	})}
+
+	resp, err := client.GetBrokerage(context.Background(), BrokerageRequest{
+		InstrumentToken: "NSE_FO|123",
+		Quantity:        75,
+		Product:         "D",
+		TransactionType: "BUY",
+		Price:           102.5,
+	})
+	if err != nil {
+		t.Fatalf("GetBrokerage returned error: %v", err)
+	}
+	if gotPath != "/v2/charges/brokerage" {
+		t.Fatalf("path = %s, want /v2/charges/brokerage", gotPath)
+	}
+	if gotInstrument != "NSE_FO|123" || gotQuantity != "75" || gotProduct != "D" || gotTransactionType != "BUY" || gotPrice != "102.5" {
+		t.Fatalf("query = instrument:%s quantity:%s product:%s transaction:%s price:%s", gotInstrument, gotQuantity, gotProduct, gotTransactionType, gotPrice)
+	}
+	if resp.Total == nil || *resp.Total != 208.27 {
+		t.Fatalf("total = %v, want 208.27", resp.Total)
+	}
 }
 
 func TestClientGetOrderStatusReturnsCachedDataOn429(t *testing.T) {

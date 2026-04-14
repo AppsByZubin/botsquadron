@@ -408,12 +408,15 @@ func (s *Service) shouldRefreshStopLossTrade(tradeID string) bool {
 }
 
 func (s *Service) refreshStopLossTrade(ctx context.Context, trade model.TradeForSLPolling) {
+	s.syncEntryOrders(ctx, trade)
+
 	for _, slOrder := range trade.SLOrders {
 		orderID := strings.TrimSpace(slOrder.OrderID)
 		if orderID == "" {
 			continue
 		}
 
+		var tradesResp upstox.OrderTrades
 		tradesResp, err := s.upstox.GetOrderTrades(ctx, orderID)
 		if err != nil {
 			if upstox.IsRateLimited(err) {
@@ -422,12 +425,9 @@ func (s *Service) refreshStopLossTrade(ctx context.Context, trade model.TradeFor
 			} else {
 				log.Printf("poll sl order trades failed for trade_id=%s order_id=%s: %v", trade.ID, orderID, err)
 			}
-		} else if tradesResp.Filled {
-			s.closeTradeFromStopLoss(ctx, trade, orderID, slOrder.Stoploss, tradesResp.AveragePrice)
-			return
 		} else if upstox.IsTerminalOrderStatus(tradesResp.Status) {
 			s.handleTerminalUnfilledStopLoss(ctx, trade.ID, orderID, tradesResp.Status)
-			return
+			continue
 		}
 
 		statusResp, err := s.upstox.GetOrderStatus(ctx, orderID)
@@ -439,28 +439,134 @@ func (s *Service) refreshStopLossTrade(ctx context.Context, trade model.TradeFor
 			}
 			continue
 		}
+
+		if tradesResp.Filled || upstox.IsFilledOrderStatus(statusResp.Status) {
+			avgPrice := statusResp.AveragePrice
+			if tradesResp.AveragePrice != nil && *tradesResp.AveragePrice > 0 {
+				avgPrice = tradesResp.AveragePrice
+			}
+			filledQty := statusResp.FilledQuantity
+			if tradesResp.FilledQuantity > 0 {
+				filledQty = tradesResp.FilledQuantity
+			}
+			s.recordStopLossFill(ctx, trade, slOrder, statusResp, avgPrice, filledQty)
+			continue
+		}
+
 		if !upstox.IsTerminalOrderStatus(statusResp.Status) {
 			continue
 		}
 
-		if upstox.IsFilledOrderStatus(statusResp.Status) {
-			s.closeTradeFromStopLoss(ctx, trade, orderID, slOrder.Stoploss, statusResp.AveragePrice)
-			return
-		}
-
 		s.handleTerminalUnfilledStopLoss(ctx, trade.ID, orderID, statusResp.Status)
-		return
 	}
 }
 
-func (s *Service) closeTradeFromStopLoss(ctx context.Context, trade model.TradeForSLPolling, orderID string, fallbackExitPrice float64, averagePrice *float64) {
-	exitPrice := fallbackExitPrice
-	if averagePrice != nil && *averagePrice > 0 {
-		exitPrice = *averagePrice
+func (s *Service) syncEntryOrders(ctx context.Context, trade model.TradeForSLPolling) {
+	for _, entryOrder := range trade.EntryOrders {
+		orderID := strings.TrimSpace(entryOrder.OrderID)
+		if orderID == "" || entryOrderAlreadySynced(entryOrder) {
+			continue
+		}
+
+		statusResp, err := s.upstox.GetOrderStatus(ctx, orderID)
+		if err != nil {
+			if upstox.IsRateLimited(err) {
+				log.Printf("poll entry order status rate-limited for trade_id=%s order_id=%s: %v", trade.ID, orderID, err)
+			} else {
+				log.Printf("poll entry order status failed for trade_id=%s order_id=%s: %v", trade.ID, orderID, err)
+			}
+			continue
+		}
+		if !upstox.IsFilledOrderStatus(statusResp.Status) {
+			continue
+		}
+
+		entryPrice := executionPrice(statusResp.AveragePrice)
+		if entryPrice <= 0 {
+			entryPrice = entryOrder.EntryPrice
+		}
+		entryQty := executionQuantity(statusResp.FilledQuantity, statusResp.Quantity, entryOrder.Qty, singleOrderFallbackQty(trade.Qty, len(trade.EntryOrders)))
+		brokerage := s.calculateBrokerage(ctx, trade, statusResp, entryPrice, entryQty, trade.Side)
+		if err := s.store.SyncEntryOrderExecution(ctx, trade.ID, orderID, entryPrice, entryQty, brokerage); err != nil {
+			log.Printf("sync entry order execution failed for trade_id=%s order_id=%s: %v", trade.ID, orderID, err)
+		}
 	}
-	if err := s.store.MarkTradeClosedFromSL(ctx, trade.ID, orderID, exitPrice, 0, "STOPLOSS HIT"); err != nil {
-		log.Printf("close trade on SL failed for trade_id=%s: %v", trade.ID, err)
+}
+
+func entryOrderAlreadySynced(order model.EntryOrderForPolling) bool {
+	return order.EntryPrice > 0 && order.Qty > 0 && order.Brokerage > 0
+}
+
+func (s *Service) recordStopLossFill(ctx context.Context, trade model.TradeForSLPolling, slOrder model.StopLossOrderForPolling, statusResp upstox.OrderStatus, averagePrice *float64, filledQty int) {
+	orderID := strings.TrimSpace(slOrder.OrderID)
+	exitPrice := executionPrice(averagePrice, statusResp.AveragePrice)
+	if exitPrice <= 0 {
+		exitPrice = slOrder.Stoploss
 	}
+	exitQty := executionQuantity(filledQty, statusResp.FilledQuantity, statusResp.Quantity, slOrder.Qty, singleOrderFallbackQty(trade.Qty, len(trade.SLOrders)))
+	brokerage := s.calculateBrokerage(ctx, trade, statusResp, exitPrice, exitQty, oppositeSide(trade.Side))
+	if err := s.store.RecordStopLossFill(ctx, trade.ID, orderID, exitPrice, exitQty, brokerage, "STOPLOSS HIT"); err != nil {
+		log.Printf("record SL fill failed for trade_id=%s order_id=%s: %v", trade.ID, orderID, err)
+	}
+}
+
+func (s *Service) calculateBrokerage(ctx context.Context, trade model.TradeForSLPolling, statusResp upstox.OrderStatus, price float64, qty int, fallbackTxnType string) *float64 {
+	instrumentToken := strings.TrimSpace(statusResp.InstrumentToken)
+	if instrumentToken == "" {
+		instrumentToken = strings.TrimSpace(trade.InstrumentToken)
+	}
+	product := strings.ToUpper(strings.TrimSpace(statusResp.Product))
+	if product == "" {
+		product = strings.ToUpper(strings.TrimSpace(trade.Product))
+	}
+	transactionType := strings.ToUpper(strings.TrimSpace(statusResp.TransactionType))
+	if transactionType == "" {
+		transactionType = strings.ToUpper(strings.TrimSpace(fallbackTxnType))
+	}
+	if qty <= 0 {
+		qty = executionQuantity(statusResp.FilledQuantity, statusResp.Quantity)
+	}
+	if instrumentToken == "" || product == "" || transactionType == "" || qty <= 0 || price <= 0 {
+		return nil
+	}
+
+	resp, err := s.upstox.GetBrokerage(ctx, upstox.BrokerageRequest{
+		InstrumentToken: instrumentToken,
+		Quantity:        qty,
+		Product:         product,
+		TransactionType: transactionType,
+		Price:           price,
+	})
+	if err != nil {
+		log.Printf("calculate brokerage failed for trade_id=%s order_id=%s: %v", trade.ID, statusResp.OrderID, err)
+		return nil
+	}
+	return resp.Total
+}
+
+func executionPrice(prices ...*float64) float64 {
+	for _, price := range prices {
+		if price != nil && *price > 0 {
+			return *price
+		}
+	}
+	return 0
+}
+
+func executionQuantity(values ...int) int {
+	for _, value := range values {
+		if value > 0 {
+			return value
+		}
+	}
+	return 0
+}
+
+func singleOrderFallbackQty(tradeQty int, orderCount int) int {
+	if orderCount == 1 && tradeQty > 0 {
+		return tradeQty
+	}
+	return 0
 }
 
 func (s *Service) handleTerminalUnfilledStopLoss(ctx context.Context, tradeID string, orderID string, status string) {

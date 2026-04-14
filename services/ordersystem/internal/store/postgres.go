@@ -51,6 +51,7 @@ type CreateOrderParams struct {
 	OrderID         string
 	InstrumentToken string
 	OrderType       string
+	Qty             *int
 	EntryPrice      *float64
 	Target          *float64
 	Stoploss        *float64
@@ -432,6 +433,7 @@ CREATE TABLE IF NOT EXISTS %s (
     trade_id UUID REFERENCES trades(id) ON DELETE CASCADE,
     instrument_token TEXT,
     order_type TEXT,
+    qty INTEGER,
     entry_price NUMERIC(18,6),
     target NUMERIC(18,6),
     stoploss NUMERIC(18,6),
@@ -446,6 +448,10 @@ CREATE INDEX IF NOT EXISTS idx_orders_order_id ON %s (order_id);
 CREATE INDEX IF NOT EXISTS idx_orders_trade_type ON %s (trade_id, order_type);
 `, ordersTableName, ordersTableName, ordersTableName, ordersTableName)); err != nil {
 		return fmt.Errorf("ensure orders table: %w", err)
+	}
+
+	if _, err := s.pool.Exec(ctx, fmt.Sprintf(`ALTER TABLE %s ADD COLUMN IF NOT EXISTS qty INTEGER`, ordersTableName)); err != nil {
+		return fmt.Errorf("ensure orders qty column: %w", err)
 	}
 
 	hasEntryOrderIDs, err := s.columnExists(ctx, s.tradesTable, "entry_order_ids")
@@ -736,6 +742,7 @@ INSERT INTO %s (
     trade_id,
     instrument_token,
     order_type,
+    qty,
     entry_price,
     target,
     stoploss,
@@ -745,12 +752,13 @@ INSERT INTO %s (
     exit_time,
     brokerage
 ) VALUES (
-    $1,$2::uuid,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12
+    $1,$2::uuid,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13
 )`, ordersTableName),
 		nullIfEmpty(params.OrderID),
 		tradeID,
 		nullIfEmpty(params.InstrumentToken),
 		strings.ToLower(strings.TrimSpace(params.OrderType)),
+		nullIntPtr(params.Qty),
 		nullFloatPtr(params.EntryPrice),
 		nullFloatPtr(params.Target),
 		nullFloatPtr(params.Stoploss),
@@ -923,6 +931,7 @@ SELECT
     COALESCE(trade_id::text, ''),
     COALESCE(instrument_token, ''),
     COALESCE(order_type, ''),
+    COALESCE(qty, 0),
     COALESCE(entry_price, 0)::float8,
     COALESCE(target, 0)::float8,
     COALESCE(stoploss, 0)::float8,
@@ -949,6 +958,7 @@ ORDER BY order_type, id`, ordersTableName), strings.TrimSpace(tradeID))
 			&order.TradeID,
 			&order.InstrumentToken,
 			&order.OrderType,
+			&order.Qty,
 			&order.EntryPrice,
 			&order.Target,
 			&order.Stoploss,
@@ -974,6 +984,9 @@ ORDER BY order_type, id`, ordersTableName), strings.TrimSpace(tradeID))
 
 func applyOrderSummary(trade *model.Trade) {
 	totalBrokerageFromOrders := 0.0
+	entryQty := 0
+	entryValue := 0.0
+	firstEntryPrice := 0.0
 	for _, order := range trade.Orders {
 		totalBrokerageFromOrders += order.Brokerage
 		switch strings.ToLower(strings.TrimSpace(order.OrderType)) {
@@ -981,8 +994,12 @@ func applyOrderSummary(trade *model.Trade) {
 			if order.OrderID != "" {
 				trade.EntryOrderIDs = append(trade.EntryOrderIDs, order.OrderID)
 			}
-			if trade.EntryPrice == 0 && order.EntryPrice > 0 {
-				trade.EntryPrice = order.EntryPrice
+			if firstEntryPrice == 0 && order.EntryPrice > 0 {
+				firstEntryPrice = order.EntryPrice
+			}
+			if order.EntryPrice > 0 && order.Qty > 0 {
+				entryQty += order.Qty
+				entryValue += order.EntryPrice * float64(order.Qty)
 			}
 			if trade.Target == 0 && order.Target > 0 {
 				trade.Target = order.Target
@@ -1007,7 +1024,12 @@ func applyOrderSummary(trade *model.Trade) {
 		}
 		trade.PNL += order.PNL
 	}
-	if trade.TotalBrokerage == 0 && totalBrokerageFromOrders > 0 {
+	if entryQty > 0 {
+		trade.EntryPrice = entryValue / float64(entryQty)
+	} else if trade.EntryPrice == 0 && firstEntryPrice > 0 {
+		trade.EntryPrice = firstEntryPrice
+	}
+	if totalBrokerageFromOrders > 0 {
 		trade.TotalBrokerage = totalBrokerageFromOrders
 	}
 }
@@ -1017,8 +1039,10 @@ func (s *Store) ListOpenTradesForSLPolling(ctx context.Context) ([]model.TradeFo
 SELECT
     t.id::text,
     COALESCE(a.botname, ''),
+    COALESCE(t.instrument_token, ''),
     UPPER(COALESCE(t.side, 'BUY')),
     COALESCE(t.qty, 0),
+    COALESCE(t.product, ''),
     COALESCE((
         SELECT entry_price
         FROM %s AS entry_orders
@@ -1029,16 +1053,20 @@ SELECT
         LIMIT 1
     ), 0)::float8,
     COALESCE(t.total_brokerage, 0)::float8,
-    COALESCE(sl_orders.order_id, ''),
-    COALESCE(sl_orders.stoploss, 0)::float8
+    COALESCE(o.order_id, ''),
+    lower(COALESCE(o.order_type, '')),
+    COALESCE(o.entry_price, 0)::float8,
+    COALESCE(o.stoploss, 0)::float8,
+    COALESCE(o.qty, 0),
+    COALESCE(o.brokerage, 0)::float8
 FROM %s AS t
-JOIN %s AS sl_orders ON sl_orders.trade_id = t.id
+JOIN %s AS o ON o.trade_id = t.id
 LEFT JOIN accounts AS a ON a.id = t.acct_id
 WHERE (t.status IS NULL OR UPPER(t.status) IN ('OPEN', 'PLACED', 'ENTRY_PLACED'))
-  AND lower(COALESCE(sl_orders.order_type, '')) = 'sl'
-  AND NULLIF(BTRIM(COALESCE(sl_orders.order_id, '')), '') IS NOT NULL
-  AND sl_orders.exit_time IS NULL
-ORDER BY t."timestamp", t.id`, ordersTableName, s.tradesTable, ordersTableName)
+  AND lower(COALESCE(o.order_type, '')) IN ('entry', 'sl')
+  AND NULLIF(BTRIM(COALESCE(o.order_id, '')), '') IS NOT NULL
+  AND (lower(COALESCE(o.order_type, '')) = 'entry' OR o.exit_time IS NULL)
+ORDER BY t."timestamp", t.id, o.order_type, o.id`, ordersTableName, s.tradesTable, ordersTableName)
 
 	rows, err := s.pool.Query(ctx, query)
 	if err != nil {
@@ -1051,29 +1079,52 @@ ORDER BY t."timestamp", t.id`, ordersTableName, s.tradesTable, ordersTableName)
 	for rows.Next() {
 		var tradeID string
 		var botName string
+		var instrumentToken string
 		var side string
 		var qty int
+		var product string
 		var entryPrice float64
 		var totalBrokerage float64
-		var slOrderID string
+		var orderID string
+		var orderType string
+		var orderEntryPrice float64
 		var stoploss float64
-		if err := rows.Scan(&tradeID, &botName, &side, &qty, &entryPrice, &totalBrokerage, &slOrderID, &stoploss); err != nil {
+		var orderQty int
+		var orderBrokerage float64
+		if err := rows.Scan(&tradeID, &botName, &instrumentToken, &side, &qty, &product, &entryPrice, &totalBrokerage, &orderID, &orderType, &orderEntryPrice, &stoploss, &orderQty, &orderBrokerage); err != nil {
 			return nil, fmt.Errorf("scan open trade for sl polling: %w", err)
 		}
 		trade := tradeByID[tradeID]
 		if trade == nil {
 			trade = &model.TradeForSLPolling{
-				ID:             tradeID,
-				BotName:        botName,
-				Side:           side,
-				Qty:            qty,
-				EntryPrice:     entryPrice,
-				TotalBrokerage: totalBrokerage,
+				ID:              tradeID,
+				BotName:         botName,
+				InstrumentToken: instrumentToken,
+				Side:            side,
+				Qty:             qty,
+				Product:         product,
+				EntryPrice:      entryPrice,
+				TotalBrokerage:  totalBrokerage,
 			}
 			tradeByID[tradeID] = trade
 			tradeOrder = append(tradeOrder, tradeID)
 		}
-		trade.SLOrders = append(trade.SLOrders, model.StopLossOrderForPolling{OrderID: slOrderID, Stoploss: stoploss})
+		switch orderType {
+		case "entry":
+			trade.EntryOrders = append(trade.EntryOrders, model.EntryOrderForPolling{
+				OrderID:    orderID,
+				EntryPrice: orderEntryPrice,
+				Qty:        orderQty,
+				Brokerage:  orderBrokerage,
+			})
+		case "sl":
+			trade.SLOrders = append(trade.SLOrders, model.StopLossOrderForPolling{
+				OrderID:   orderID,
+				Stoploss:  stoploss,
+				Qty:       orderQty,
+				Brokerage: orderBrokerage,
+			})
+		}
 	}
 	if rows.Err() != nil {
 		return nil, fmt.Errorf("iterate open trades for sl polling: %w", rows.Err())
@@ -1146,92 +1197,264 @@ WHERE trade_id::text = $1
 	return nil
 }
 
-func (s *Store) MarkTradeClosedFromSL(ctx context.Context, tradeID string, brokerOrderID string, exitPrice float64, additionalBrokerage float64, exitStatus string) error {
+func (s *Store) SyncEntryOrderExecution(ctx context.Context, tradeID string, brokerOrderID string, entryPrice float64, qty int, brokerage *float64) error {
+	tradeID = strings.TrimSpace(tradeID)
+	brokerOrderID = strings.TrimSpace(brokerOrderID)
+	if tradeID == "" {
+		return fmt.Errorf("trade id is required")
+	}
+	if brokerOrderID == "" {
+		return fmt.Errorf("broker order id is required")
+	}
+	if entryPrice <= 0 && qty <= 0 && brokerage == nil {
+		return nil
+	}
+
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("begin close trade transaction: %w", err)
+		return fmt.Errorf("begin sync entry order transaction: %w", err)
 	}
 	defer tx.Rollback(ctx)
 
-	query := fmt.Sprintf(`
-SELECT
-    COALESCE(t.acct_id::text, ''),
-    UPPER(COALESCE(t.side, 'BUY')),
-    COALESCE(t.qty, 0),
-    COALESCE((
-        SELECT entry_price
-        FROM %s AS entry_orders
-        WHERE entry_orders.trade_id = t.id
-          AND lower(COALESCE(entry_orders.order_type, '')) = 'entry'
-          AND entry_orders.entry_price IS NOT NULL
-        ORDER BY entry_orders.id
-        LIMIT 1
-    ), 0)::float8,
-    COALESCE(t.total_brokerage, 0)::float8
-FROM %s AS t
-LEFT JOIN accounts AS a ON a.id = t.acct_id
-WHERE t.id::text = $1
-FOR UPDATE OF t`, ordersTableName, s.tradesTable)
-
-	var accountID string
-	var side string
-	var qty int
-	var entryPrice float64
-	var currentBrokerage float64
-	if err := tx.QueryRow(ctx, query, strings.TrimSpace(tradeID)).Scan(&accountID, &side, &qty, &entryPrice, &currentBrokerage); err != nil {
-		return fmt.Errorf("load trade for closure: %w", err)
-	}
-
-	if qty < 0 {
-		qty = int(math.Abs(float64(qty)))
-	}
-
-	additionalBrokerage = math.Max(0, additionalBrokerage)
-	totalBrokerage := currentBrokerage + additionalBrokerage
-	pnl := calculatePNL(side, entryPrice, exitPrice, qty, totalBrokerage)
-
-	if strings.TrimSpace(exitStatus) == "" {
-		exitStatus = "STOPLOSS HIT"
-	}
-
-	updateTradeQuery := fmt.Sprintf(`
+	result, err := tx.Exec(ctx, fmt.Sprintf(`
 UPDATE %s
 SET
-    status = $2,
-    total_brokerage = $3
-WHERE id::text = $1
-  AND (status IS NULL OR UPPER(status) IN ('OPEN', 'PLACED', 'ENTRY_PLACED'))`, s.tradesTable)
-
-	result, err := tx.Exec(ctx, updateTradeQuery, strings.TrimSpace(tradeID), exitStatus, totalBrokerage)
+    entry_price = CASE WHEN $3 > 0 THEN $3 ELSE entry_price END,
+    qty = CASE WHEN $4 > 0 THEN $4 ELSE qty END,
+    brokerage = COALESCE($5::numeric, brokerage)
+WHERE trade_id::text = $1
+  AND lower(COALESCE(order_type, '')) = 'entry'
+  AND order_id = $2`, ordersTableName), tradeID, brokerOrderID, entryPrice, qty, nullFloatPtr(brokerage))
 	if err != nil {
-		return fmt.Errorf("mark trade closed: %w", err)
+		return fmt.Errorf("sync entry order execution: %w", err)
 	}
 	if result.RowsAffected() == 0 {
 		return nil
 	}
 
-	if _, err := tx.Exec(ctx, fmt.Sprintf(`
-UPDATE %s
-SET
-    exit_price = $3,
-    brokerage = COALESCE(brokerage, 0) + $4,
-    pnl = $5,
-    exit_time = NOW()
-WHERE trade_id::text = $1
-  AND lower(COALESCE(order_type, '')) = 'sl'
-  AND ($2 = '' OR order_id = $2)`, ordersTableName), strings.TrimSpace(tradeID), strings.TrimSpace(brokerOrderID), exitPrice, additionalBrokerage, pnl); err != nil {
-		return fmt.Errorf("mark sl order closed: %w", err)
+	accountID, err := s.recalculateTradeExecutionTx(ctx, tx, tradeID, "")
+	if err != nil {
+		return err
 	}
-
 	if err := s.refreshAccountNetProfitFromOrdersTx(ctx, tx, accountID); err != nil {
 		return err
 	}
-
 	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit close trade transaction: %w", err)
+		return fmt.Errorf("commit sync entry order transaction: %w", err)
 	}
 
 	return nil
+}
+
+func (s *Store) RecordStopLossFill(ctx context.Context, tradeID string, brokerOrderID string, exitPrice float64, qty int, brokerage *float64, exitStatus string) error {
+	tradeID = strings.TrimSpace(tradeID)
+	brokerOrderID = strings.TrimSpace(brokerOrderID)
+	if tradeID == "" {
+		return fmt.Errorf("trade id is required")
+	}
+	if brokerOrderID == "" {
+		return fmt.Errorf("broker order id is required")
+	}
+	if exitPrice <= 0 && qty <= 0 && brokerage == nil {
+		return nil
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin record sl fill transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	result, err := tx.Exec(ctx, fmt.Sprintf(`
+UPDATE %s
+SET
+    exit_price = CASE WHEN $3 > 0 THEN $3 ELSE exit_price END,
+    qty = CASE WHEN $4 > 0 THEN $4 ELSE qty END,
+    brokerage = COALESCE($5::numeric, brokerage),
+    exit_time = COALESCE(exit_time, NOW())
+WHERE trade_id::text = $1
+  AND lower(COALESCE(order_type, '')) = 'sl'
+  AND order_id = $2`, ordersTableName), tradeID, brokerOrderID, exitPrice, qty, nullFloatPtr(brokerage))
+	if err != nil {
+		return fmt.Errorf("record sl fill: %w", err)
+	}
+	if result.RowsAffected() == 0 {
+		return nil
+	}
+
+	if strings.TrimSpace(exitStatus) == "" {
+		exitStatus = "STOPLOSS HIT"
+	}
+	accountID, err := s.recalculateTradeExecutionTx(ctx, tx, tradeID, exitStatus)
+	if err != nil {
+		return err
+	}
+	if err := s.refreshAccountNetProfitFromOrdersTx(ctx, tx, accountID); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit record sl fill transaction: %w", err)
+	}
+
+	return nil
+}
+
+func (s *Store) MarkTradeClosedFromSL(ctx context.Context, tradeID string, brokerOrderID string, exitPrice float64, additionalBrokerage float64, exitStatus string) error {
+	var brokerage *float64
+	if additionalBrokerage > 0 {
+		value := additionalBrokerage
+		brokerage = &value
+	}
+	return s.RecordStopLossFill(ctx, tradeID, brokerOrderID, exitPrice, 0, brokerage, exitStatus)
+}
+
+type slOrderExecution struct {
+	id        string
+	qty       int
+	exitPrice float64
+	brokerage float64
+}
+
+func (s *Store) recalculateTradeExecutionTx(ctx context.Context, tx pgx.Tx, tradeID string, exitStatus string) (string, error) {
+	query := fmt.Sprintf(`
+SELECT
+    COALESCE(acct_id::text, ''),
+    UPPER(COALESCE(side, 'BUY')),
+    COALESCE(qty, 0)
+FROM %s
+WHERE id::text = $1
+FOR UPDATE`, s.tradesTable)
+
+	var accountID string
+	var side string
+	var tradeQty int
+	if err := tx.QueryRow(ctx, query, strings.TrimSpace(tradeID)).Scan(&accountID, &side, &tradeQty); err != nil {
+		return "", fmt.Errorf("load trade execution state: %w", err)
+	}
+	if tradeQty < 0 {
+		tradeQty = int(math.Abs(float64(tradeQty)))
+	}
+
+	rows, err := tx.Query(ctx, fmt.Sprintf(`
+SELECT
+    id::text,
+    lower(COALESCE(order_type, '')),
+    COALESCE(qty, 0),
+    COALESCE(entry_price, 0)::float8,
+    COALESCE(exit_price, 0)::float8,
+    COALESCE(brokerage, 0)::float8,
+    exit_time IS NOT NULL
+FROM %s
+WHERE trade_id::text = $1
+ORDER BY order_type, id`, ordersTableName), strings.TrimSpace(tradeID))
+	if err != nil {
+		return "", fmt.Errorf("load order execution rows: %w", err)
+	}
+	defer rows.Close()
+
+	entryQty := 0
+	entryValue := 0.0
+	entryBrokerage := 0.0
+	firstEntryPrice := 0.0
+	totalBrokerage := 0.0
+	openSLCount := 0
+	closedSLOrders := make([]slOrderExecution, 0)
+
+	for rows.Next() {
+		var orderID string
+		var orderType string
+		var orderQty int
+		var entryPrice float64
+		var exitPrice float64
+		var orderBrokerage float64
+		var hasExitTime bool
+		if err := rows.Scan(&orderID, &orderType, &orderQty, &entryPrice, &exitPrice, &orderBrokerage, &hasExitTime); err != nil {
+			return "", fmt.Errorf("scan order execution row: %w", err)
+		}
+		if orderQty < 0 {
+			orderQty = int(math.Abs(float64(orderQty)))
+		}
+		totalBrokerage += orderBrokerage
+
+		switch orderType {
+		case "entry":
+			entryBrokerage += orderBrokerage
+			if firstEntryPrice == 0 && entryPrice > 0 {
+				firstEntryPrice = entryPrice
+			}
+			if orderQty > 0 && entryPrice > 0 {
+				entryQty += orderQty
+				entryValue += entryPrice * float64(orderQty)
+			}
+		case "sl":
+			if hasExitTime && exitPrice > 0 {
+				closedSLOrders = append(closedSLOrders, slOrderExecution{
+					id:        orderID,
+					qty:       orderQty,
+					exitPrice: exitPrice,
+					brokerage: orderBrokerage,
+				})
+			} else {
+				openSLCount++
+			}
+		}
+	}
+	if rows.Err() != nil {
+		return "", fmt.Errorf("iterate order execution rows: %w", rows.Err())
+	}
+
+	entryPrice := firstEntryPrice
+	if entryQty > 0 {
+		entryPrice = entryValue / float64(entryQty)
+	}
+	baseQty := entryQty
+	if baseQty <= 0 {
+		baseQty = tradeQty
+	}
+
+	for _, slOrder := range closedSLOrders {
+		orderQty := slOrder.qty
+		if orderQty <= 0 && len(closedSLOrders) == 1 && tradeQty > 0 {
+			orderQty = tradeQty
+		}
+
+		entryBrokerageShare := 0.0
+		if orderQty > 0 && baseQty > 0 {
+			entryBrokerageShare = entryBrokerage * float64(orderQty) / float64(baseQty)
+		} else if len(closedSLOrders) == 1 {
+			entryBrokerageShare = entryBrokerage
+		}
+
+		pnl := calculatePNL(side, entryPrice, slOrder.exitPrice, orderQty, slOrder.brokerage+entryBrokerageShare)
+		if _, err := tx.Exec(ctx, fmt.Sprintf(`
+UPDATE %s
+SET
+    qty = CASE WHEN COALESCE(qty, 0) <= 0 AND $3 > 0 THEN $3 ELSE qty END,
+    pnl = $2
+WHERE id::text = $1`, ordersTableName), slOrder.id, pnl, orderQty); err != nil {
+			return "", fmt.Errorf("recalculate sl order pnl: %w", err)
+		}
+	}
+
+	if openSLCount == 0 && len(closedSLOrders) > 0 && strings.TrimSpace(exitStatus) != "" {
+		if _, err := tx.Exec(ctx, fmt.Sprintf(`
+UPDATE %s
+SET
+    status = $2,
+    total_brokerage = $3
+WHERE id::text = $1`, s.tradesTable), strings.TrimSpace(tradeID), strings.TrimSpace(exitStatus), totalBrokerage); err != nil {
+			return "", fmt.Errorf("update closed trade execution totals: %w", err)
+		}
+		return accountID, nil
+	}
+
+	if _, err := tx.Exec(ctx, fmt.Sprintf(`
+UPDATE %s
+SET total_brokerage = $2
+WHERE id::text = $1`, s.tradesTable), strings.TrimSpace(tradeID), totalBrokerage); err != nil {
+		return "", fmt.Errorf("update trade execution totals: %w", err)
+	}
+	return accountID, nil
 }
 
 func calculatePNL(side string, entryPrice float64, exitPrice float64, qty int, totalBrokerage float64) float64 {
@@ -1253,6 +1476,13 @@ func nullIfEmpty(value string) any {
 }
 
 func nullFloatPtr(value *float64) any {
+	if value == nil {
+		return nil
+	}
+	return *value
+}
+
+func nullIntPtr(value *int) any {
 	if value == nil {
 		return nil
 	}

@@ -104,6 +104,7 @@ type Order struct {
 	TradeID         string     `json:"trade_id,omitempty"`
 	InstrumentToken string     `json:"instrument_token,omitempty"`
 	OrderType       string     `json:"order_type"`
+	Qty             int        `json:"qty,omitempty"`
 	EntryPrice      float64    `json:"entry_price,omitempty"`
 	Target          float64    `json:"target,omitempty"`
 	Stoploss        float64    `json:"stoploss,omitempty"`
@@ -149,16 +150,28 @@ type Trade struct {
 }
 
 type StopLossOrderForPolling struct {
-	OrderID  string
-	Stoploss float64
+	OrderID   string
+	Stoploss  float64
+	Qty       int
+	Brokerage float64
+}
+
+type EntryOrderForPolling struct {
+	OrderID    string
+	EntryPrice float64
+	Qty        int
+	Brokerage  float64
 }
 
 type TradeForSLPolling struct {
-	ID             string
-	BotName        string
-	Side           string
-	Qty            int
-	EntryPrice     float64
-	TotalBrokerage float64
-	SLOrders       []StopLossOrderForPolling
+	ID              string
+	BotName         string
+	InstrumentToken string
+	Side            string
+	Qty             int
+	Product         string
+	EntryPrice      float64
+	TotalBrokerage  float64
+	EntryOrders     []EntryOrderForPolling
+	SLOrders        []StopLossOrderForPolling
 }

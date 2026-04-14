@@ -24,6 +24,7 @@ type Config struct {
 	UpstoxOrderModifyPath  string
 	UpstoxOrderDetailsPath string
 	UpstoxOrderTradesPath  string
+	UpstoxBrokeragePath    string
 	UpstoxAPIVersion       string
 	UpstoxStatusRequestGap time.Duration
 	UpstoxStatusCacheTTL   time.Duration
@@ -45,6 +46,7 @@ func Load() (Config, error) {
 		UpstoxOrderModifyPath:  normalizePath(getEnv("UPSTOX_ORDER_MODIFY_PATH", "/v3/order/modify")),
 		UpstoxOrderDetailsPath: normalizePath(getEnv("UPSTOX_ORDER_DETAILS_PATH", "/v2/order/details")),
 		UpstoxOrderTradesPath:  normalizePath(getEnv("UPSTOX_ORDER_TRADES_PATH", "/v2/order/trades")),
+		UpstoxBrokeragePath:    normalizePath(getEnv("UPSTOX_BROKERAGE_PATH", "/v2/charges/brokerage")),
 		UpstoxAPIVersion:       strings.TrimSpace(getEnv("UPSTOX_API_VERSION", "2.0")),
 		UpstoxStatusRequestGap: parseDurationEnv("ORDERSYSTEM_UPSTOX_STATUS_REQUEST_GAP", 500*time.Millisecond),
 		UpstoxStatusCacheTTL:   parseDurationEnv("ORDERSYSTEM_UPSTOX_STATUS_CACHE_TTL", 2*time.Second),

@@ -25,6 +25,7 @@ type Client struct {
 	orderModifyPath  string
 	orderDetailsPath string
 	orderTradesPath  string
+	brokeragePath    string
 	apiVersion       string
 
 	statusLimiter  *requestGate
@@ -72,18 +73,39 @@ type ModifyOrderResult struct {
 }
 
 type OrderStatus struct {
-	OrderID      string
-	Status       string
-	AveragePrice *float64
-	RawData      json.RawMessage
+	OrderID         string
+	Status          string
+	AveragePrice    *float64
+	Price           *float64
+	Quantity        int
+	FilledQuantity  int
+	InstrumentToken string
+	Product         string
+	TransactionType string
+	OrderType       string
+	RawData         json.RawMessage
 }
 
 type OrderTrades struct {
-	OrderID      string
-	Filled       bool
-	Status       string
-	AveragePrice *float64
-	RawData      json.RawMessage
+	OrderID        string
+	Filled         bool
+	Status         string
+	AveragePrice   *float64
+	FilledQuantity int
+	RawData        json.RawMessage
+}
+
+type BrokerageRequest struct {
+	InstrumentToken string
+	Quantity        int
+	Product         string
+	TransactionType string
+	Price           float64
+}
+
+type BrokerageResult struct {
+	Total   *float64
+	RawData json.RawMessage
 }
 
 type envelope struct {
@@ -129,6 +151,7 @@ func NewClient(cfg config.Config) *Client {
 		orderModifyPath:  cfg.UpstoxOrderModifyPath,
 		orderDetailsPath: cfg.UpstoxOrderDetailsPath,
 		orderTradesPath:  cfg.UpstoxOrderTradesPath,
+		brokeragePath:    cfg.UpstoxBrokeragePath,
 		apiVersion:       cfg.UpstoxAPIVersion,
 		statusLimiter:    newRequestGate(cfg.UpstoxStatusRequestGap),
 		statusCacheTTL:   cfg.UpstoxStatusCacheTTL,
@@ -266,13 +289,21 @@ func (c *Client) GetOrderStatus(ctx context.Context, orderID string) (OrderStatu
 
 	obj := firstObject(data)
 	orderStatus := strings.TrimSpace(extractString(obj, "status", "order_status", "state"))
-	avgPrice := extractFloat(obj, "average_price", "avg_price", "price")
+	avgPrice := extractFloat(obj, "average_price", "avg_price")
+	price := extractFloat(obj, "price", "order_price")
 
 	return OrderStatus{
-		OrderID:      orderID,
-		Status:       orderStatus,
-		AveragePrice: avgPrice,
-		RawData:      data,
+		OrderID:         orderID,
+		Status:          orderStatus,
+		AveragePrice:    avgPrice,
+		Price:           price,
+		Quantity:        extractInt(obj, "quantity", "qty"),
+		FilledQuantity:  extractInt(obj, "filled_quantity", "traded_quantity", "filled_qty"),
+		InstrumentToken: strings.TrimSpace(extractString(obj, "instrument_token", "instrumentToken")),
+		Product:         strings.ToUpper(strings.TrimSpace(extractString(obj, "product"))),
+		TransactionType: strings.ToUpper(strings.TrimSpace(extractString(obj, "transaction_type", "transactionType"))),
+		OrderType:       strings.ToUpper(strings.TrimSpace(extractString(obj, "order_type", "orderType"))),
+		RawData:         data,
 	}, nil
 }
 
@@ -294,17 +325,74 @@ func (c *Client) GetOrderTrades(ctx context.Context, orderID string) (OrderTrade
 		return OrderTrades{}, err
 	}
 
-	filled, avgPrice := extractTradesFill(data)
+	filled, avgPrice, filledQty := extractTradesFill(data)
 	obj := firstObject(data)
 	status := strings.TrimSpace(extractString(obj, "status", "order_status", "state"))
 
 	return OrderTrades{
-		OrderID:      orderID,
-		Filled:       filled,
-		Status:       status,
-		AveragePrice: avgPrice,
-		RawData:      data,
+		OrderID:        orderID,
+		Filled:         filled,
+		Status:         status,
+		AveragePrice:   avgPrice,
+		FilledQuantity: filledQty,
+		RawData:        data,
 	}, nil
+}
+
+func (c *Client) GetBrokerage(ctx context.Context, req BrokerageRequest) (BrokerageResult, error) {
+	if !c.Enabled() {
+		return BrokerageResult{}, fmt.Errorf("upstox client is not configured")
+	}
+
+	req.InstrumentToken = strings.TrimSpace(req.InstrumentToken)
+	req.Product = strings.ToUpper(strings.TrimSpace(req.Product))
+	req.TransactionType = strings.ToUpper(strings.TrimSpace(req.TransactionType))
+	if req.InstrumentToken == "" {
+		return BrokerageResult{}, fmt.Errorf("instrument_token is required")
+	}
+	if req.Quantity <= 0 {
+		return BrokerageResult{}, fmt.Errorf("quantity must be > 0")
+	}
+	if req.Product == "" {
+		return BrokerageResult{}, fmt.Errorf("product is required")
+	}
+	if req.TransactionType == "" {
+		return BrokerageResult{}, fmt.Errorf("transaction_type is required")
+	}
+	if req.Price <= 0 {
+		return BrokerageResult{}, fmt.Errorf("price must be > 0")
+	}
+
+	query := url.Values{}
+	query.Set("instrument_token", req.InstrumentToken)
+	query.Set("quantity", strconv.Itoa(req.Quantity))
+	query.Set("product", req.Product)
+	query.Set("transaction_type", req.TransactionType)
+	query.Set("price", strconv.FormatFloat(req.Price, 'f', -1, 64))
+
+	cacheKey := strings.Join([]string{
+		"brokerage",
+		req.InstrumentToken,
+		strconv.Itoa(req.Quantity),
+		req.Product,
+		req.TransactionType,
+		strconv.FormatFloat(req.Price, 'f', 6, 64),
+	}, ":")
+	data, err := c.getBrokerData(ctx, brokerGETRequest{
+		path:      c.brokeragePath,
+		query:     query,
+		cacheKey:  cacheKey,
+		operation: "brokerage",
+	})
+	if err != nil {
+		return BrokerageResult{}, err
+	}
+
+	total := extractChargesTotal(data)
+	if total == nil {
+		return BrokerageResult{}, fmt.Errorf("upstox brokerage response missing data.charges.total")
+	}
+	return BrokerageResult{Total: total, RawData: data}, nil
 }
 
 func IsTerminalOrderStatus(status string) bool {
@@ -333,6 +421,7 @@ func normalizeStatus(status string) string {
 type brokerGETRequest struct {
 	path      string
 	orderID   string
+	query     url.Values
 	cacheKey  string
 	operation string
 }
@@ -374,17 +463,17 @@ func (g *requestGate) Wait(ctx context.Context) error {
 func (c *Client) getBrokerData(ctx context.Context, req brokerGETRequest) (json.RawMessage, error) {
 	req.orderID = strings.TrimSpace(req.orderID)
 	req.path = strings.TrimSpace(req.path)
-	if req.orderID == "" {
-		return nil, fmt.Errorf("order id is required")
+	if req.operation == "" {
+		req.operation = "broker data"
 	}
 	if req.path == "" {
 		return nil, fmt.Errorf("upstox %s path is not configured", req.operation)
 	}
+	if req.orderID == "" && len(req.query) == 0 {
+		return nil, fmt.Errorf("upstox %s request parameters are required", req.operation)
+	}
 	if req.cacheKey == "" {
 		req.cacheKey = req.operation + ":" + req.orderID
-	}
-	if req.operation == "" {
-		req.operation = "broker data"
 	}
 
 	if data, ok, err := c.cachedBrokerData(req); ok || err != nil {
@@ -397,7 +486,7 @@ func (c *Client) getBrokerData(ctx context.Context, req brokerGETRequest) (json.
 		}
 	}
 
-	requestURL := c.buildURL(req.path, req.orderID)
+	requestURL := c.buildURLWithQuery(req.path, req.orderID, req.query)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create %s request: %w", req.operation, err)
@@ -524,13 +613,17 @@ func cloneRawMessage(data json.RawMessage) json.RawMessage {
 }
 
 func (c *Client) buildURL(path string, orderID string) string {
-	if strings.HasPrefix(path, "http://") || strings.HasPrefix(path, "https://") {
-		return c.withQuery(path, orderID)
-	}
-	return c.withQuery(c.baseURL+path, orderID)
+	return c.buildURLWithQuery(path, orderID, nil)
 }
 
-func (c *Client) withQuery(rawURL string, orderID string) string {
+func (c *Client) buildURLWithQuery(path string, orderID string, query url.Values) string {
+	if strings.HasPrefix(path, "http://") || strings.HasPrefix(path, "https://") {
+		return c.withQuery(path, orderID, query)
+	}
+	return c.withQuery(c.baseURL+path, orderID, query)
+}
+
+func (c *Client) withQuery(rawURL string, orderID string, query url.Values) string {
 	if orderID != "" && strings.Contains(rawURL, "{order_id}") {
 		return strings.ReplaceAll(rawURL, "{order_id}", url.PathEscape(orderID))
 	}
@@ -540,6 +633,12 @@ func (c *Client) withQuery(rawURL string, orderID string) string {
 		return rawURL
 	}
 	q := parsed.Query()
+	for key, values := range query {
+		q.Del(key)
+		for _, value := range values {
+			q.Add(key, value)
+		}
+	}
 	if orderID != "" {
 		q.Set("order_id", orderID)
 	}
@@ -653,17 +752,17 @@ func firstObject(data json.RawMessage) map[string]any {
 	return nil
 }
 
-func extractTradesFill(data json.RawMessage) (bool, *float64) {
+func extractTradesFill(data json.RawMessage) (bool, *float64, int) {
 	trades := tradeObjects(data)
 	if len(trades) == 0 {
 		obj := firstObject(data)
 		if obj == nil {
-			return false, nil
+			return false, nil, 0
 		}
 		if IsFilledOrderStatus(extractString(obj, "status", "order_status", "state")) {
-			return true, extractFloat(obj, "average_price", "avg_price", "price")
+			return true, extractFloat(obj, "average_price", "avg_price", "price"), extractInt(obj, "filled_quantity", "quantity", "qty", "traded_quantity")
 		}
-		return false, nil
+		return false, nil, 0
 	}
 
 	totalQty := 0
@@ -684,11 +783,27 @@ func extractTradesFill(data json.RawMessage) (bool, *float64) {
 	}
 
 	if totalQty <= 0 {
-		return sawTrade, nil
+		return sawTrade, nil, 0
 	}
 
 	avg := totalValue / float64(totalQty)
-	return true, &avg
+	return true, &avg, totalQty
+}
+
+func extractChargesTotal(data json.RawMessage) *float64 {
+	obj := firstObject(data)
+	if obj == nil {
+		return nil
+	}
+	rawCharges, ok := obj["charges"]
+	if !ok {
+		return nil
+	}
+	charges, ok := rawCharges.(map[string]any)
+	if !ok {
+		return nil
+	}
+	return extractFloat(charges, "total")
 }
 
 func tradeObjects(data json.RawMessage) []map[string]any {

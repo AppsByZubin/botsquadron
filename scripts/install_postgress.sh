@@ -479,6 +479,7 @@ CREATE TABLE IF NOT EXISTS orders (
     trade_id UUID REFERENCES trades(id) ON DELETE CASCADE,
     instrument_token TEXT,
     order_type TEXT,
+    qty INTEGER,
     entry_price NUMERIC(18,6),
     target NUMERIC(18,6),
     stoploss NUMERIC(18,6),
@@ -494,6 +495,7 @@ GRANT ALL PRIVILEGES ON TABLE orders TO "${DB_USER}";
 CREATE INDEX IF NOT EXISTS idx_orders_trade_id ON orders (trade_id);
 CREATE INDEX IF NOT EXISTS idx_orders_order_id ON orders (order_id);
 CREATE INDEX IF NOT EXISTS idx_orders_trade_type ON orders (trade_id, order_type);
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS qty INTEGER;
 
 DO \
 \$\$\
