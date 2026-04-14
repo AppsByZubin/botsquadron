@@ -41,8 +41,9 @@ type PlaceOrderRequest struct {
 }
 
 type PlaceOrderResult struct {
-	OrderID string
-	RawData json.RawMessage
+	OrderID  string
+	OrderIDs []string
+	RawData  json.RawMessage
 }
 
 type ModifyOrderRequest struct {
@@ -129,12 +130,12 @@ func (c *Client) PlaceOrder(ctx context.Context, req PlaceOrderRequest) (PlaceOr
 		return PlaceOrderResult{}, fmt.Errorf("upstox place order non-success status: %s", status)
 	}
 
-	orderID := extractOrderID(data)
-	if orderID == "" {
+	orderIDs := extractOrderIDs(data)
+	if len(orderIDs) == 0 {
 		return PlaceOrderResult{}, fmt.Errorf("upstox place order succeeded but order id missing")
 	}
 
-	return PlaceOrderResult{OrderID: orderID, RawData: data}, nil
+	return PlaceOrderResult{OrderID: orderIDs[0], OrderIDs: orderIDs, RawData: data}, nil
 }
 
 func (c *Client) ModifyOrder(ctx context.Context, req ModifyOrderRequest) (ModifyOrderResult, error) {
@@ -309,11 +310,72 @@ func decodeEnvelope(payload []byte) (string, json.RawMessage, error) {
 }
 
 func extractOrderID(data json.RawMessage) string {
-	obj := firstObject(data)
-	if obj == nil {
+	orderIDs := extractOrderIDs(data)
+	if len(orderIDs) == 0 {
 		return ""
 	}
-	return strings.TrimSpace(extractString(obj, "order_id", "orderId", "id"))
+	return orderIDs[0]
+}
+
+func extractOrderIDs(data json.RawMessage) []string {
+	if len(data) == 0 {
+		return nil
+	}
+
+	var obj map[string]any
+	if err := json.Unmarshal(data, &obj); err == nil && obj != nil {
+		return extractOrderIDsFromObject(obj)
+	}
+
+	var list []map[string]any
+	if err := json.Unmarshal(data, &list); err == nil {
+		orderIDs := make([]string, 0, len(list))
+		for _, item := range list {
+			orderIDs = appendOrderID(orderIDs, extractString(item, "order_id", "orderId", "id"))
+		}
+		return orderIDs
+	}
+
+	return nil
+}
+
+func extractOrderIDsFromObject(obj map[string]any) []string {
+	orderIDs := make([]string, 0, 1)
+	orderIDs = appendOrderID(orderIDs, extractString(obj, "order_id", "orderId", "id"))
+
+	for _, key := range []string{"order_ids", "orderIds", "ids"} {
+		raw, ok := obj[key]
+		if !ok {
+			continue
+		}
+		switch values := raw.(type) {
+		case []any:
+			for _, value := range values {
+				if text, ok := value.(string); ok {
+					orderIDs = appendOrderID(orderIDs, text)
+				}
+			}
+		case []string:
+			for _, value := range values {
+				orderIDs = appendOrderID(orderIDs, value)
+			}
+		}
+	}
+
+	return orderIDs
+}
+
+func appendOrderID(orderIDs []string, value string) []string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return orderIDs
+	}
+	for _, existing := range orderIDs {
+		if existing == value {
+			return orderIDs
+		}
+	}
+	return append(orderIDs, value)
 }
 
 func firstObject(data json.RawMessage) map[string]any {

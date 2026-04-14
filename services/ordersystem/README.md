@@ -7,15 +7,17 @@
 - `POST /v1/trades` to create trade records from bots
 - `POST /v1/trades/{id}/modify` to modify all SL broker orders for a trade
 - Writes/updates PostgreSQL tables:
-  - `trades`
   - `accounts`
-  - `trades.account_id` links to `accounts.id` after the trade is closed
+  - `trades`
+  - `orders`
+  - `trades.acct_id` links to `accounts.id`
+  - broker entry/SL ids are stored as one row per order in `orders`
 - In `APP_MODE=production`:
   - places entry order via Upstox Orders API
   - places SL order (when `sl_trigger` is provided)
   - periodically polls SL order status
   - closes trade in DB when SL is completed
-  - updates daily `accounts.profit` and `accounts.max_drawdown`
+  - updates daily `accounts.net_profit`
 
 ## API Endpoints
 
@@ -43,7 +45,7 @@
   "sl_trigger": 90,
   "sl_limit": 89.5,
   "spot_trail_anchor": 22350,
-  "taxes": 0,
+  "total_brokerage": 0,
   "tag_entry": "bot-entry",
   "tag_sl": "bot-sl",
   "description": "PCR VWAP setup"
@@ -57,11 +59,19 @@
   "mode": "production",
   "validity": "DAY",
   "order_type": "SL",
-  "trigger_price": 91,
-  "price": 90.5,
+  "stoploss": 91,
+  "sl_limit": 90.5,
   "spot_trail_anchor": 22375
 }
 ```
+
+Validation:
+
+- At least one of `stoploss`, `sl_limit`, or `spot_trail_anchor` is required.
+- Provided price fields must be greater than `0`.
+- `validity` must be `DAY` or `IOC`.
+- `order_type` must be `SL` or `SL-M`.
+- In production, `stoploss` is required; `SL` orders also require `sl_limit`.
 
 ## Environment Variables
 

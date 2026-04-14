@@ -154,19 +154,13 @@ else
   sudo -u postgres psql -d "$DB_NAME" <<SQL
 CREATE TABLE trades (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    acct_id UUID,
     symbol TEXT,
     instrument_token TEXT,
     side TEXT,
     qty INTEGER,
     product TEXT,
     validity TEXT,
-    entry_order_ids JSONB DEFAULT '[]'::jsonb,
-    sl_order_ids JSONB DEFAULT '[]'::jsonb,
-    target_order_id TEXT,
-    entry_price NUMERIC(18,6),
-    target NUMERIC(18,6),
-    stoploss NUMERIC(18,6),
-    sl_limit NUMERIC(18,6),
     tsl_active BOOLEAN DEFAULT FALSE,
     start_trail_after NUMERIC(18,6),
     entry_spot NUMERIC(18,6),
@@ -175,18 +169,15 @@ CREATE TABLE trades (
     trail_points NUMERIC(18,6),
     status TEXT,
     timestamp TIMESTAMPTZ DEFAULT NOW(),
-    exit_price NUMERIC(18,6),
-    pnl NUMERIC(18,6),
-    exit_time TIMESTAMPTZ,
-    taxes NUMERIC(18,6),
+    total_brokerage NUMERIC(18,6),
     tag_entry TEXT,
     tag_sl TEXT,
-    description TEXT,
-    sl_order_qty_map JSONB DEFAULT '{}'::jsonb
+    description TEXT
 );
 
 ALTER TABLE trades OWNER TO "${DB_USER}";
 GRANT ALL PRIVILEGES ON TABLE trades TO "${DB_USER}";
+CREATE INDEX IF NOT EXISTS idx_trades_acct_id ON trades (acct_id);
 CREATE INDEX IF NOT EXISTS idx_trades_timestamp ON trades ("timestamp");
 CREATE INDEX IF NOT EXISTS idx_trades_status ON trades (status);
 CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades (symbol);
@@ -194,31 +185,67 @@ SQL
 fi
 
 sudo -u postgres psql -d "$DB_NAME" <<SQL
-ALTER TABLE IF EXISTS trades ADD COLUMN IF NOT EXISTS taxes NUMERIC(18,6);
+ALTER TABLE IF EXISTS trades ADD COLUMN IF NOT EXISTS acct_id UUID;
+ALTER TABLE IF EXISTS trades ADD COLUMN IF NOT EXISTS total_brokerage NUMERIC(18,6);
+CREATE INDEX IF NOT EXISTS idx_trades_acct_id ON trades (acct_id);
+
+DO \
+\$\$\
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = 'trades'
+      AND column_name = 'account_id'
+  ) THEN
+    UPDATE trades
+    SET acct_id = COALESCE(acct_id, account_id)
+    WHERE acct_id IS NULL;
+  END IF;
+
+  IF EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = 'trades'
+      AND column_name = 'taxes'
+  ) THEN
+    UPDATE trades
+    SET total_brokerage = COALESCE(total_brokerage, taxes, 0)
+    WHERE total_brokerage IS NULL OR total_brokerage = 0;
+  END IF;
+END
+\$\$;
 
 CREATE TABLE IF NOT EXISTS accounts (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     botname TEXT,
+    curr_date TEXT,
     month_year TEXT,
     init_cash NUMERIC(18,6),
-    current_date TEXT,
-    profit NUMERIC(18,6),
-    max_drawdown NUMERIC(18,6)
+    net_profit NUMERIC(18,6) DEFAULT 0
 );
 
 ALTER TABLE accounts OWNER TO "${DB_USER}";
 GRANT ALL PRIVILEGES ON TABLE accounts TO "${DB_USER}";
-CREATE UNIQUE INDEX IF NOT EXISTS uq_accounts_bot_month_date ON accounts (botname, month_year, current_date);
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS botname TEXT;
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS curr_date TEXT;
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS month_year TEXT;
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS init_cash NUMERIC(18,6);
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS net_profit NUMERIC(18,6) DEFAULT 0;
+ALTER TABLE accounts DROP COLUMN IF EXISTS max_drawdown;
+CREATE INDEX IF NOT EXISTS idx_accounts_bot_curr_date ON accounts (botname, curr_date);
 CREATE INDEX IF NOT EXISTS idx_accounts_bot_month_year ON accounts (botname, month_year);
 SQL
 
 sudo -u postgres psql -d "$DB_NAME" <<SQL
 ALTER TABLE IF EXISTS accounts ADD COLUMN IF NOT EXISTS botname TEXT;
+ALTER TABLE IF EXISTS accounts ADD COLUMN IF NOT EXISTS curr_date TEXT;
 ALTER TABLE IF EXISTS accounts ADD COLUMN IF NOT EXISTS month_year TEXT;
 ALTER TABLE IF EXISTS accounts ADD COLUMN IF NOT EXISTS init_cash NUMERIC(18,6);
-ALTER TABLE IF EXISTS accounts ADD COLUMN IF NOT EXISTS current_date TEXT;
-ALTER TABLE IF EXISTS accounts ADD COLUMN IF NOT EXISTS profit NUMERIC(18,6);
-ALTER TABLE IF EXISTS accounts ADD COLUMN IF NOT EXISTS max_drawdown NUMERIC(18,6);
+ALTER TABLE IF EXISTS accounts ADD COLUMN IF NOT EXISTS net_profit NUMERIC(18,6) DEFAULT 0;
+ALTER TABLE IF EXISTS accounts DROP COLUMN IF EXISTS max_drawdown;
 
 DO \
 \$\$\
@@ -252,17 +279,23 @@ BEGIN
     FROM information_schema.columns
     WHERE table_schema = 'public'
       AND table_name = 'accounts'
-      AND column_name = 'max_dradown'
+      AND column_name = 'profit'
   ) THEN
     UPDATE accounts
-    SET max_drawdown = COALESCE(
-      max_drawdown,
-      CASE
-        WHEN max_dradown > 0 THEN -ABS(max_dradown)
-        ELSE max_dradown
-      END
-    )
-    WHERE max_drawdown IS NULL;
+    SET net_profit = COALESCE(net_profit, profit, 0)
+    WHERE net_profit IS NULL OR net_profit = 0;
+  END IF;
+
+  IF EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = 'accounts'
+      AND column_name = 'current_date'
+  ) THEN
+    UPDATE accounts
+    SET curr_date = COALESCE(NULLIF(BTRIM(curr_date), ''), NULLIF(BTRIM(current_date), ''))
+    WHERE curr_date IS NULL OR BTRIM(curr_date) = '';
   END IF;
 
   IF EXISTS (
@@ -282,23 +315,15 @@ BEGIN
     SET month_year = COALESCE(
           NULLIF(BTRIM(month_year), ''),
           LPAD(month::text, 2, '0') || year::text
-        ),
-        current_date = COALESCE(
-          NULLIF(BTRIM(current_date), ''),
-          TO_CHAR(MAKE_DATE(year, month, 1), 'DD-MM-YYYY')
         )
     WHERE year IS NOT NULL
       AND month IS NOT NULL
       AND month BETWEEN 1 AND 12
-      AND (
-        month_year IS NULL OR BTRIM(month_year) = ''
-        OR current_date IS NULL OR BTRIM(current_date) = ''
-      );
+      AND (month_year IS NULL OR BTRIM(month_year) = '');
   END IF;
 
   UPDATE accounts
-  SET profit = COALESCE(profit, 0),
-      max_drawdown = COALESCE(max_drawdown, 0);
+  SET net_profit = COALESCE(net_profit, 0);
 END
 \$\$;
 SQL
@@ -353,8 +378,8 @@ END
 SQL
 
 sudo -u postgres psql -d "$DB_NAME" <<SQL
-ALTER TABLE IF EXISTS trades ADD COLUMN IF NOT EXISTS account_id UUID;
-CREATE INDEX IF NOT EXISTS idx_trades_account_id ON trades (account_id);
+ALTER TABLE IF EXISTS trades ADD COLUMN IF NOT EXISTS acct_id UUID;
+CREATE INDEX IF NOT EXISTS idx_trades_acct_id ON trades (acct_id);
 
 DO \
 \$\$\
@@ -362,12 +387,105 @@ BEGIN
   IF to_regclass('public.trades') IS NOT NULL AND NOT EXISTS (
     SELECT 1
     FROM pg_constraint
-    WHERE conname = 'fk_trades_account_id'
+    WHERE conname = 'fk_trades_acct_id'
       AND conrelid = to_regclass('public.trades')
   ) THEN
     ALTER TABLE trades
-      ADD CONSTRAINT fk_trades_account_id
-      FOREIGN KEY (account_id) REFERENCES accounts(id);
+      ADD CONSTRAINT fk_trades_acct_id
+      FOREIGN KEY (acct_id) REFERENCES accounts(id);
+  END IF;
+END
+\$\$;
+
+CREATE TABLE IF NOT EXISTS orders (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    order_id TEXT,
+    trade_id UUID REFERENCES trades(id) ON DELETE CASCADE,
+    instrument_token TEXT,
+    order_type TEXT,
+    entry_price NUMERIC(18,6),
+    target NUMERIC(18,6),
+    stoploss NUMERIC(18,6),
+    sl_limit NUMERIC(18,6),
+    exit_price NUMERIC(18,6),
+    pnl NUMERIC(18,6),
+    exit_time TIMESTAMPTZ,
+    brokerage NUMERIC(18,6)
+);
+
+ALTER TABLE orders OWNER TO "${DB_USER}";
+GRANT ALL PRIVILEGES ON TABLE orders TO "${DB_USER}";
+CREATE INDEX IF NOT EXISTS idx_orders_trade_id ON orders (trade_id);
+CREATE INDEX IF NOT EXISTS idx_orders_order_id ON orders (order_id);
+CREATE INDEX IF NOT EXISTS idx_orders_trade_type ON orders (trade_id, order_type);
+
+DO \
+\$\$\
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = 'trades'
+      AND column_name = 'entry_order_ids'
+  ) THEN
+    EXECUTE \$sql\$
+      INSERT INTO orders (order_id, trade_id, instrument_token, order_type, entry_price, target)
+      SELECT NULLIF(entry_id.value, ''), t.id, t.instrument_token, 'entry', t.entry_price, t.target
+      FROM trades AS t
+      CROSS JOIN LATERAL jsonb_array_elements_text(COALESCE(t.entry_order_ids, '[]'::jsonb)) AS entry_id(value)
+      WHERE NOT EXISTS (
+        SELECT 1
+        FROM orders AS o
+        WHERE o.trade_id = t.id
+          AND lower(COALESCE(o.order_type, '')) = 'entry'
+          AND COALESCE(o.order_id, '') = COALESCE(NULLIF(entry_id.value, ''), '')
+      )
+    \$sql\$;
+  END IF;
+
+  IF EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = 'trades'
+      AND column_name = 'sl_order_ids'
+  ) THEN
+    IF EXISTS (
+      SELECT 1
+      FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = 'trades'
+        AND column_name = 'taxes'
+    ) THEN
+      EXECUTE \$sql\$
+        INSERT INTO orders (order_id, trade_id, instrument_token, order_type, stoploss, sl_limit, exit_price, pnl, exit_time, brokerage)
+        SELECT NULLIF(sl_id.value, ''), t.id, t.instrument_token, 'sl', t.stoploss, t.sl_limit, t.exit_price, t.pnl, t.exit_time, t.taxes
+        FROM trades AS t
+        CROSS JOIN LATERAL jsonb_array_elements_text(COALESCE(t.sl_order_ids, '[]'::jsonb)) AS sl_id(value)
+        WHERE NOT EXISTS (
+          SELECT 1
+          FROM orders AS o
+          WHERE o.trade_id = t.id
+            AND lower(COALESCE(o.order_type, '')) = 'sl'
+            AND COALESCE(o.order_id, '') = COALESCE(NULLIF(sl_id.value, ''), '')
+        )
+      \$sql\$;
+    ELSE
+      EXECUTE \$sql\$
+        INSERT INTO orders (order_id, trade_id, instrument_token, order_type, stoploss, sl_limit, exit_price, pnl, exit_time, brokerage)
+        SELECT NULLIF(sl_id.value, ''), t.id, t.instrument_token, 'sl', t.stoploss, t.sl_limit, t.exit_price, t.pnl, t.exit_time, NULL
+        FROM trades AS t
+        CROSS JOIN LATERAL jsonb_array_elements_text(COALESCE(t.sl_order_ids, '[]'::jsonb)) AS sl_id(value)
+        WHERE NOT EXISTS (
+          SELECT 1
+          FROM orders AS o
+          WHERE o.trade_id = t.id
+            AND lower(COALESCE(o.order_type, '')) = 'sl'
+            AND COALESCE(o.order_id, '') = COALESCE(NULLIF(sl_id.value, ''), '')
+        )
+      \$sql\$;
+    END IF;
   END IF;
 END
 \$\$;

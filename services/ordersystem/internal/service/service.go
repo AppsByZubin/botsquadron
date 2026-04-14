@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math"
 	"strings"
 
 	"github.com/AppsByZubin/botsquadron/services/ordersystem/internal/config"
@@ -26,7 +27,39 @@ func New(cfg config.Config, st *store.Store, upClient *upstox.Client) *Service {
 	}
 }
 
+func (s *Service) CreateAccount(ctx context.Context, req model.CreateAccountRequest) (model.AccountResponse, error) {
+	if strings.TrimSpace(req.BotName) == "" {
+		return model.AccountResponse{}, fmt.Errorf("bot_name is required")
+	}
+	if s.store == nil {
+		return model.AccountResponse{}, fmt.Errorf("store is not configured")
+	}
+
+	account, err := s.store.CreateAccount(ctx, store.CreateAccountParams{
+		BotName:   req.BotName,
+		CurrDate:  req.CurrDate,
+		MonthYear: req.MonthYear,
+		InitCash:  req.InitCash,
+	})
+	if err != nil {
+		return model.AccountResponse{}, err
+	}
+
+	return model.AccountResponse{
+		AccountID: account.ID,
+		BotName:   account.BotName,
+		CurrDate:  account.CurrDate,
+		MonthYear: account.MonthYear,
+		InitCash:  account.InitCash,
+		NetProfit: account.NetProfit,
+		Message:   "account row ready",
+	}, nil
+}
+
 func (s *Service) CreateTrade(ctx context.Context, req model.CreateTradeRequest) (model.CreateTradeResponse, error) {
+	if strings.TrimSpace(req.BotName) == "" {
+		return model.CreateTradeResponse{}, fmt.Errorf("bot_name is required")
+	}
 	if strings.TrimSpace(req.Symbol) == "" {
 		return model.CreateTradeResponse{}, fmt.Errorf("symbol is required")
 	}
@@ -67,7 +100,6 @@ func (s *Service) CreateTrade(ctx context.Context, req model.CreateTradeRequest)
 	status := "OPEN"
 	entryOrderIDs := make([]string, 0, 1)
 	slOrderIDs := make([]string, 0, 1)
-	slOrderQtyMap := make(map[string]int)
 
 	isProduction := strings.EqualFold(mode, "production")
 	if isProduction {
@@ -92,7 +124,7 @@ func (s *Service) CreateTrade(ctx context.Context, req model.CreateTradeRequest)
 		if err != nil {
 			return model.CreateTradeResponse{}, fmt.Errorf("place entry order: %w", err)
 		}
-		entryOrderIDs = append(entryOrderIDs, entryResp.OrderID)
+		entryOrderIDs = append(entryOrderIDs, entryResp.OrderIDs...)
 
 		if req.SLTrigger != nil && *req.SLTrigger > 0 {
 			slLimit := *req.SLTrigger
@@ -118,34 +150,39 @@ func (s *Service) CreateTrade(ctx context.Context, req model.CreateTradeRequest)
 			if err != nil {
 				return model.CreateTradeResponse{}, fmt.Errorf("place stoploss order: %w", err)
 			}
-			slOrderIDs = append(slOrderIDs, slResp.OrderID)
-			slOrderQtyMap[slResp.OrderID] = req.Qty
+			slOrderIDs = append(slOrderIDs, slResp.OrderIDs...)
 		}
 	}
 
-	if _, err := s.store.UpsertAccountSnapshot(ctx, store.AccountSnapshotParams{
-		BotName:   req.BotName,
-		MonthYear: req.MonthYear,
-		InitCash:  req.InitCash,
-	}); err != nil {
-		return model.CreateTradeResponse{}, fmt.Errorf("seed account snapshot: %w", err)
+	accountID, err := s.store.GetAccountIDForBotDate(ctx, req.BotName, "")
+	if err != nil {
+		return model.CreateTradeResponse{}, fmt.Errorf("load account for trade: %w", err)
+	}
+
+	orders := make([]store.CreateOrderParams, 0, len(entryOrderIDs)+len(slOrderIDs)+2)
+	orders = append(orders, buildOrderParams(entryOrderIDs, store.CreateOrderParams{
+		InstrumentToken: req.InstrumentToken,
+		OrderType:       "entry",
+		EntryPrice:      req.EntryPrice,
+		Target:          req.Target,
+	})...)
+	if req.SLTrigger != nil || req.SLLimit != nil {
+		orders = append(orders, buildOrderParams(slOrderIDs, store.CreateOrderParams{
+			InstrumentToken: req.InstrumentToken,
+			OrderType:       "sl",
+			Stoploss:        req.SLTrigger,
+			SLLimit:         req.SLLimit,
+		})...)
 	}
 
 	tradeID, err := s.store.CreateTrade(ctx, store.CreateTradeParams{
-		BotName:         req.BotName,
+		AccountID:       accountID,
 		Symbol:          req.Symbol,
 		InstrumentToken: req.InstrumentToken,
 		Side:            side,
 		Qty:             req.Qty,
 		Product:         product,
 		Validity:        validity,
-		EntryOrderIDs:   entryOrderIDs,
-		SLOrderIDs:      slOrderIDs,
-		TargetOrderID:   nil,
-		EntryPrice:      req.EntryPrice,
-		Target:          req.Target,
-		Stoploss:        req.SLTrigger,
-		SLLimit:         req.SLLimit,
 		TSLActive:       req.TSLActive,
 		StartTrailAfter: req.StartTrailAfter,
 		EntrySpot:       req.EntrySpot,
@@ -153,11 +190,11 @@ func (s *Service) CreateTrade(ctx context.Context, req model.CreateTradeRequest)
 		SpotTrailAnchor: req.SpotTrailAnchor,
 		TrailPoints:     req.TrailPoints,
 		Status:          status,
-		Taxes:           req.Taxes,
+		TotalBrokerage:  req.TotalBrokerage,
 		TagEntry:        req.TagEntry,
 		TagSL:           req.TagSL,
 		Description:     req.Description,
-		SLOrderQtyMap:   slOrderQtyMap,
+		Orders:          orders,
 	})
 	if err != nil {
 		return model.CreateTradeResponse{}, err
@@ -200,6 +237,17 @@ func (s *Service) ModifyTrade(ctx context.Context, tradeID string, req model.Mod
 	if mode == "" {
 		mode = s.cfg.AppMode
 	}
+	isProduction := strings.EqualFold(mode, "production")
+
+	stoploss, slLimit, spotTrailAnchor := req.Stoploss, req.SLLimit, req.SpotTrailAnchor
+	if err := validateModifyTradeRequest(req, stoploss, slLimit, spotTrailAnchor, validity, orderType); err != nil {
+		return model.ModifyTradeResponse{}, err
+	}
+	if isProduction {
+		if err := validateProductionModifyTradeRequest(orderType, stoploss, slLimit); err != nil {
+			return model.ModifyTradeResponse{}, err
+		}
+	}
 
 	if s.store == nil {
 		return model.ModifyTradeResponse{}, fmt.Errorf("store is not configured")
@@ -209,9 +257,12 @@ func (s *Service) ModifyTrade(ctx context.Context, tradeID string, req model.Mod
 	if err != nil {
 		return model.ModifyTradeResponse{}, fmt.Errorf("load trade: %w", err)
 	}
+	if err := validateModifiedTradeAgainstTrade(trade, stoploss, slLimit); err != nil {
+		return model.ModifyTradeResponse{}, err
+	}
 
-	if !strings.EqualFold(mode, "production") {
-		if err := s.persistModifiedTradeState(ctx, tradeID, req.TriggerPrice, req.Price, req.SpotTrailAnchor); err != nil {
+	if !isProduction {
+		if err := s.persistModifiedTradeState(ctx, tradeID, stoploss, slLimit, spotTrailAnchor); err != nil {
 			return model.ModifyTradeResponse{}, err
 		}
 		return model.ModifyTradeResponse{
@@ -246,11 +297,11 @@ func (s *Service) ModifyTrade(ctx context.Context, tradeID string, req model.Mod
 		if _, err := s.upstox.ModifyOrder(ctx, upstox.ModifyOrderRequest{
 			Quantity:     qty,
 			Validity:     validity,
-			Price:        float64Value(req.Price),
+			Price:        float64Value(slLimit),
 			OrderID:      orderID,
 			OrderType:    orderType,
 			DisclosedQty: req.DisclosedQty,
-			TriggerPrice: float64Value(req.TriggerPrice),
+			TriggerPrice: float64Value(stoploss),
 		}); err != nil {
 			failedOrderMessages = append(failedOrderMessages, fmt.Sprintf("%s: %v", orderID, err))
 			continue
@@ -263,7 +314,7 @@ func (s *Service) ModifyTrade(ctx context.Context, tradeID string, req model.Mod
 		return model.ModifyTradeResponse{}, fmt.Errorf("modify trade partially failed for trade_id=%s: %s", tradeID, strings.Join(failedOrderMessages, "; "))
 	}
 
-	if err := s.persistModifiedTradeState(ctx, tradeID, req.TriggerPrice, req.Price, req.SpotTrailAnchor); err != nil {
+	if err := s.persistModifiedTradeState(ctx, tradeID, stoploss, slLimit, spotTrailAnchor); err != nil {
 		return model.ModifyTradeResponse{}, err
 	}
 
@@ -291,10 +342,10 @@ func (s *Service) PollStopLossOrders(ctx context.Context) error {
 	}
 
 	for _, trade := range trades {
-		for _, slOrderID := range trade.SLOrderIDs {
-			statusResp, err := s.upstox.GetOrderStatus(ctx, slOrderID)
+		for _, slOrder := range trade.SLOrders {
+			statusResp, err := s.upstox.GetOrderStatus(ctx, slOrder.OrderID)
 			if err != nil {
-				log.Printf("poll sl order status failed for trade_id=%s order_id=%s: %v", trade.ID, slOrderID, err)
+				log.Printf("poll sl order status failed for trade_id=%s order_id=%s: %v", trade.ID, slOrder.OrderID, err)
 				continue
 			}
 			if !upstox.IsTerminalOrderStatus(statusResp.Status) {
@@ -302,11 +353,11 @@ func (s *Service) PollStopLossOrders(ctx context.Context) error {
 			}
 
 			if upstox.IsFilledOrderStatus(statusResp.Status) {
-				exitPrice := trade.Stoploss
+				exitPrice := slOrder.Stoploss
 				if statusResp.AveragePrice != nil && *statusResp.AveragePrice > 0 {
 					exitPrice = *statusResp.AveragePrice
 				}
-				if err := s.store.MarkTradeClosedFromSL(ctx, trade.ID, exitPrice, 0, "STOPLOSS HIT"); err != nil {
+				if err := s.store.MarkTradeClosedFromSL(ctx, trade.ID, slOrder.OrderID, exitPrice, 0, "STOPLOSS HIT"); err != nil {
 					log.Printf("close trade on SL failed for trade_id=%s: %v", trade.ID, err)
 				}
 			} else {
@@ -319,6 +370,75 @@ func (s *Service) PollStopLossOrders(ctx context.Context) error {
 		}
 	}
 
+	return nil
+}
+
+func validateModifyTradeRequest(req model.ModifyTradeRequest, stoploss *float64, slLimit *float64, spotTrailAnchor *float64, validity string, orderType string) error {
+	if req.DisclosedQty < 0 {
+		return fmt.Errorf("disclosed_quantity must be >= 0")
+	}
+
+	if validity != "DAY" && validity != "IOC" {
+		return fmt.Errorf("validity must be DAY or IOC")
+	}
+
+	if orderType != "SL" && orderType != "SL-M" {
+		return fmt.Errorf("order_type must be SL or SL-M")
+	}
+
+	if stoploss == nil && slLimit == nil && spotTrailAnchor == nil {
+		return fmt.Errorf("at least one of stoploss, sl_limit, or spot_trail_anchor is required")
+	}
+
+	if err := validatePositiveFloatPtr("stoploss", stoploss); err != nil {
+		return err
+	}
+	if err := validatePositiveFloatPtr("sl_limit", slLimit); err != nil {
+		return err
+	}
+	if err := validatePositiveFloatPtr("spot_trail_anchor", spotTrailAnchor); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func validateProductionModifyTradeRequest(orderType string, stoploss *float64, slLimit *float64) error {
+	if stoploss == nil {
+		return fmt.Errorf("stoploss is required in production mode")
+	}
+	if orderType == "SL" && slLimit == nil {
+		return fmt.Errorf("sl_limit is required for SL order modification in production mode")
+	}
+	return nil
+}
+
+func validateModifiedTradeAgainstTrade(trade model.Trade, stoploss *float64, slLimit *float64) error {
+	if stoploss == nil || slLimit == nil {
+		return nil
+	}
+
+	side := strings.ToUpper(strings.TrimSpace(trade.Side))
+	if side == "SELL" {
+		if *slLimit <= *stoploss {
+			return fmt.Errorf("sl_limit must be greater than stoploss for SELL trades")
+		}
+		return nil
+	}
+
+	if *slLimit >= *stoploss {
+		return fmt.Errorf("sl_limit must be less than stoploss for BUY trades")
+	}
+	return nil
+}
+
+func validatePositiveFloatPtr(name string, value *float64) error {
+	if value == nil {
+		return nil
+	}
+	if math.IsNaN(*value) || math.IsInf(*value, 0) || *value <= 0 {
+		return fmt.Errorf("%s must be > 0", name)
+	}
 	return nil
 }
 
@@ -335,6 +455,27 @@ func (s *Service) persistModifiedTradeState(ctx context.Context, tradeID string,
 	return nil
 }
 
+func buildOrderParams(orderIDs []string, base store.CreateOrderParams) []store.CreateOrderParams {
+	if len(orderIDs) == 0 {
+		return []store.CreateOrderParams{base}
+	}
+
+	orders := make([]store.CreateOrderParams, 0, len(orderIDs))
+	for _, orderID := range orderIDs {
+		orderID = strings.TrimSpace(orderID)
+		if orderID == "" {
+			continue
+		}
+		order := base
+		order.OrderID = orderID
+		orders = append(orders, order)
+	}
+	if len(orders) == 0 {
+		return []store.CreateOrderParams{base}
+	}
+	return orders
+}
+
 func float64Value(value *float64) float64 {
 	if value == nil {
 		return 0
@@ -343,12 +484,7 @@ func float64Value(value *float64) float64 {
 }
 
 func slOrderQuantity(trade model.Trade, orderID string) int {
-	if trade.SLOrderQtyMap != nil {
-		if qty := trade.SLOrderQtyMap[strings.TrimSpace(orderID)]; qty > 0 {
-			return qty
-		}
-	}
-	if len(trade.SLOrderIDs) <= 1 && trade.Qty > 0 {
+	if strings.TrimSpace(orderID) != "" && trade.Qty > 0 {
 		return trade.Qty
 	}
 	return 0

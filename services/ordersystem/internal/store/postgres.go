@@ -3,7 +3,6 @@ package store
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"math"
 	"strings"
@@ -14,7 +13,10 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const tradesTableName = "trades"
+const (
+	tradesTableName = "trades"
+	ordersTableName = "orders"
+)
 
 type Store struct {
 	pool               *pgxpool.Pool
@@ -24,20 +26,13 @@ type Store struct {
 }
 
 type CreateTradeParams struct {
-	BotName         string
+	AccountID       string
 	Symbol          string
 	InstrumentToken string
 	Side            string
 	Qty             int
 	Product         string
 	Validity        string
-	EntryOrderIDs   []string
-	SLOrderIDs      []string
-	TargetOrderID   *string
-	EntryPrice      *float64
-	Target          *float64
-	Stoploss        *float64
-	SLLimit         *float64
 	TSLActive       bool
 	StartTrailAfter *float64
 	EntrySpot       *float64
@@ -45,19 +40,33 @@ type CreateTradeParams struct {
 	SpotTrailAnchor *float64
 	TrailPoints     *float64
 	Status          string
-	Taxes           *float64
+	TotalBrokerage  *float64
 	TagEntry        string
 	TagSL           string
 	Description     string
-	SLOrderQtyMap   map[string]int
+	Orders          []CreateOrderParams
 }
 
-type AccountSnapshotParams struct {
+type CreateOrderParams struct {
+	OrderID         string
+	InstrumentToken string
+	OrderType       string
+	EntryPrice      *float64
+	Target          *float64
+	Stoploss        *float64
+	SLLimit         *float64
+	ExitPrice       *float64
+	PNL             *float64
+	ExitTime        *time.Time
+	Brokerage       *float64
+}
+
+type CreateAccountParams struct {
 	BotName     string
+	CurrDate    string
 	MonthYear   string
 	InitCash    *float64
 	CurrentTime time.Time
-	ProfitDelta float64
 }
 
 func New(pool *pgxpool.Pool, timezone string, accountInitialCash float64) (*Store, error) {
@@ -86,98 +95,42 @@ func (s *Store) EnsureSchema(ctx context.Context) error {
 	if err := s.normalizeTradesTable(ctx); err != nil {
 		return err
 	}
-
+	if err := s.ensureAccountsSchema(ctx); err != nil {
+		return err
+	}
 	if err := s.detectTradesTable(ctx); err != nil {
 		return err
 	}
-
-	if s.tradesTable == "" {
-		s.tradesTable = tradesTableName
-		if _, err := s.pool.Exec(ctx, `
-CREATE TABLE IF NOT EXISTS trades (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    bot_name TEXT,
-    symbol TEXT,
-    instrument_token TEXT,
-    side TEXT,
-    qty INTEGER,
-    product TEXT,
-    validity TEXT,
-    entry_order_ids JSONB DEFAULT '[]'::jsonb,
-    sl_order_ids JSONB DEFAULT '[]'::jsonb,
-    target_order_id TEXT,
-    entry_price NUMERIC(18,6),
-    target NUMERIC(18,6),
-    stoploss NUMERIC(18,6),
-    sl_limit NUMERIC(18,6),
-    tsl_active BOOLEAN DEFAULT FALSE,
-    start_trail_after NUMERIC(18,6),
-    entry_spot NUMERIC(18,6),
-    spot_ltp NUMERIC(18,6),
-    spot_trail_anchor NUMERIC(18,6),
-    trail_points NUMERIC(18,6),
-    status TEXT,
-    timestamp TIMESTAMPTZ DEFAULT NOW(),
-    exit_price NUMERIC(18,6),
-    pnl NUMERIC(18,6),
-    exit_time TIMESTAMPTZ,
-    taxes NUMERIC(18,6),
-    tag_entry TEXT,
-    tag_sl TEXT,
-    description TEXT,
-    sl_order_qty_map JSONB DEFAULT '{}'::jsonb
-);
-CREATE INDEX IF NOT EXISTS idx_trades_timestamp ON trades ("timestamp");
-CREATE INDEX IF NOT EXISTS idx_trades_status ON trades (status);
-CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades (symbol);
-`); err != nil {
-			return fmt.Errorf("create trades table: %w", err)
-		}
+	if err := s.ensureTradesSchema(ctx); err != nil {
+		return err
+	}
+	if err := s.ensureOrdersSchema(ctx); err != nil {
+		return err
 	}
 
-	if _, err := s.pool.Exec(ctx, fmt.Sprintf(`ALTER TABLE %s ADD COLUMN IF NOT EXISTS taxes NUMERIC(18,6)`, s.tradesTable)); err != nil {
-		return fmt.Errorf("ensure trades.taxes column: %w", err)
-	}
-	if _, err := s.pool.Exec(ctx, fmt.Sprintf(`ALTER TABLE %s ADD COLUMN IF NOT EXISTS bot_name TEXT`, s.tradesTable)); err != nil {
-		return fmt.Errorf("ensure trades.bot_name column: %w", err)
-	}
-	if _, err := s.pool.Exec(ctx, fmt.Sprintf(`ALTER TABLE %s ADD COLUMN IF NOT EXISTS spot_trail_anchor NUMERIC(18,6)`, s.tradesTable)); err != nil {
-		return fmt.Errorf("ensure trades.spot_trail_anchor column: %w", err)
-	}
+	return nil
+}
 
+func (s *Store) ensureAccountsSchema(ctx context.Context) error {
 	if _, err := s.pool.Exec(ctx, `
 CREATE TABLE IF NOT EXISTS accounts (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     botname TEXT,
+    curr_date TEXT,
     month_year TEXT,
     init_cash NUMERIC(18,6),
-    current_date TEXT,
-    profit NUMERIC(18,6),
-    max_drawdown NUMERIC(18,6)
+    net_profit NUMERIC(18,6) DEFAULT 0
 );
-CREATE UNIQUE INDEX IF NOT EXISTS uq_accounts_bot_month_date ON accounts (botname, month_year, current_date);
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS botname TEXT;
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS curr_date TEXT;
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS month_year TEXT;
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS init_cash NUMERIC(18,6);
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS net_profit NUMERIC(18,6) DEFAULT 0;
+ALTER TABLE accounts DROP COLUMN IF EXISTS max_drawdown;
+CREATE INDEX IF NOT EXISTS idx_accounts_bot_curr_date ON accounts (botname, curr_date);
 CREATE INDEX IF NOT EXISTS idx_accounts_bot_month_year ON accounts (botname, month_year);
 `); err != nil {
 		return fmt.Errorf("ensure accounts table: %w", err)
-	}
-
-	if _, err := s.pool.Exec(ctx, `ALTER TABLE accounts ADD COLUMN IF NOT EXISTS botname TEXT`); err != nil {
-		return fmt.Errorf("ensure accounts.botname column: %w", err)
-	}
-	if _, err := s.pool.Exec(ctx, `ALTER TABLE accounts ADD COLUMN IF NOT EXISTS month_year TEXT`); err != nil {
-		return fmt.Errorf("ensure accounts.month_year column: %w", err)
-	}
-	if _, err := s.pool.Exec(ctx, `ALTER TABLE accounts ADD COLUMN IF NOT EXISTS init_cash NUMERIC(18,6)`); err != nil {
-		return fmt.Errorf("ensure accounts.init_cash column: %w", err)
-	}
-	if _, err := s.pool.Exec(ctx, `ALTER TABLE accounts ADD COLUMN IF NOT EXISTS current_date TEXT`); err != nil {
-		return fmt.Errorf("ensure accounts.current_date column: %w", err)
-	}
-	if _, err := s.pool.Exec(ctx, `ALTER TABLE accounts ADD COLUMN IF NOT EXISTS profit NUMERIC(18,6)`); err != nil {
-		return fmt.Errorf("ensure accounts.profit column: %w", err)
-	}
-	if _, err := s.pool.Exec(ctx, `ALTER TABLE accounts ADD COLUMN IF NOT EXISTS max_drawdown NUMERIC(18,6)`); err != nil {
-		return fmt.Errorf("ensure accounts.max_drawdown column: %w", err)
 	}
 
 	if _, err := s.pool.Exec(ctx, `
@@ -212,17 +165,23 @@ BEGIN
         FROM information_schema.columns
         WHERE table_schema = 'public'
           AND table_name = 'accounts'
-          AND column_name = 'max_dradown'
+          AND column_name = 'profit'
     ) THEN
         UPDATE accounts
-        SET max_drawdown = COALESCE(
-            max_drawdown,
-            CASE
-                WHEN max_dradown > 0 THEN -ABS(max_dradown)
-                ELSE max_dradown
-            END
-        )
-        WHERE max_drawdown IS NULL;
+        SET net_profit = COALESCE(net_profit, profit, 0)
+        WHERE net_profit IS NULL OR net_profit = 0;
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'accounts'
+          AND column_name = 'current_date'
+    ) THEN
+        UPDATE accounts
+        SET curr_date = COALESCE(NULLIF(BTRIM(curr_date), ''), NULLIF(BTRIM(current_date), ''))
+        WHERE curr_date IS NULL OR BTRIM(curr_date) = '';
     END IF;
 
     IF EXISTS (
@@ -242,56 +201,231 @@ BEGIN
         SET month_year = COALESCE(
                 NULLIF(BTRIM(month_year), ''),
                 LPAD(month::text, 2, '0') || year::text
-            ),
-            current_date = COALESCE(
-                NULLIF(BTRIM(current_date), ''),
-                TO_CHAR(MAKE_DATE(year, month, 1), 'DD-MM-YYYY')
             )
         WHERE year IS NOT NULL
           AND month IS NOT NULL
           AND month BETWEEN 1 AND 12
-          AND (
-                month_year IS NULL OR BTRIM(month_year) = ''
-                OR current_date IS NULL OR BTRIM(current_date) = ''
-          );
+          AND (month_year IS NULL OR BTRIM(month_year) = '');
     END IF;
 
     UPDATE accounts
-    SET profit = COALESCE(profit, 0),
-        max_drawdown = COALESCE(max_drawdown, 0);
+    SET net_profit = COALESCE(net_profit, 0);
 END
 $$;`); err != nil {
-		return fmt.Errorf("backfill accounts daily columns: %w", err)
+		return fmt.Errorf("backfill accounts columns: %w", err)
 	}
 
-	if _, err := s.pool.Exec(ctx, fmt.Sprintf(`ALTER TABLE %s ADD COLUMN IF NOT EXISTS account_id UUID`, s.tradesTable)); err != nil {
-		return fmt.Errorf("ensure trades.account_id column: %w", err)
+	return nil
+}
+
+func (s *Store) ensureTradesSchema(ctx context.Context) error {
+	if s.tradesTable == "" {
+		s.tradesTable = tradesTableName
+		if _, err := s.pool.Exec(ctx, `
+CREATE TABLE IF NOT EXISTS trades (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    acct_id UUID REFERENCES accounts(id),
+    symbol TEXT,
+    instrument_token TEXT,
+    side TEXT,
+    qty INTEGER,
+    product TEXT,
+    validity TEXT,
+    tsl_active BOOLEAN DEFAULT FALSE,
+    start_trail_after NUMERIC(18,6),
+    entry_spot NUMERIC(18,6),
+    spot_ltp NUMERIC(18,6),
+    spot_trail_anchor NUMERIC(18,6),
+    trail_points NUMERIC(18,6),
+    status TEXT,
+    timestamp TIMESTAMPTZ DEFAULT NOW(),
+    total_brokerage NUMERIC(18,6) DEFAULT 0,
+    tag_entry TEXT,
+    tag_sl TEXT,
+    description TEXT
+);
+`); err != nil {
+			return fmt.Errorf("create trades table: %w", err)
+		}
 	}
-	if _, err := s.pool.Exec(ctx, fmt.Sprintf(`CREATE INDEX IF NOT EXISTS idx_trades_account_id ON %s (account_id)`, s.tradesTable)); err != nil {
-		return fmt.Errorf("ensure trades.account_id index: %w", err)
+
+	if _, err := s.pool.Exec(ctx, fmt.Sprintf(`
+ALTER TABLE %s ADD COLUMN IF NOT EXISTS acct_id UUID;
+ALTER TABLE %s ADD COLUMN IF NOT EXISTS symbol TEXT;
+ALTER TABLE %s ADD COLUMN IF NOT EXISTS instrument_token TEXT;
+ALTER TABLE %s ADD COLUMN IF NOT EXISTS side TEXT;
+ALTER TABLE %s ADD COLUMN IF NOT EXISTS qty INTEGER;
+ALTER TABLE %s ADD COLUMN IF NOT EXISTS product TEXT;
+ALTER TABLE %s ADD COLUMN IF NOT EXISTS validity TEXT;
+ALTER TABLE %s ADD COLUMN IF NOT EXISTS tsl_active BOOLEAN DEFAULT FALSE;
+ALTER TABLE %s ADD COLUMN IF NOT EXISTS start_trail_after NUMERIC(18,6);
+ALTER TABLE %s ADD COLUMN IF NOT EXISTS entry_spot NUMERIC(18,6);
+ALTER TABLE %s ADD COLUMN IF NOT EXISTS spot_ltp NUMERIC(18,6);
+ALTER TABLE %s ADD COLUMN IF NOT EXISTS spot_trail_anchor NUMERIC(18,6);
+ALTER TABLE %s ADD COLUMN IF NOT EXISTS trail_points NUMERIC(18,6);
+ALTER TABLE %s ADD COLUMN IF NOT EXISTS status TEXT;
+ALTER TABLE %s ADD COLUMN IF NOT EXISTS timestamp TIMESTAMPTZ DEFAULT NOW();
+ALTER TABLE %s ADD COLUMN IF NOT EXISTS total_brokerage NUMERIC(18,6) DEFAULT 0;
+ALTER TABLE %s ADD COLUMN IF NOT EXISTS tag_entry TEXT;
+ALTER TABLE %s ADD COLUMN IF NOT EXISTS tag_sl TEXT;
+ALTER TABLE %s ADD COLUMN IF NOT EXISTS description TEXT;
+CREATE INDEX IF NOT EXISTS idx_trades_acct_id ON %s (acct_id);
+CREATE INDEX IF NOT EXISTS idx_trades_timestamp ON %s ("timestamp");
+CREATE INDEX IF NOT EXISTS idx_trades_status ON %s (status);
+CREATE INDEX IF NOT EXISTS idx_trades_symbol ON %s (symbol);
+`, s.tradesTable, s.tradesTable, s.tradesTable, s.tradesTable, s.tradesTable,
+		s.tradesTable, s.tradesTable, s.tradesTable, s.tradesTable, s.tradesTable,
+		s.tradesTable, s.tradesTable, s.tradesTable, s.tradesTable, s.tradesTable,
+		s.tradesTable, s.tradesTable, s.tradesTable, s.tradesTable, s.tradesTable,
+		s.tradesTable, s.tradesTable, s.tradesTable)); err != nil {
+		return fmt.Errorf("ensure trades columns: %w", err)
 	}
+
+	if _, err := s.pool.Exec(ctx, fmt.Sprintf(`
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = '%s'
+          AND column_name = 'account_id'
+    ) THEN
+        UPDATE %s
+        SET acct_id = COALESCE(acct_id, account_id)
+        WHERE acct_id IS NULL;
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = '%s'
+          AND column_name = 'taxes'
+    ) THEN
+        UPDATE %s
+        SET total_brokerage = COALESCE(total_brokerage, taxes, 0)
+        WHERE total_brokerage IS NULL OR total_brokerage = 0;
+    END IF;
+END
+$$;`, s.tradesTable, s.tradesTable, s.tradesTable, s.tradesTable)); err != nil {
+		return fmt.Errorf("backfill trades columns: %w", err)
+	}
+
 	if _, err := s.pool.Exec(ctx, fmt.Sprintf(`
 DO $$
 BEGIN
     IF NOT EXISTS (
         SELECT 1
         FROM pg_constraint
-        WHERE conname = 'fk_trades_account_id'
+        WHERE conname = 'fk_trades_acct_id'
           AND conrelid = to_regclass('public.%s')
     ) THEN
         ALTER TABLE %s
-        ADD CONSTRAINT fk_trades_account_id
-        FOREIGN KEY (account_id) REFERENCES accounts(id);
+        ADD CONSTRAINT fk_trades_acct_id
+        FOREIGN KEY (acct_id) REFERENCES accounts(id);
     END IF;
 END
-$$;`, tradesTableName, s.tradesTable)); err != nil {
-		return fmt.Errorf("ensure trades.account_id foreign key: %w", err)
+$$;`, s.tradesTable, s.tradesTable)); err != nil {
+		return fmt.Errorf("ensure trades.acct_id foreign key: %w", err)
 	}
 
 	return nil
 }
 
-func (s *Store) UpsertAccountSnapshot(ctx context.Context, params AccountSnapshotParams) (string, error) {
+func (s *Store) ensureOrdersSchema(ctx context.Context) error {
+	if _, err := s.pool.Exec(ctx, fmt.Sprintf(`
+CREATE TABLE IF NOT EXISTS %s (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    order_id TEXT,
+    trade_id UUID REFERENCES trades(id) ON DELETE CASCADE,
+    instrument_token TEXT,
+    order_type TEXT,
+    entry_price NUMERIC(18,6),
+    target NUMERIC(18,6),
+    stoploss NUMERIC(18,6),
+    sl_limit NUMERIC(18,6),
+    exit_price NUMERIC(18,6),
+    pnl NUMERIC(18,6),
+    exit_time TIMESTAMPTZ,
+    brokerage NUMERIC(18,6)
+);
+CREATE INDEX IF NOT EXISTS idx_orders_trade_id ON %s (trade_id);
+CREATE INDEX IF NOT EXISTS idx_orders_order_id ON %s (order_id);
+CREATE INDEX IF NOT EXISTS idx_orders_trade_type ON %s (trade_id, order_type);
+`, ordersTableName, ordersTableName, ordersTableName, ordersTableName)); err != nil {
+		return fmt.Errorf("ensure orders table: %w", err)
+	}
+
+	hasEntryOrderIDs, err := s.columnExists(ctx, s.tradesTable, "entry_order_ids")
+	if err != nil {
+		return err
+	}
+	if hasEntryOrderIDs {
+		if _, err := s.pool.Exec(ctx, fmt.Sprintf(`
+INSERT INTO %s (order_id, trade_id, instrument_token, order_type, entry_price, target, brokerage)
+SELECT NULLIF(entry_id.value, ''), t.id, t.instrument_token, 'entry', t.entry_price, t.target, NULL
+FROM %s AS t
+CROSS JOIN LATERAL jsonb_array_elements_text(COALESCE(t.entry_order_ids, '[]'::jsonb)) AS entry_id(value)
+WHERE NOT EXISTS (
+    SELECT 1 FROM %s AS o
+    WHERE o.trade_id = t.id
+      AND lower(COALESCE(o.order_type, '')) = 'entry'
+      AND COALESCE(o.order_id, '') = COALESCE(NULLIF(entry_id.value, ''), '')
+)`, ordersTableName, s.tradesTable, ordersTableName)); err != nil {
+			return fmt.Errorf("backfill entry orders from legacy trade columns: %w", err)
+		}
+	}
+
+	hasSLOrderIDs, err := s.columnExists(ctx, s.tradesTable, "sl_order_ids")
+	if err != nil {
+		return err
+	}
+	if hasSLOrderIDs {
+		hasTaxes, err := s.columnExists(ctx, s.tradesTable, "taxes")
+		if err != nil {
+			return err
+		}
+		brokerageExpr := "NULL"
+		if hasTaxes {
+			brokerageExpr = "t.taxes"
+		}
+		if _, err := s.pool.Exec(ctx, fmt.Sprintf(`
+INSERT INTO %s (order_id, trade_id, instrument_token, order_type, stoploss, sl_limit, exit_price, pnl, exit_time, brokerage)
+SELECT NULLIF(sl_id.value, ''), t.id, t.instrument_token, 'sl', t.stoploss, t.sl_limit, t.exit_price, t.pnl, t.exit_time, %s
+FROM %s AS t
+CROSS JOIN LATERAL jsonb_array_elements_text(COALESCE(t.sl_order_ids, '[]'::jsonb)) AS sl_id(value)
+WHERE NOT EXISTS (
+    SELECT 1 FROM %s AS o
+    WHERE o.trade_id = t.id
+      AND lower(COALESCE(o.order_type, '')) = 'sl'
+      AND COALESCE(o.order_id, '') = COALESCE(NULLIF(sl_id.value, ''), '')
+)`, ordersTableName, brokerageExpr, s.tradesTable, ordersTableName)); err != nil {
+			return fmt.Errorf("backfill sl orders from legacy trade columns: %w", err)
+		}
+	}
+
+	return nil
+}
+
+func (s *Store) CreateAccount(ctx context.Context, params CreateAccountParams) (model.Account, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return model.Account{}, fmt.Errorf("begin account create: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	account, err := s.createAccountTx(ctx, tx, params)
+	if err != nil {
+		return model.Account{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return model.Account{}, fmt.Errorf("commit account create: %w", err)
+	}
+	return account, nil
+}
+
+func (s *Store) createAccountTx(ctx context.Context, tx pgx.Tx, params CreateAccountParams) (model.Account, error) {
 	currentTime := params.CurrentTime
 	if currentTime.IsZero() {
 		currentTime = time.Now()
@@ -299,32 +433,93 @@ func (s *Store) UpsertAccountSnapshot(ctx context.Context, params AccountSnapsho
 	currentTime = currentTime.In(s.loc)
 
 	botName := normalizeBotName(params.BotName)
-	monthYear := normalizeMonthYear(params.MonthYear, currentTime)
-	currentDate := currentTime.Format("02-01-2006")
+	currDate := normalizeCurrDate(params.CurrDate, currentTime)
+	monthYear := normalizeMonthYear(params.MonthYear, timeForMonthYear(currDate, currentTime))
 
-	initCash, err := s.resolveAccountInitCash(ctx, botName, monthYear, params.InitCash)
+	initCash, err := s.resolveAccountInitCashTx(ctx, tx, botName, monthYear, params.InitCash)
 	if err != nil {
-		return "", err
+		return model.Account{}, err
 	}
+
+	var account model.Account
+	err = tx.QueryRow(ctx, `
+SELECT id::text, COALESCE(botname, ''), COALESCE(curr_date, ''), COALESCE(month_year, ''), COALESCE(init_cash, 0)::float8, COALESCE(net_profit, 0)::float8
+FROM accounts
+WHERE botname = $1
+  AND curr_date = $2
+ORDER BY id
+LIMIT 1
+FOR UPDATE`, botName, currDate).Scan(&account.ID, &account.BotName, &account.CurrDate, &account.MonthYear, &account.InitCash, &account.NetProfit)
+	if err != nil && err != pgx.ErrNoRows {
+		return model.Account{}, fmt.Errorf("load account: %w", err)
+	}
+	if err == pgx.ErrNoRows {
+		if err := tx.QueryRow(ctx, `
+INSERT INTO accounts (botname, curr_date, month_year, init_cash, net_profit)
+VALUES ($1, $2, $3, $4, 0)
+RETURNING id::text, COALESCE(botname, ''), COALESCE(curr_date, ''), COALESCE(month_year, ''), COALESCE(init_cash, 0)::float8, COALESCE(net_profit, 0)::float8`,
+			botName, currDate, monthYear, initCash,
+		).Scan(&account.ID, &account.BotName, &account.CurrDate, &account.MonthYear, &account.InitCash, &account.NetProfit); err != nil {
+			return model.Account{}, fmt.Errorf("insert account: %w", err)
+		}
+		return account, nil
+	}
+
+	if account.InitCash > 0 {
+		initCash = account.InitCash
+	}
+	if err := tx.QueryRow(ctx, `
+UPDATE accounts
+SET init_cash = $2,
+    month_year = $3
+WHERE id::text = $1
+RETURNING id::text, COALESCE(botname, ''), COALESCE(curr_date, ''), COALESCE(month_year, ''), COALESCE(init_cash, 0)::float8, COALESCE(net_profit, 0)::float8`,
+		account.ID, initCash, monthYear,
+	).Scan(&account.ID, &account.BotName, &account.CurrDate, &account.MonthYear, &account.InitCash, &account.NetProfit); err != nil {
+		return model.Account{}, fmt.Errorf("update account: %w", err)
+	}
+
+	return account, nil
+}
+
+func (s *Store) GetAccountIDForBotDate(ctx context.Context, botName string, currDate string) (string, error) {
+	currentTime := time.Now().In(s.loc)
+	botName = normalizeBotName(botName)
+	currDate = normalizeCurrDate(currDate, currentTime)
 
 	var accountID string
 	if err := s.pool.QueryRow(ctx, `
-INSERT INTO accounts (botname, month_year, init_cash, current_date, profit, max_drawdown)
-VALUES ($1, $2, $3, $4, $5, CASE WHEN $5 < 0 THEN $5 ELSE 0 END)
-ON CONFLICT (botname, month_year, current_date)
-DO UPDATE SET
-    init_cash = CASE
-        WHEN COALESCE(accounts.init_cash, 0) = 0 AND EXCLUDED.init_cash > 0 THEN EXCLUDED.init_cash
-        ELSE accounts.init_cash
-    END,
-    profit = COALESCE(accounts.profit, 0) + EXCLUDED.profit,
-    max_drawdown = LEAST(COALESCE(accounts.max_drawdown, 0), COALESCE(accounts.profit, 0) + EXCLUDED.profit)
-RETURNING id::text
-`, botName, monthYear, initCash, currentDate, params.ProfitDelta).Scan(&accountID); err != nil {
-		return "", fmt.Errorf("upsert account snapshot: %w", err)
+SELECT id::text
+FROM accounts
+WHERE botname = $1
+  AND curr_date = $2
+ORDER BY id
+LIMIT 1`, botName, currDate).Scan(&accountID); err != nil {
+		if err == pgx.ErrNoRows {
+			return "", fmt.Errorf("account row is required for bot_name=%s curr_date=%s; call POST /v1/accounts before creating trades", botName, currDate)
+		}
+		return "", fmt.Errorf("load account for bot/date: %w", err)
 	}
-
 	return accountID, nil
+}
+
+func (s *Store) refreshAccountNetProfitFromOrdersTx(ctx context.Context, tx pgx.Tx, accountID string) error {
+	if strings.TrimSpace(accountID) == "" {
+		return nil
+	}
+	if _, err := tx.Exec(ctx, fmt.Sprintf(`
+UPDATE accounts
+SET net_profit = (
+    SELECT COALESCE(SUM(o.pnl), 0)
+    FROM %s AS t
+    JOIN %s AS o ON o.trade_id = t.id
+    WHERE t.acct_id = accounts.id
+      AND o.exit_time IS NOT NULL
+)
+WHERE id::text = $1`, s.tradesTable, ordersTableName), strings.TrimSpace(accountID)); err != nil {
+		return fmt.Errorf("refresh account net_profit from orders: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) normalizeTradesTable(ctx context.Context) error {
@@ -366,36 +561,37 @@ END`).Scan(&table)
 	return nil
 }
 
+func (s *Store) columnExists(ctx context.Context, tableName string, columnName string) (bool, error) {
+	var exists bool
+	if err := s.pool.QueryRow(ctx, `
+SELECT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = $1
+      AND column_name = $2
+)`, tableName, columnName).Scan(&exists); err != nil {
+		return false, fmt.Errorf("check column %s.%s: %w", tableName, columnName, err)
+	}
+	return exists, nil
+}
+
 func (s *Store) CreateTrade(ctx context.Context, params CreateTradeParams) (string, error) {
-	entryOrderIDsJSON, err := json.Marshal(params.EntryOrderIDs)
+	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return "", fmt.Errorf("marshal entry order ids: %w", err)
+		return "", fmt.Errorf("begin create trade: %w", err)
 	}
-	slOrderIDsJSON, err := json.Marshal(params.SLOrderIDs)
-	if err != nil {
-		return "", fmt.Errorf("marshal sl order ids: %w", err)
-	}
-	slOrderQtyMapJSON, err := json.Marshal(params.SLOrderQtyMap)
-	if err != nil {
-		return "", fmt.Errorf("marshal sl order qty map: %w", err)
-	}
+	defer tx.Rollback(ctx)
 
 	query := fmt.Sprintf(`
 INSERT INTO %s (
-    bot_name,
+    acct_id,
     symbol,
     instrument_token,
     side,
     qty,
     product,
     validity,
-    entry_order_ids,
-    sl_order_ids,
-    target_order_id,
-    entry_price,
-    target,
-    stoploss,
-    sl_limit,
     tsl_active,
     start_trail_after,
     entry_spot,
@@ -403,36 +599,24 @@ INSERT INTO %s (
     spot_trail_anchor,
     trail_points,
     status,
-    taxes,
+    total_brokerage,
     tag_entry,
     tag_sl,
-    description,
-    sl_order_qty_map
+    description
 ) VALUES (
-    $1,$2,$3,$4,$5,$6,$7,
-    $8::jsonb,
-    $9::jsonb,
-    $10,$11,$12,$13,$14,$15,
-    $16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26::jsonb
+    $1::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18
 )
 RETURNING id::text`, s.tradesTable)
 
 	var id string
-	err = s.pool.QueryRow(ctx, query,
-		nullIfEmpty(params.BotName),
+	err = tx.QueryRow(ctx, query,
+		nullIfEmpty(params.AccountID),
 		nullIfEmpty(params.Symbol),
 		nullIfEmpty(params.InstrumentToken),
 		nullIfEmpty(params.Side),
 		params.Qty,
 		nullIfEmpty(params.Product),
 		nullIfEmpty(params.Validity),
-		string(entryOrderIDsJSON),
-		string(slOrderIDsJSON),
-		nullStringPtr(params.TargetOrderID),
-		nullFloatPtr(params.EntryPrice),
-		nullFloatPtr(params.Target),
-		nullFloatPtr(params.Stoploss),
-		nullFloatPtr(params.SLLimit),
 		params.TSLActive,
 		nullFloatPtr(params.StartTrailAfter),
 		nullFloatPtr(params.EntrySpot),
@@ -440,63 +624,94 @@ RETURNING id::text`, s.tradesTable)
 		nullFloatPtr(params.SpotTrailAnchor),
 		nullFloatPtr(params.TrailPoints),
 		nullIfEmpty(params.Status),
-		nullFloatPtr(params.Taxes),
+		nullFloatPtr(params.TotalBrokerage),
 		nullIfEmpty(params.TagEntry),
 		nullIfEmpty(params.TagSL),
 		nullIfEmpty(params.Description),
-		string(slOrderQtyMapJSON),
 	).Scan(&id)
 	if err != nil {
 		return "", fmt.Errorf("insert trade: %w", err)
 	}
+
+	for _, order := range params.Orders {
+		if err := insertOrderTx(ctx, tx, id, order); err != nil {
+			return "", err
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return "", fmt.Errorf("commit create trade: %w", err)
+	}
 	return id, nil
+}
+
+func insertOrderTx(ctx context.Context, tx pgx.Tx, tradeID string, params CreateOrderParams) error {
+	_, err := tx.Exec(ctx, fmt.Sprintf(`
+INSERT INTO %s (
+    order_id,
+    trade_id,
+    instrument_token,
+    order_type,
+    entry_price,
+    target,
+    stoploss,
+    sl_limit,
+    exit_price,
+    pnl,
+    exit_time,
+    brokerage
+) VALUES (
+    $1,$2::uuid,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12
+)`, ordersTableName),
+		nullIfEmpty(params.OrderID),
+		tradeID,
+		nullIfEmpty(params.InstrumentToken),
+		strings.ToLower(strings.TrimSpace(params.OrderType)),
+		nullFloatPtr(params.EntryPrice),
+		nullFloatPtr(params.Target),
+		nullFloatPtr(params.Stoploss),
+		nullFloatPtr(params.SLLimit),
+		nullFloatPtr(params.ExitPrice),
+		nullFloatPtr(params.PNL),
+		nullTimePtr(params.ExitTime),
+		nullFloatPtr(params.Brokerage),
+	)
+	if err != nil {
+		return fmt.Errorf("insert order: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) GetTradeByID(ctx context.Context, tradeID string) (model.Trade, error) {
 	query := fmt.Sprintf(`
 SELECT
-    id::text,
-    COALESCE(account_id::text, ''),
-    COALESCE(bot_name, ''),
-    COALESCE(symbol, ''),
-    COALESCE(instrument_token, ''),
-    COALESCE(side, ''),
-    COALESCE(qty, 0),
-    COALESCE(product, ''),
-    COALESCE(validity, ''),
-    COALESCE(entry_order_ids, '[]'::jsonb),
-    COALESCE(sl_order_ids, '[]'::jsonb),
-    COALESCE(sl_order_qty_map, '{}'::jsonb),
-    COALESCE(target_order_id, ''),
-    COALESCE(entry_price, 0)::float8,
-    COALESCE(target, 0)::float8,
-    COALESCE(stoploss, 0)::float8,
-    COALESCE(sl_limit, 0)::float8,
-    COALESCE(tsl_active, false),
-    COALESCE(start_trail_after, 0)::float8,
-    COALESCE(entry_spot, 0)::float8,
-    COALESCE(spot_ltp, 0)::float8,
-    COALESCE(spot_trail_anchor, 0)::float8,
-    COALESCE(trail_points, 0)::float8,
-    COALESCE(status, ''),
-    COALESCE("timestamp", NOW()),
-    COALESCE(exit_price, 0)::float8,
-    COALESCE(pnl, 0)::float8,
-    COALESCE(taxes, 0)::float8,
-    exit_time,
-    COALESCE(tag_entry, ''),
-    COALESCE(tag_sl, ''),
-    COALESCE(description, '')
-FROM %s
-WHERE id::text = $1
+    t.id::text,
+    COALESCE(t.acct_id::text, ''),
+    COALESCE(a.botname, ''),
+    COALESCE(t.symbol, ''),
+    COALESCE(t.instrument_token, ''),
+    COALESCE(t.side, ''),
+    COALESCE(t.qty, 0),
+    COALESCE(t.product, ''),
+    COALESCE(t.validity, ''),
+    COALESCE(t.tsl_active, false),
+    COALESCE(t.start_trail_after, 0)::float8,
+    COALESCE(t.entry_spot, 0)::float8,
+    COALESCE(t.spot_ltp, 0)::float8,
+    COALESCE(t.spot_trail_anchor, 0)::float8,
+    COALESCE(t.trail_points, 0)::float8,
+    COALESCE(t.status, ''),
+    COALESCE(t."timestamp", NOW()),
+    COALESCE(t.total_brokerage, 0)::float8,
+    COALESCE(t.tag_entry, ''),
+    COALESCE(t.tag_sl, ''),
+    COALESCE(t.description, '')
+FROM %s AS t
+LEFT JOIN accounts AS a ON a.id = t.acct_id
+WHERE t.id::text = $1
 LIMIT 1`, s.tradesTable)
 
 	var trade model.Trade
-	var entryOrderIDsRaw []byte
-	var slOrderIDsRaw []byte
-	var slOrderQtyMapRaw []byte
-	var exitTime sql.NullTime
-
 	err := s.pool.QueryRow(ctx, query, strings.TrimSpace(tradeID)).Scan(
 		&trade.ID,
 		&trade.AccountID,
@@ -507,14 +722,6 @@ LIMIT 1`, s.tradesTable)
 		&trade.Qty,
 		&trade.Product,
 		&trade.Validity,
-		&entryOrderIDsRaw,
-		&slOrderIDsRaw,
-		&slOrderQtyMapRaw,
-		&trade.TargetOrderID,
-		&trade.EntryPrice,
-		&trade.Target,
-		&trade.Stoploss,
-		&trade.SLLimit,
 		&trade.TSLActive,
 		&trade.StartTrailAfter,
 		&trade.EntrySpot,
@@ -523,10 +730,7 @@ LIMIT 1`, s.tradesTable)
 		&trade.TrailPoints,
 		&trade.Status,
 		&trade.Timestamp,
-		&trade.ExitPrice,
-		&trade.PNL,
-		&trade.Taxes,
-		&exitTime,
+		&trade.TotalBrokerage,
 		&trade.TagEntry,
 		&trade.TagSL,
 		&trade.Description,
@@ -535,40 +739,140 @@ LIMIT 1`, s.tradesTable)
 		return model.Trade{}, fmt.Errorf("fetch trade by id: %w", err)
 	}
 
-	if len(entryOrderIDsRaw) > 0 {
-		_ = json.Unmarshal(entryOrderIDsRaw, &trade.EntryOrderIDs)
+	orders, err := s.listOrdersByTradeID(ctx, tradeID)
+	if err != nil {
+		return model.Trade{}, err
 	}
-	if len(slOrderIDsRaw) > 0 {
-		_ = json.Unmarshal(slOrderIDsRaw, &trade.SLOrderIDs)
-	}
-	if len(slOrderQtyMapRaw) > 0 {
-		_ = json.Unmarshal(slOrderQtyMapRaw, &trade.SLOrderQtyMap)
-	}
-	if exitTime.Valid {
-		t := exitTime.Time
-		trade.ExitTime = &t
-	}
+	trade.Orders = orders
+	applyOrderSummary(&trade)
 
 	return trade, nil
+}
+
+func (s *Store) listOrdersByTradeID(ctx context.Context, tradeID string) ([]model.Order, error) {
+	rows, err := s.pool.Query(ctx, fmt.Sprintf(`
+SELECT
+    id::text,
+    COALESCE(order_id, ''),
+    COALESCE(trade_id::text, ''),
+    COALESCE(instrument_token, ''),
+    COALESCE(order_type, ''),
+    COALESCE(entry_price, 0)::float8,
+    COALESCE(target, 0)::float8,
+    COALESCE(stoploss, 0)::float8,
+    COALESCE(sl_limit, 0)::float8,
+    COALESCE(exit_price, 0)::float8,
+    COALESCE(pnl, 0)::float8,
+    exit_time,
+    COALESCE(brokerage, 0)::float8
+FROM %s
+WHERE trade_id::text = $1
+ORDER BY order_type, id`, ordersTableName), strings.TrimSpace(tradeID))
+	if err != nil {
+		return nil, fmt.Errorf("query orders by trade id: %w", err)
+	}
+	defer rows.Close()
+
+	orders := make([]model.Order, 0)
+	for rows.Next() {
+		var order model.Order
+		var exitTime sql.NullTime
+		if err := rows.Scan(
+			&order.ID,
+			&order.OrderID,
+			&order.TradeID,
+			&order.InstrumentToken,
+			&order.OrderType,
+			&order.EntryPrice,
+			&order.Target,
+			&order.Stoploss,
+			&order.SLLimit,
+			&order.ExitPrice,
+			&order.PNL,
+			&exitTime,
+			&order.Brokerage,
+		); err != nil {
+			return nil, fmt.Errorf("scan order: %w", err)
+		}
+		if exitTime.Valid {
+			t := exitTime.Time
+			order.ExitTime = &t
+		}
+		orders = append(orders, order)
+	}
+	if rows.Err() != nil {
+		return nil, fmt.Errorf("iterate orders: %w", rows.Err())
+	}
+	return orders, nil
+}
+
+func applyOrderSummary(trade *model.Trade) {
+	totalBrokerageFromOrders := 0.0
+	for _, order := range trade.Orders {
+		totalBrokerageFromOrders += order.Brokerage
+		switch strings.ToLower(strings.TrimSpace(order.OrderType)) {
+		case "entry":
+			if order.OrderID != "" {
+				trade.EntryOrderIDs = append(trade.EntryOrderIDs, order.OrderID)
+			}
+			if trade.EntryPrice == 0 && order.EntryPrice > 0 {
+				trade.EntryPrice = order.EntryPrice
+			}
+			if trade.Target == 0 && order.Target > 0 {
+				trade.Target = order.Target
+			}
+		case "sl":
+			if order.OrderID != "" {
+				trade.SLOrderIDs = append(trade.SLOrderIDs, order.OrderID)
+			}
+			if trade.Stoploss == 0 && order.Stoploss > 0 {
+				trade.Stoploss = order.Stoploss
+			}
+			if trade.SLLimit == 0 && order.SLLimit > 0 {
+				trade.SLLimit = order.SLLimit
+			}
+		}
+		if order.ExitPrice > 0 {
+			trade.ExitPrice = order.ExitPrice
+		}
+		if order.ExitTime != nil {
+			t := *order.ExitTime
+			trade.ExitTime = &t
+		}
+		trade.PNL += order.PNL
+	}
+	if trade.TotalBrokerage == 0 && totalBrokerageFromOrders > 0 {
+		trade.TotalBrokerage = totalBrokerageFromOrders
+	}
 }
 
 func (s *Store) ListOpenTradesForSLPolling(ctx context.Context) ([]model.TradeForSLPolling, error) {
 	query := fmt.Sprintf(`
 SELECT
-    id::text,
-    COALESCE(bot_name, ''),
-    UPPER(COALESCE(side, 'BUY')),
-    COALESCE(qty, 0),
-    COALESCE(entry_price, 0)::float8,
-    COALESCE(stoploss, 0)::float8,
-    COALESCE(taxes, 0)::float8,
-    COALESCE(sl_order_ids, '[]'::jsonb)
-FROM %s
-WHERE exit_time IS NULL
-  AND (status IS NULL OR UPPER(status) IN ('OPEN', 'PLACED', 'ENTRY_PLACED'))
-  AND sl_order_ids IS NOT NULL
-  AND jsonb_typeof(sl_order_ids) = 'array'
-  AND jsonb_array_length(sl_order_ids) > 0`, s.tradesTable)
+    t.id::text,
+    COALESCE(a.botname, ''),
+    UPPER(COALESCE(t.side, 'BUY')),
+    COALESCE(t.qty, 0),
+    COALESCE((
+        SELECT entry_price
+        FROM %s AS entry_orders
+        WHERE entry_orders.trade_id = t.id
+          AND lower(COALESCE(entry_orders.order_type, '')) = 'entry'
+          AND entry_orders.entry_price IS NOT NULL
+        ORDER BY entry_orders.id
+        LIMIT 1
+    ), 0)::float8,
+    COALESCE(t.total_brokerage, 0)::float8,
+    COALESCE(sl_orders.order_id, ''),
+    COALESCE(sl_orders.stoploss, 0)::float8
+FROM %s AS t
+JOIN %s AS sl_orders ON sl_orders.trade_id = t.id
+LEFT JOIN accounts AS a ON a.id = t.acct_id
+WHERE (t.status IS NULL OR UPPER(t.status) IN ('OPEN', 'PLACED', 'ENTRY_PLACED'))
+  AND lower(COALESCE(sl_orders.order_type, '')) = 'sl'
+  AND NULLIF(BTRIM(COALESCE(sl_orders.order_id, '')), '') IS NOT NULL
+  AND sl_orders.exit_time IS NULL
+ORDER BY t."timestamp", t.id`, ordersTableName, s.tradesTable, ordersTableName)
 
 	rows, err := s.pool.Query(ctx, query)
 	if err != nil {
@@ -576,40 +880,48 @@ WHERE exit_time IS NULL
 	}
 	defer rows.Close()
 
-	trades := make([]model.TradeForSLPolling, 0)
+	tradeByID := make(map[string]*model.TradeForSLPolling)
+	tradeOrder := make([]string, 0)
 	for rows.Next() {
-		var trade model.TradeForSLPolling
-		var slOrderIDsRaw []byte
-		if err := rows.Scan(
-			&trade.ID,
-			&trade.BotName,
-			&trade.Side,
-			&trade.Qty,
-			&trade.EntryPrice,
-			&trade.Stoploss,
-			&trade.Taxes,
-			&slOrderIDsRaw,
-		); err != nil {
+		var tradeID string
+		var botName string
+		var side string
+		var qty int
+		var entryPrice float64
+		var totalBrokerage float64
+		var slOrderID string
+		var stoploss float64
+		if err := rows.Scan(&tradeID, &botName, &side, &qty, &entryPrice, &totalBrokerage, &slOrderID, &stoploss); err != nil {
 			return nil, fmt.Errorf("scan open trade for sl polling: %w", err)
 		}
-		if len(slOrderIDsRaw) > 0 {
-			_ = json.Unmarshal(slOrderIDsRaw, &trade.SLOrderIDs)
+		trade := tradeByID[tradeID]
+		if trade == nil {
+			trade = &model.TradeForSLPolling{
+				ID:             tradeID,
+				BotName:        botName,
+				Side:           side,
+				Qty:            qty,
+				EntryPrice:     entryPrice,
+				TotalBrokerage: totalBrokerage,
+			}
+			tradeByID[tradeID] = trade
+			tradeOrder = append(tradeOrder, tradeID)
 		}
-		if len(trade.SLOrderIDs) == 0 {
-			continue
-		}
-		trades = append(trades, trade)
+		trade.SLOrders = append(trade.SLOrders, model.StopLossOrderForPolling{OrderID: slOrderID, Stoploss: stoploss})
 	}
-
 	if rows.Err() != nil {
 		return nil, fmt.Errorf("iterate open trades for sl polling: %w", rows.Err())
 	}
 
+	trades := make([]model.TradeForSLPolling, 0, len(tradeOrder))
+	for _, tradeID := range tradeOrder {
+		trades = append(trades, *tradeByID[tradeID])
+	}
 	return trades, nil
 }
 
 func (s *Store) UpdateTradeStatus(ctx context.Context, tradeID string, status string) error {
-	query := fmt.Sprintf(`UPDATE %s SET status = $2 WHERE id::text = $1 AND exit_time IS NULL`, s.tradesTable)
+	query := fmt.Sprintf(`UPDATE %s SET status = $2 WHERE id::text = $1`, s.tradesTable)
 	_, err := s.pool.Exec(ctx, query, strings.TrimSpace(tradeID), strings.TrimSpace(status))
 	if err != nil {
 		return fmt.Errorf("update trade status: %w", err)
@@ -622,23 +934,40 @@ func (s *Store) UpdateTrailingStateByTradeID(ctx context.Context, tradeID string
 		return fmt.Errorf("trade id is required")
 	}
 
-	query := fmt.Sprintf(`
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin update trailing state: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	tradeQuery := fmt.Sprintf(`
+UPDATE %s
+SET spot_trail_anchor = COALESCE($2::numeric, spot_trail_anchor)
+WHERE id::text = $1`, s.tradesTable)
+	if _, err := tx.Exec(ctx, tradeQuery, strings.TrimSpace(tradeID), nullFloatPtr(spotTrailAnchor)); err != nil {
+		return fmt.Errorf("update trade trailing state: %w", err)
+	}
+
+	if stoploss != nil || slLimit != nil {
+		if _, err := tx.Exec(ctx, fmt.Sprintf(`
 UPDATE %s
 SET
     stoploss = COALESCE($2::numeric, stoploss),
-    sl_limit = COALESCE($3::numeric, sl_limit),
-    spot_trail_anchor = COALESCE($4::numeric, spot_trail_anchor)
-WHERE exit_time IS NULL
-  AND id::text = $1`, s.tradesTable)
-
-	if _, err := s.pool.Exec(ctx, query, strings.TrimSpace(tradeID), nullFloatPtr(stoploss), nullFloatPtr(slLimit), nullFloatPtr(spotTrailAnchor)); err != nil {
-		return fmt.Errorf("update trailing state by trade id: %w", err)
+    sl_limit = COALESCE($3::numeric, sl_limit)
+WHERE trade_id::text = $1
+  AND lower(COALESCE(order_type, '')) = 'sl'
+  AND exit_time IS NULL`, ordersTableName), strings.TrimSpace(tradeID), nullFloatPtr(stoploss), nullFloatPtr(slLimit)); err != nil {
+			return fmt.Errorf("update sl order trailing state: %w", err)
+		}
 	}
 
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit update trailing state: %w", err)
+	}
 	return nil
 }
 
-func (s *Store) MarkTradeClosedFromSL(ctx context.Context, tradeID string, exitPrice float64, additionalTaxes float64, exitStatus string) error {
+func (s *Store) MarkTradeClosedFromSL(ctx context.Context, tradeID string, brokerOrderID string, exitPrice float64, additionalBrokerage float64, exitStatus string) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin close trade transaction: %w", err)
@@ -647,21 +976,30 @@ func (s *Store) MarkTradeClosedFromSL(ctx context.Context, tradeID string, exitP
 
 	query := fmt.Sprintf(`
 SELECT
-    COALESCE(bot_name, ''),
-    UPPER(COALESCE(side, 'BUY')),
-    COALESCE(qty, 0),
-    COALESCE(entry_price, 0)::float8,
-    COALESCE(taxes, 0)::float8
-FROM %s
-WHERE id::text = $1
-FOR UPDATE`, s.tradesTable)
+    COALESCE(t.acct_id::text, ''),
+    UPPER(COALESCE(t.side, 'BUY')),
+    COALESCE(t.qty, 0),
+    COALESCE((
+        SELECT entry_price
+        FROM %s AS entry_orders
+        WHERE entry_orders.trade_id = t.id
+          AND lower(COALESCE(entry_orders.order_type, '')) = 'entry'
+          AND entry_orders.entry_price IS NOT NULL
+        ORDER BY entry_orders.id
+        LIMIT 1
+    ), 0)::float8,
+    COALESCE(t.total_brokerage, 0)::float8
+FROM %s AS t
+LEFT JOIN accounts AS a ON a.id = t.acct_id
+WHERE t.id::text = $1
+FOR UPDATE OF t`, ordersTableName, s.tradesTable)
 
-	var botName string
+	var accountID string
 	var side string
 	var qty int
 	var entryPrice float64
-	var currentTaxes float64
-	if err := tx.QueryRow(ctx, query, strings.TrimSpace(tradeID)).Scan(&botName, &side, &qty, &entryPrice, &currentTaxes); err != nil {
+	var currentBrokerage float64
+	if err := tx.QueryRow(ctx, query, strings.TrimSpace(tradeID)).Scan(&accountID, &side, &qty, &entryPrice, &currentBrokerage); err != nil {
 		return fmt.Errorf("load trade for closure: %w", err)
 	}
 
@@ -669,25 +1007,23 @@ FOR UPDATE`, s.tradesTable)
 		qty = int(math.Abs(float64(qty)))
 	}
 
-	totalTaxes := currentTaxes + math.Max(0, additionalTaxes)
-	pnl := calculatePNL(side, entryPrice, exitPrice, qty, totalTaxes)
+	additionalBrokerage = math.Max(0, additionalBrokerage)
+	totalBrokerage := currentBrokerage + additionalBrokerage
+	pnl := calculatePNL(side, entryPrice, exitPrice, qty, totalBrokerage)
 
 	if strings.TrimSpace(exitStatus) == "" {
 		exitStatus = "STOPLOSS HIT"
 	}
 
-	updateQuery := fmt.Sprintf(`
+	updateTradeQuery := fmt.Sprintf(`
 UPDATE %s
 SET
     status = $2,
-    exit_price = $3,
-    taxes = $4,
-    pnl = $5,
-    exit_time = NOW()
+    total_brokerage = $3
 WHERE id::text = $1
-  AND exit_time IS NULL`, s.tradesTable)
+  AND (status IS NULL OR UPPER(status) IN ('OPEN', 'PLACED', 'ENTRY_PLACED'))`, s.tradesTable)
 
-	result, err := tx.Exec(ctx, updateQuery, strings.TrimSpace(tradeID), exitStatus, exitPrice, totalTaxes, pnl)
+	result, err := tx.Exec(ctx, updateTradeQuery, strings.TrimSpace(tradeID), exitStatus, totalBrokerage)
 	if err != nil {
 		return fmt.Errorf("mark trade closed: %w", err)
 	}
@@ -695,35 +1031,21 @@ WHERE id::text = $1
 		return nil
 	}
 
-	now := time.Now().In(s.loc)
-	botName = normalizeBotName(botName)
-	monthYear := normalizeMonthYear("", now)
-	currentDate := now.Format("02-01-2006")
+	if _, err := tx.Exec(ctx, fmt.Sprintf(`
+UPDATE %s
+SET
+    exit_price = $3,
+    brokerage = COALESCE(brokerage, 0) + $4,
+    pnl = $5,
+    exit_time = NOW()
+WHERE trade_id::text = $1
+  AND lower(COALESCE(order_type, '')) = 'sl'
+  AND ($2 = '' OR order_id = $2)`, ordersTableName), strings.TrimSpace(tradeID), strings.TrimSpace(brokerOrderID), exitPrice, additionalBrokerage, pnl); err != nil {
+		return fmt.Errorf("mark sl order closed: %w", err)
+	}
 
-	initCash, err := s.resolveAccountInitCashTx(ctx, tx, botName, monthYear, nil)
-	if err != nil {
+	if err := s.refreshAccountNetProfitFromOrdersTx(ctx, tx, accountID); err != nil {
 		return err
-	}
-
-	var accountID string
-	if err := tx.QueryRow(ctx, `
-INSERT INTO accounts (botname, month_year, init_cash, current_date, profit, max_drawdown)
-VALUES ($1, $2, $3, $4, $5, CASE WHEN $5 < 0 THEN $5 ELSE 0 END)
-ON CONFLICT (botname, month_year, current_date)
-DO UPDATE SET
-    init_cash = CASE
-        WHEN COALESCE(accounts.init_cash, 0) = 0 AND EXCLUDED.init_cash > 0 THEN EXCLUDED.init_cash
-        ELSE accounts.init_cash
-    END,
-    profit = COALESCE(accounts.profit, 0) + EXCLUDED.profit,
-    max_drawdown = LEAST(COALESCE(accounts.max_drawdown, 0), COALESCE(accounts.profit, 0) + EXCLUDED.profit)
-RETURNING id::text
-`, botName, monthYear, initCash, currentDate, pnl).Scan(&accountID); err != nil {
-		return fmt.Errorf("upsert account daily pnl: %w", err)
-	}
-
-	if _, err := tx.Exec(ctx, fmt.Sprintf(`UPDATE %s SET account_id = $2 WHERE id::text = $1`, s.tradesTable), strings.TrimSpace(tradeID), accountID); err != nil {
-		return fmt.Errorf("link trade to account: %w", err)
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -733,14 +1055,14 @@ RETURNING id::text
 	return nil
 }
 
-func calculatePNL(side string, entryPrice float64, exitPrice float64, qty int, totalTaxes float64) float64 {
+func calculatePNL(side string, entryPrice float64, exitPrice float64, qty int, totalBrokerage float64) float64 {
 	gross := 0.0
 	if strings.EqualFold(strings.TrimSpace(side), "SELL") {
 		gross = (entryPrice - exitPrice) * float64(qty)
 	} else {
 		gross = (exitPrice - entryPrice) * float64(qty)
 	}
-	return gross - totalTaxes
+	return gross - totalBrokerage
 }
 
 func nullIfEmpty(value string) any {
@@ -758,15 +1080,11 @@ func nullFloatPtr(value *float64) any {
 	return *value
 }
 
-func nullStringPtr(value *string) any {
+func nullTimePtr(value *time.Time) any {
 	if value == nil {
 		return nil
 	}
-	trimmed := strings.TrimSpace(*value)
-	if trimmed == "" {
-		return nil
-	}
-	return trimmed
+	return *value
 }
 
 func normalizeBotName(botName string) string {
@@ -790,17 +1108,33 @@ func normalizeMonthYear(monthYear string, currentTime time.Time) string {
 	return currentTime.Format("012006")
 }
 
-func (s *Store) resolveAccountInitCash(ctx context.Context, botName string, monthYear string, requested *float64) (float64, error) {
-	var existing float64
-	if err := s.pool.QueryRow(ctx, `
-SELECT COALESCE(MAX(init_cash), 0)::float8
-FROM accounts
-WHERE botname = $1
-  AND month_year = $2`, botName, monthYear).Scan(&existing); err != nil {
-		return 0, fmt.Errorf("resolve account init_cash: %w", err)
+func normalizeCurrDate(currDate string, currentTime time.Time) string {
+	trimmed := strings.TrimSpace(currDate)
+	if trimmed == "" {
+		return currentTime.Format("02-01-2006")
 	}
+	for _, layout := range []string{"02-01-2006", "2006-01-02", "02/01/2006"} {
+		if parsed, err := time.ParseInLocation(layout, trimmed, currentTime.Location()); err == nil {
+			return parsed.Format("02-01-2006")
+		}
+	}
+	digitsOnly := strings.Map(func(r rune) rune {
+		if r >= '0' && r <= '9' {
+			return r
+		}
+		return -1
+	}, trimmed)
+	if len(digitsOnly) == 8 {
+		return digitsOnly[:2] + "-" + digitsOnly[2:4] + "-" + digitsOnly[4:]
+	}
+	return trimmed
+}
 
-	return resolveInitCashValue(requested, existing, s.accountInitialCash), nil
+func timeForMonthYear(currDate string, fallback time.Time) time.Time {
+	if parsed, err := time.ParseInLocation("02-01-2006", normalizeCurrDate(currDate, fallback), fallback.Location()); err == nil {
+		return parsed
+	}
+	return fallback
 }
 
 func (s *Store) resolveAccountInitCashTx(ctx context.Context, tx pgx.Tx, botName string, monthYear string, requested *float64) (float64, error) {

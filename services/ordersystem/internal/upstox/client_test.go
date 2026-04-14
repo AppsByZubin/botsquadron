@@ -100,3 +100,39 @@ func TestClientModifyOrderSendsExpectedPayload(t *testing.T) {
 		t.Fatalf("response order_id = %s, want fallback order-123", resp.OrderID)
 	}
 }
+
+func TestClientPlaceOrderCapturesSlicedOrderIDs(t *testing.T) {
+	t.Parallel()
+
+	client := NewClient(config.Config{
+		UpstoxBaseURL:        "https://api.example.com",
+		UpstoxAccessToken:    "test-token",
+		UpstoxOrderPlacePath: "/v3/order/place",
+		UpstoxAPIVersion:     "2.0",
+	})
+	client.httpClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{"status":"success","data":[{"order_id":"order-1"},{"order_id":"order-2"}]}`)),
+		}, nil
+	})}
+
+	resp, err := client.PlaceOrder(context.Background(), PlaceOrderRequest{
+		OrderType:       "MARKET",
+		TransactionType: "BUY",
+		Quantity:        150,
+		InstrumentToken: "NSE_FO|123",
+		Product:         "D",
+		Validity:        "DAY",
+	})
+	if err != nil {
+		t.Fatalf("PlaceOrder returned error: %v", err)
+	}
+	if resp.OrderID != "order-1" {
+		t.Fatalf("primary order_id = %s, want order-1", resp.OrderID)
+	}
+	if len(resp.OrderIDs) != 2 || resp.OrderIDs[0] != "order-1" || resp.OrderIDs[1] != "order-2" {
+		t.Fatalf("order ids = %#v, want [order-1 order-2]", resp.OrderIDs)
+	}
+}

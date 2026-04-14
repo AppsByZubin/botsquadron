@@ -28,6 +28,7 @@ func New(svc *service.Service, requestTimeout time.Duration) *Handler {
 func (h *Handler) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", h.handleHealth)
+	mux.HandleFunc("POST /v1/accounts", h.handleCreateAccount)
 	mux.HandleFunc("POST /v1/trades", h.handleCreateTrade)
 	mux.HandleFunc("POST /v1/trades/{id}/modify", h.handleModifyTrade)
 	mux.HandleFunc("GET /v1/trades/{id}", h.handleGetTradeByID)
@@ -36,6 +37,32 @@ func (h *Handler) Routes() http.Handler {
 
 func (h *Handler) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (h *Handler) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), h.requestTimeout)
+	defer cancel()
+
+	defer r.Body.Close()
+	var req model.CreateAccountRequest
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid request body: " + err.Error()})
+		return
+	}
+
+	resp, err := h.svc.CreateAccount(ctx, req)
+	if err != nil {
+		statusCode := http.StatusInternalServerError
+		if strings.Contains(strings.ToLower(err.Error()), "required") || strings.Contains(strings.ToLower(err.Error()), "must be") {
+			statusCode = http.StatusBadRequest
+		}
+		writeJSON(w, statusCode, errorResponse{Error: err.Error()})
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, resp)
 }
 
 func (h *Handler) handleCreateTrade(w http.ResponseWriter, r *http.Request) {
