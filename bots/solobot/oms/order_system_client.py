@@ -125,6 +125,7 @@ class OrderSystemClient:
         self.session = session or requests.Session()
         self._last_trade_id: Optional[str] = None
         self._active_trade_by_symbol: Dict[str, str] = {}
+        self._trade_cache: Dict[str, Dict[str, Any]] = {}
         if self.local_copy_enabled:
             self._init_local_ledger()
 
@@ -282,9 +283,11 @@ class OrderSystemClient:
         response = self._request("POST", "/v1/trades", json=payload)
         trade_id = str(response.get("trade_id") or "").strip()
         if trade_id:
+            local_row = self._local_row_from_create(payload, response)
             self._last_trade_id = trade_id
             self._active_trade_by_symbol[str(symbol)] = trade_id
-            self._upsert_local_trade(self._local_row_from_create(payload, response))
+            self._remember_trade(local_row)
+            self._upsert_local_trade(local_row)
         return response
 
     def buy(
@@ -340,24 +343,35 @@ class OrderSystemClient:
             "spot_trail_anchor": _to_float(spot_trail_anchor, None),
         })
         response = self._request("POST", f"/v1/trades/{trade_id}/modify", json=payload)
-        self._patch_local_trade(trade_id, {
+        updates = {
             "stoploss": payload.get("stoploss"),
+            "sl_limit": payload.get("sl_limit"),
             "_sl_limit": payload.get("sl_limit"),
+            "spot_trail_anchor": payload.get("spot_trail_anchor"),
             "_spot_trail_anchor": payload.get("spot_trail_anchor"),
-        })
+        }
+        self._patch_cached_trade(trade_id, updates)
+        self._patch_local_trade(trade_id, updates)
         return response
 
     def get_trade_by_id(self, trade_id: str) -> Dict[str, Any]:
         trade = self._request("GET", f"/v1/trades/{trade_id}")
         self._upsert_local_trade(self._local_row_from_trade(trade))
+        return self._remember_trade(trade)
+
+    def refresh_trade(self, trade_id: str, ts: Optional[datetime] = None) -> Optional[Dict[str, Any]]:
+        del ts
+        trade = self.get_trade_by_id(trade_id)
+        status = str(trade.get("status") or "").strip().upper()
+        if status in self.CLOSED_STATUSES:
+            self._forget_trade(trade)
         return trade
 
     def refresh_trade_status(self, trade_id: str, ts: Optional[datetime] = None) -> Optional[str]:
-        del ts
-        trade = self.get_trade_by_id(trade_id)
+        trade = self.refresh_trade(trade_id, ts=ts)
+        if not trade:
+            return None
         status = str(trade.get("status") or "").strip()
-        if status.upper() in self.CLOSED_STATUSES:
-            self._forget_trade(trade)
         return status or None
 
     def on_tick(
@@ -384,14 +398,18 @@ class OrderSystemClient:
         if not resolved_trade_id:
             return None
 
-        trade = self.get_trade_by_id(resolved_trade_id)
+        trade = self._get_cached_trade(resolved_trade_id)
+        if trade is None:
+            log.debug("Skipping OMS tick for trade_id=%s; no cached trade snapshot.", resolved_trade_id)
+            return None
+
         status = str(trade.get("status") or "").strip().upper()
         if status in self.CLOSED_STATUSES:
             self._forget_trade(trade)
             return trade
         if status and status != constants.OPEN:
             return trade
-        if not bool(trade.get("tsl_active")):
+        if not _to_bool(trade.get("tsl_active"), False):
             return trade
 
         update = self._build_trailing_update(trade, price)
@@ -412,7 +430,14 @@ class OrderSystemClient:
             sl_limit=update.get("sl_limit"),
             spot_trail_anchor=price,
         )
-        return self.get_trade_by_id(resolved_trade_id)
+        trade.update({
+            "stoploss": update["stoploss"],
+            "sl_limit": update.get("sl_limit"),
+            "_sl_limit": update.get("sl_limit"),
+            "spot_trail_anchor": price,
+            "_spot_trail_anchor": price,
+        })
+        return self._remember_trade(trade)
 
     def square_off_trade(
         self,
@@ -439,6 +464,7 @@ class OrderSystemClient:
             return
         for trade in trades:
             if isinstance(trade, Mapping):
+                self._remember_trade(trade)
                 self._upsert_local_trade(self._local_row_from_trade(trade))
 
     def _local_row_from_create(self, payload: Mapping[str, Any], response: Mapping[str, Any]) -> Dict[str, Any]:
@@ -507,6 +533,92 @@ class OrderSystemClient:
             "description": trade.get("description"),
             "sl_order_qty_map": {},
         }
+
+    def _normalize_trade_snapshot(self, trade: Mapping[str, Any]) -> Dict[str, Any]:
+        snapshot = dict(trade)
+        trade_id = str(_first_value(snapshot.get("id"), snapshot.get("trade_id")) or "").strip()
+        if trade_id:
+            snapshot["id"] = trade_id
+            snapshot["trade_id"] = trade_id
+
+        alias_pairs = (
+            ("sl_limit", "_sl_limit"),
+            ("spot_trail_anchor", "_spot_trail_anchor"),
+            ("trail_points", "_trail_points"),
+        )
+        for public_key, local_key in alias_pairs:
+            public_value = snapshot.get(public_key)
+            local_value = snapshot.get(local_key)
+            if (public_value is None or public_value == "") and local_value not in (None, ""):
+                snapshot[public_key] = local_value
+            if (local_value is None or local_value == "") and public_value not in (None, ""):
+                snapshot[local_key] = public_value
+
+        if "tsl_active" in snapshot:
+            snapshot["tsl_active"] = _to_bool(snapshot.get("tsl_active"), False)
+        return snapshot
+
+    def _remember_trade(self, trade: Mapping[str, Any]) -> Dict[str, Any]:
+        snapshot = self._normalize_trade_snapshot(trade)
+        trade_id = str(snapshot.get("id") or snapshot.get("trade_id") or "").strip()
+        if not trade_id:
+            return snapshot
+
+        self._trade_cache[trade_id] = snapshot
+        status = str(snapshot.get("status") or "").strip().upper()
+        symbol = str(snapshot.get("symbol") or "").strip()
+
+        if status in self.CLOSED_STATUSES:
+            if self._last_trade_id == trade_id:
+                self._last_trade_id = None
+            if symbol and self._active_trade_by_symbol.get(symbol) == trade_id:
+                self._active_trade_by_symbol.pop(symbol, None)
+        else:
+            self._last_trade_id = trade_id
+            if symbol:
+                self._active_trade_by_symbol[symbol] = trade_id
+
+        return dict(snapshot)
+
+    def _get_cached_trade(self, trade_id: str) -> Optional[Dict[str, Any]]:
+        trade_id = str(trade_id or "").strip()
+        if not trade_id:
+            return None
+
+        trade = self._trade_cache.get(trade_id)
+        if trade is not None:
+            return dict(trade)
+
+        row = self._read_local_trade(trade_id)
+        if row is None:
+            return None
+        return self._remember_trade(row)
+
+    def _read_local_trade(self, trade_id: str) -> Optional[Dict[str, Any]]:
+        if not self.local_copy_enabled:
+            return None
+
+        trade_id = str(trade_id or "").strip()
+        if not trade_id:
+            return None
+
+        for row in self._read_local_rows():
+            if not self._row_belongs_to_active_day(row):
+                continue
+            if str(row.get("id") or "").strip() == trade_id:
+                return row
+        return None
+
+    def _patch_cached_trade(self, trade_id: str, updates: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+        trade_id = str(trade_id or "").strip()
+        if not trade_id:
+            return None
+
+        trade = self._get_cached_trade(trade_id) or {"id": trade_id, "trade_id": trade_id}
+        for key, value in updates.items():
+            if value is not None:
+                trade[key] = value
+        return self._remember_trade(trade)
 
     def _upsert_local_trade(self, row: Mapping[str, Any]) -> None:
         if not self.local_copy_enabled:
@@ -599,9 +711,9 @@ class OrderSystemClient:
 
     def _build_trailing_update(self, trade: Mapping[str, Any], price: float) -> Optional[Dict[str, float]]:
         entry = _to_float(trade.get("entry_price"), 0.0)
-        trail_points = _to_float(trade.get("trail_points"), 0.0)
+        trail_points = _to_float(_first_value(trade.get("trail_points"), trade.get("_trail_points")), 0.0)
         current_sl = _to_float(trade.get("stoploss"), 0.0)
-        current_limit = _to_float(trade.get("sl_limit"), 0.0)
+        current_limit = _to_float(_first_value(trade.get("sl_limit"), trade.get("_sl_limit")), 0.0)
         start_after = _to_float(trade.get("start_trail_after"), 0.0)
         side = str(trade.get("side") or constants.BUY).upper()
 
@@ -687,6 +799,8 @@ class OrderSystemClient:
     def _forget_trade(self, trade: Mapping[str, Any]) -> None:
         trade_id = str(trade.get("id") or trade.get("trade_id") or self._last_trade_id or "").strip()
         symbol = str(trade.get("symbol") or "").strip()
+        if trade_id:
+            self._trade_cache.pop(trade_id, None)
         if trade_id and self._last_trade_id == trade_id:
             self._last_trade_id = None
         if symbol and self._active_trade_by_symbol.get(symbol) == trade_id:
