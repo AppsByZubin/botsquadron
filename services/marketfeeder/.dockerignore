@@ -1,0 +1,6 @@
+.git
+Dockerfile
+marketfeeder
+*.test
+*.out
+tmp/

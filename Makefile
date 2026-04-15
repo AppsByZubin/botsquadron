@@ -1,8 +1,8 @@
-.PHONY: build build-ordersystem docker-build docker-build-ordersystem deploy-nats deploy-marketfeeder deploy-all clean test-nats install-python-deps
+.PHONY: build build-ordersystem docker-build docker-build-ordersystem docker-build-solobot docker-build-all deploy-nats deploy-marketfeeder deploy-all clean test-nats install-python-deps
 
 # Build the Go binary
 build:
-	cd services/marketfeeder && go build -o marketfeeder .
+	cd services/marketfeeder && go build -o marketfeeder ./cmd
 
 # Build the order system Go binary
 build-ordersystem:
@@ -15,6 +15,13 @@ docker-build: build
 # Build the order system Docker image
 docker-build-ordersystem: build-ordersystem
 	cd services/ordersystem && docker build -t ordersystem:latest .
+
+# Build the solobot Docker image from the repo root so its runtime paths stay stable
+docker-build-solobot:
+	docker build -f bots/solobot/Dockerfile -t solobot:latest .
+
+# Build every runtime image
+docker-build-all: docker-build docker-build-ordersystem docker-build-solobot
 
 # Install Python dependencies
 install-python-deps:
@@ -42,3 +49,5 @@ clean:
 	kubectl delete deployment marketfeeder --ignore-not-found=true
 	helm uninstall nats --namespace default --ignore-not-found=true
 	docker rmi marketfeeder:latest --force
+	docker rmi ordersystem:latest --force
+	docker rmi solobot:latest --force

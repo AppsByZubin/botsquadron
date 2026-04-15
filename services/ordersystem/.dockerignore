@@ -1,0 +1,6 @@
+.git
+Dockerfile
+ordersystem
+*.test
+*.out
+tmp/

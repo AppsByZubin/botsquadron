@@ -16,14 +16,14 @@ Key features:
 - Trading window gate
 - Order lifecycle glue that calls your order_manager (sandbox/mock/prod)
 
-Notes:
-- This file DOES NOT call Upstox order APIs directly; it delegates to your order_manager.
+- This file DOES NOT call Upstox order APIs directly; it delegates to OrderSystemClient/order_manager.
 - It assumes your engine passes WS messages in Upstox MarketDataStreamerV3 format.
 """
 
 from __future__ import annotations
 
 import math
+import os
 import sys
 import threading
 from collections import deque
@@ -36,6 +36,7 @@ import pandas_ta as ta
 from zoneinfo import ZoneInfo
 from technicals.atr.atr_for_ticks import AtrEngine
 from technicals.orb.orb_state import OrbState
+from oms.order_system_client import OrderSystemClient
 from index.nifty50.nifty50_utils import (
     calculate_gap_percent,
     classify_gap_direction,
@@ -66,11 +67,18 @@ class PCRVwmaEmaOrbStrategy:
         self.uptox_client = uptox_client
         self.previous_day_trend = previous_day_trend
         self.selected_contracts = selected_contracts or {}
-        self.order_manager = order_manager
         self.option_exipry_date = option_exipry_date
 
         self.params = params or {}
         sp = (self.params.get("strategy-parameters") or {}) if isinstance(self.params, dict) else {}
+        self.order_manager = order_manager or self._create_default_order_manager()
+        if self.order_manager is None:
+            log.warning("Order manager is not configured; live order lifecycle calls will be skipped.")
+        else:
+            log.info(
+                "Order manager configured: %s",
+                self.order_manager.__class__.__name__,
+            )
         ht: Dict[str, Any] = {}
         if isinstance(self.params, dict):
             # Support both keys while keeping backward compatibility with old configs.
@@ -109,6 +117,14 @@ class PCRVwmaEmaOrbStrategy:
         self._today_realized_pnl_day: Optional[str] = None
         self._today_realized_pnl: float = 0.0
         self._today_realized_pnl_trade_ids = set()
+        self._trade_status_refresh_interval_sec = float(
+            sp.get(
+                "trade_status_refresh_interval_sec",
+                sp.get("trade-status-refresh-interval-sec", 10),
+            )
+            or 10
+        )
+        self._last_trade_status_refresh_at: Optional[datetime] = None
         self._trade_end_time: Optional[dtime] = None
         self._init_trade_window_times()
         self._setup_orb_state()
@@ -200,6 +216,35 @@ class PCRVwmaEmaOrbStrategy:
         # auto-start PCR poller
         if bool(sp.get("pcr_poller_enabled", True)):
             self.start()
+
+    def _create_default_order_manager(self) -> Optional[OrderSystemClient]:
+        try:
+            return OrderSystemClient.from_params(
+                strategy_name=constants.PCR_VWAP_EMA_ORB,
+                mode=self._resolve_order_mode(),
+                params=self.params,
+                instrument=constants.NIFTY50,
+            )
+        except Exception as exc:
+            log.error(f"Failed to initialize OrderSystemClient: {exc}")
+            return None
+
+    def _resolve_order_mode(self) -> Optional[str]:
+        if isinstance(self.params, dict):
+            for section_name in ("oms", "ordersystem", "order_system", "order-system"):
+                section = self.params.get(section_name)
+                if isinstance(section, dict):
+                    mode = section.get("mode") or section.get("app_mode") or section.get("app-mode")
+                    if mode:
+                        return str(mode)
+
+            sp = self.params.get("strategy-parameters")
+            if isinstance(sp, dict):
+                mode = sp.get("mode") or sp.get("app_mode") or sp.get("app-mode")
+                if mode:
+                    return str(mode)
+
+        return os.getenv("APP_MODE") or os.getenv("SOLOBOT_MODE")
 
     # ------------------------------------------------------------------
     # ORB helpers
@@ -1016,6 +1061,68 @@ class PCRVwmaEmaOrbStrategy:
 
         return True
 
+    def _is_closed_trade_info(self, trade_info: Optional[Dict[str, Any]]) -> bool:
+        if not isinstance(trade_info, dict):
+            return False
+        status = str(trade_info.get("status") or "").strip().upper()
+        return status in {
+            constants.TARGET_HIT.upper(),
+            constants.STOPLOSS_HIT.upper(),
+            constants.MANUAL_EXIT.upper(),
+            constants.EOD_SQUARE_OFF.upper(),
+        }
+
+    def _clear_order_container(self) -> None:
+        for key in list(self._order_container.keys()):
+            self._order_container[key] = None
+        self._last_trade_status_refresh_at = None
+
+    def _handle_closed_trade_info(
+        self,
+        trade_info: Optional[Dict[str, Any]],
+        ts: Optional[datetime],
+        message: str,
+    ) -> bool:
+        if not self._is_closed_trade_info(trade_info):
+            return False
+
+        status = str(trade_info.get("status") or "").strip()
+        self._set_post_exit_cooldown(status, ts=ts)
+        self._update_today_realized_pnl_on_trade_close(trade_info, ts=ts)
+        log.info(f"{message}: {trade_info}")
+        self._clear_order_container()
+        return True
+
+    def _trade_status_refresh_due(self, ts: Optional[datetime]) -> bool:
+        if self._trade_status_refresh_interval_sec <= 0:
+            return False
+
+        ref_ts = ts or self._resolve_reference_ts()
+        if ref_ts.tzinfo is None:
+            ref_ts = ref_ts.replace(tzinfo=IST)
+
+        if self._last_trade_status_refresh_at is None:
+            return True
+        return (ref_ts - self._last_trade_status_refresh_at).total_seconds() >= self._trade_status_refresh_interval_sec
+
+    def _refresh_open_trade_info(self, trade_id: Optional[str], ts: Optional[datetime]) -> Optional[Dict[str, Any]]:
+        trade_id = str(trade_id or "").strip()
+        if not trade_id or not self._trade_status_refresh_due(ts):
+            return None
+
+        ref_ts = ts or self._resolve_reference_ts()
+        if ref_ts.tzinfo is None:
+            ref_ts = ref_ts.replace(tzinfo=IST)
+        self._last_trade_status_refresh_at = ref_ts
+
+        if hasattr(self.order_manager, "refresh_trade"):
+            return self.order_manager.refresh_trade(trade_id, ts=ts)
+        if hasattr(self.order_manager, "refresh_trade_status"):
+            status = self.order_manager.refresh_trade_status(trade_id, ts=ts)
+            if status:
+                return {"id": trade_id, "trade_id": trade_id, "status": status}
+        return None
+
     def _get_today_realized_snapshot(self, day_key: str) -> Optional[Dict[str, Any]]:
         orders_csv = getattr(self.order_manager, "orders_csv", None)
         if not isinstance(orders_csv, str) or not orders_csv:
@@ -1156,7 +1263,7 @@ class PCRVwmaEmaOrbStrategy:
             if daily == constants.SIDEWAYS:
                 return small
             if daily == constants.BEARISH:
-                return 0
+                return small
 
         if side == constants.PUT:
             if daily == constants.BEARISH and is_bearish_thrust:
@@ -1166,7 +1273,7 @@ class PCRVwmaEmaOrbStrategy:
             if daily == constants.SIDEWAYS:
                 return small
             if daily == constants.BULLISH:
-                return 0
+                return small
 
         return small
 
@@ -1288,6 +1395,8 @@ class PCRVwmaEmaOrbStrategy:
     def _trade_processing(self, feed_response: list) -> None:
         sp = (self.params.get("strategy-parameters") or {}) if isinstance(self.params, dict) else {}
         if not feed_response:
+            return
+        if self.order_manager is None:
             return
 
         # 1) WAITING -> pick contract + place order
@@ -1440,7 +1549,6 @@ class PCRVwmaEmaOrbStrategy:
 
             desc = f"{self._order_container['side']} {self._order_container['instrument_symbol']} entry={entry_price:.2f}"
 
-            # TODO(OMS): Placeholder call. Replace order_manager.buy with OMS microservice create-order API.
             trade_id = self.order_manager.buy(
                 symbol=self._order_container["instrument_symbol"],
                 instrument_token=self._order_container["instrument_key"],
@@ -1481,43 +1589,24 @@ class PCRVwmaEmaOrbStrategy:
                     break
 
             if latest_ltp is not None and ts is not None:
-                # Broker-side sync: if SL already executed at Upstox, stop trailing/OMS calls.
+                trade_id = self._order_container.get("trade_id")
+
+                # Broker-side sync is rate-limited; ordersystem's poller owns the actual Upstox status checks.
                 try:
-                    if hasattr(self.order_manager, "refresh_trade_status") and self._order_container.get("trade_id"):
-                        # TODO(OMS): Placeholder call. Replace order_manager.refresh_trade_status with OMS trade-status API.
-                        closed_status = self.order_manager.refresh_trade_status(self._order_container.get("trade_id"), ts=ts)
-                        if closed_status in [constants.STOPLOSS_HIT, constants.TARGET_HIT, constants.MANUAL_EXIT, constants.EOD_SQUARE_OFF]:
-                            # TODO(OMS): Placeholder call. Replace order_manager.get_trade_by_id with OMS trade-details API.
-                            self._set_post_exit_cooldown(closed_status, ts=ts)
-                            trade_info = self.order_manager.get_trade_by_id(self._order_container.get("trade_id"))
-                            self._update_today_realized_pnl_on_trade_close(trade_info, ts=ts)
-                            log.info(f"Broker sync closed trade: {trade_info}")
-                            for k in list(self._order_container.keys()):
-                                self._order_container[k] = None
-                            return
+                    trade_info = self._refresh_open_trade_info(trade_id, ts)
+                    if self._handle_closed_trade_info(trade_info, ts, "Broker sync closed trade"):
+                        return
                 except Exception as e:
                     log.warning(f"refresh_trade_status failed: {e}")
 
-                # TODO(OMS): Placeholder call. Replace order_manager.on_tick with OMS tick/trailing update endpoint.
-                _ = self.order_manager.on_tick(
+                trade_info = self.order_manager.on_tick(
                     symbol=self._order_container["instrument_symbol"],
                     o=latest_ltp, h=latest_ltp, l=latest_ltp, c=latest_ltp,
                     ts=ts,
+                    trade_id=trade_id,
                 )
 
-                # TODO(OMS): Placeholder call. Replace order_manager.get_trade_by_id with OMS trade-details API.
-                trade_info = self.order_manager.get_trade_by_id(self._order_container.get("trade_id"))
-                if trade_info and trade_info.get("status") in [
-                    constants.TARGET_HIT,
-                    constants.STOPLOSS_HIT,
-                    constants.MANUAL_EXIT,
-                    constants.EOD_SQUARE_OFF,
-                ]:
-                    self._set_post_exit_cooldown(trade_info.get("status"), ts=ts)
-                    self._update_today_realized_pnl_on_trade_close(trade_info, ts=ts)
-                    log.debug(f"Trade closed Info: {trade_info}")
-                    for k in list(self._order_container.keys()):
-                        self._order_container[k] = None
+                if self._handle_closed_trade_info(trade_info, ts, "Trade closed Info"):
                     return
 
         # 3) EOD square-off
@@ -1540,11 +1629,9 @@ class PCRVwmaEmaOrbStrategy:
                 ts = datetime.now(IST)
                 try:
                     if hasattr(self.order_manager, "refresh_trade_status"):
-                        # TODO(OMS): Placeholder call. Replace order_manager.refresh_trade_status with OMS trade-status API.
                         _ = self.order_manager.refresh_trade_status(trade_id, ts=ts)
                 except Exception as e:
                     log.warning(f"refresh_trade_status (pre-eod) failed: {e}")
-                # TODO(OMS): Placeholder call. Replace order_manager.square_off_trade with OMS square-off API.
                 self.order_manager.square_off_trade(
                     trade_id=trade_id,
                     exit_price=float(latest_ltp),

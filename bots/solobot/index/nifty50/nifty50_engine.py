@@ -12,6 +12,7 @@ import nats
 from common import constants
 from broker.upstox_helper import UpstoxHelper
 from logger import create_logger
+from oms.order_system_client import OrderSystemClient
 
 from index.nifty50.nifty50_utils import (
     premarket,
@@ -183,8 +184,22 @@ async def nifty50_engine(strategy, mode, param_data):
             logger.error(f"Unsupported strategy: {strategy}. Exiting.")
             sys.exit(constants.FAIL_CODE)
 
+        order_manager = OrderSystemClient.from_params(
+            strategy_name=strategy,
+            mode=mode,
+            params=param_data,
+            instrument=constants.NIFTY50,
+        )
+        logger.info(
+            "Configured ordersystem client base_url=%s bot_name=%s mode=%s orders_csv=%s",
+            order_manager.base_url,
+            order_manager.bot_name,
+            order_manager.mode,
+            order_manager.orders_csv,
+        )
+
         bot = strategy_cls(
-                    upstox, trend, selected_contracts, order_manager=None,
+                    upstox, trend, selected_contracts, order_manager=order_manager,
                     option_exipry_date=sp.get("trade_expiry"),
                     params=param_data,
                     index_minutes_processed=minutes_processed,

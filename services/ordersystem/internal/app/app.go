@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/AppsByZubin/botsquadron/services/ordersystem/internal/business"
 	"github.com/AppsByZubin/botsquadron/services/ordersystem/internal/config"
 	"github.com/AppsByZubin/botsquadron/services/ordersystem/internal/httpapi"
 	"github.com/AppsByZubin/botsquadron/services/ordersystem/internal/service"
@@ -59,7 +60,8 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 	}
 
 	svc := service.New(cfg, st, upClient)
-	handler := httpapi.New(svc, cfg.RequestTimeout)
+	biz := business.New(svc)
+	handler := httpapi.New(biz, cfg.RequestTimeout)
 
 	httpServer := &http.Server{
 		Addr:              cfg.HTTPAddr,
