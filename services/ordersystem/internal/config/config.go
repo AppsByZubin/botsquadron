@@ -26,6 +26,7 @@ type Config struct {
 	UpstoxOrderTradesPath  string
 	UpstoxBrokeragePath    string
 	UpstoxAPIVersion       string
+	UpstoxOrderRequestGap  time.Duration
 	UpstoxStatusRequestGap time.Duration
 	UpstoxStatusCacheTTL   time.Duration
 }
@@ -48,6 +49,7 @@ func Load() (Config, error) {
 		UpstoxOrderTradesPath:  normalizePath(getEnv("UPSTOX_ORDER_TRADES_PATH", "/v2/order/trades")),
 		UpstoxBrokeragePath:    normalizePath(getEnv("UPSTOX_BROKERAGE_PATH", "/v2/charges/brokerage")),
 		UpstoxAPIVersion:       strings.TrimSpace(getEnv("UPSTOX_API_VERSION", "2.0")),
+		UpstoxOrderRequestGap:  parseDurationEnv("ORDERSYSTEM_UPSTOX_ORDER_REQUEST_GAP", 750*time.Millisecond),
 		UpstoxStatusRequestGap: parseDurationEnv("ORDERSYSTEM_UPSTOX_STATUS_REQUEST_GAP", 750*time.Millisecond),
 		UpstoxStatusCacheTTL:   parseDurationEnv("ORDERSYSTEM_UPSTOX_STATUS_CACHE_TTL", 5*time.Second),
 	}
@@ -74,6 +76,10 @@ func Load() (Config, error) {
 
 	if cfg.UpstoxStatusRequestGap < 0 {
 		return Config{}, fmt.Errorf("ORDERSYSTEM_UPSTOX_STATUS_REQUEST_GAP must be >= 0")
+	}
+
+	if cfg.UpstoxOrderRequestGap < 0 {
+		return Config{}, fmt.Errorf("ORDERSYSTEM_UPSTOX_ORDER_REQUEST_GAP must be >= 0")
 	}
 
 	if cfg.UpstoxStatusCacheTTL < 0 {

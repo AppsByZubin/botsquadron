@@ -133,6 +133,7 @@ Upstox:
 - `UPSTOX_ORDER_TRADES_PATH` default `/v2/order/trades`
 - `UPSTOX_BROKERAGE_PATH` default `/v2/charges/brokerage`
 - `UPSTOX_API_VERSION` default `2.0`
+- `ORDERSYSTEM_UPSTOX_ORDER_REQUEST_GAP` default `750ms`
 - `ORDERSYSTEM_UPSTOX_STATUS_REQUEST_GAP` default `750ms`
 - `ORDERSYSTEM_UPSTOX_STATUS_CACHE_TTL` default `5s`
 

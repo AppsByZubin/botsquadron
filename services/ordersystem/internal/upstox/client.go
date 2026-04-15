@@ -28,6 +28,7 @@ type Client struct {
 	brokeragePath    string
 	apiVersion       string
 
+	orderLimiter   *requestGate
 	statusLimiter  *requestGate
 	statusCacheTTL time.Duration
 	brokerCacheMu  sync.Mutex
@@ -153,6 +154,7 @@ func NewClient(cfg config.Config) *Client {
 		orderTradesPath:  cfg.UpstoxOrderTradesPath,
 		brokeragePath:    cfg.UpstoxBrokeragePath,
 		apiVersion:       cfg.UpstoxAPIVersion,
+		orderLimiter:     newRequestGate(cfg.UpstoxOrderRequestGap),
 		statusLimiter:    newRequestGate(cfg.UpstoxStatusRequestGap),
 		statusCacheTTL:   cfg.UpstoxStatusCacheTTL,
 		brokerCache:      make(map[string]brokerCacheEntry),
@@ -182,6 +184,12 @@ func (c *Client) PlaceOrder(ctx context.Context, req PlaceOrderRequest) (PlaceOr
 
 	c.setHeaders(httpReq)
 	httpReq.Header.Set("Content-Type", "application/json")
+
+	if c.orderLimiter != nil {
+		if err := c.orderLimiter.Wait(ctx); err != nil {
+			return PlaceOrderResult{}, fmt.Errorf("wait for upstox place order rate limiter: %w", err)
+		}
+	}
 
 	httpResp, err := c.httpClient.Do(httpReq)
 	if err != nil {
@@ -237,6 +245,12 @@ func (c *Client) ModifyOrder(ctx context.Context, req ModifyOrderRequest) (Modif
 
 	c.setHeaders(httpReq)
 	httpReq.Header.Set("Content-Type", "application/json")
+
+	if c.orderLimiter != nil {
+		if err := c.orderLimiter.Wait(ctx); err != nil {
+			return ModifyOrderResult{}, fmt.Errorf("wait for upstox modify order rate limiter: %w", err)
+		}
+	}
 
 	httpResp, err := c.httpClient.Do(httpReq)
 	if err != nil {
