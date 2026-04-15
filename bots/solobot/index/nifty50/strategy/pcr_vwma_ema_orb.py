@@ -1156,7 +1156,7 @@ class PCRVwmaEmaOrbStrategy:
             if daily == constants.SIDEWAYS:
                 return small
             if daily == constants.BEARISH:
-                return 0
+                return small
 
         if side == constants.PUT:
             if daily == constants.BEARISH and is_bearish_thrust:
@@ -1166,7 +1166,7 @@ class PCRVwmaEmaOrbStrategy:
             if daily == constants.SIDEWAYS:
                 return small
             if daily == constants.BULLISH:
-                return 0
+                return small
 
         return small
 
