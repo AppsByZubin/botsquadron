@@ -1,21 +1,23 @@
-FROM golang:1.21-alpine AS builder
+FROM golang:1.23-alpine AS builder
 
 WORKDIR /app
 
 COPY go.mod go.sum ./
-
 RUN go mod download
 
 COPY . .
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o marketfeeder ./cmd
 
-RUN go build -o marketfeeder .
+FROM alpine:3.20
 
-FROM alpine:latest
+RUN apk --no-cache add ca-certificates tzdata \
+    && addgroup -S app \
+    && adduser -S -G app app
 
-RUN apk --no-cache add ca-certificates
+WORKDIR /app
 
-WORKDIR /root/
+COPY --from=builder /app/marketfeeder /app/marketfeeder
 
-COPY --from=builder /app/marketfeeder .
+USER app
 
-CMD ["./marketfeeder"]
+ENTRYPOINT ["/app/marketfeeder"]
