@@ -119,8 +119,8 @@ Optional:
 - `APP_MODE` default `mock` (`production` enables Upstox calls)
 - `APP_TIMEZONE` default `Asia/Kolkata`
 - `ORDERSYSTEM_REQUEST_TIMEOUT` default `15s`
-- `ORDERSYSTEM_SL_POLL_INTERVAL` default `5s`
-- `ORDERSYSTEM_SL_REFRESH_MIN_INTERVAL` default `3s`
+- `ORDERSYSTEM_SL_POLL_INTERVAL` default `10s`
+- `ORDERSYSTEM_SL_REFRESH_MIN_INTERVAL` default `10s`
 - `ACCOUNT_INITIAL_CASH` default `0`
 
 Upstox:
@@ -133,8 +133,8 @@ Upstox:
 - `UPSTOX_ORDER_TRADES_PATH` default `/v2/order/trades`
 - `UPSTOX_BROKERAGE_PATH` default `/v2/charges/brokerage`
 - `UPSTOX_API_VERSION` default `2.0`
-- `ORDERSYSTEM_UPSTOX_STATUS_REQUEST_GAP` default `500ms`
-- `ORDERSYSTEM_UPSTOX_STATUS_CACHE_TTL` default `2s`
+- `ORDERSYSTEM_UPSTOX_STATUS_REQUEST_GAP` default `750ms`
+- `ORDERSYSTEM_UPSTOX_STATUS_CACHE_TTL` default `5s`
 
 ## Run
 

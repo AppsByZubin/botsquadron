@@ -37,8 +37,8 @@ func Load() (Config, error) {
 		AppMode:                strings.TrimSpace(getEnv("APP_MODE", "mock")),
 		AppTimezone:            strings.TrimSpace(getEnv("APP_TIMEZONE", "Asia/Kolkata")),
 		RequestTimeout:         parseDurationEnv("ORDERSYSTEM_REQUEST_TIMEOUT", 15*time.Second),
-		SLPollInterval:         parseDurationEnv("ORDERSYSTEM_SL_POLL_INTERVAL", 5*time.Second),
-		SLRefreshMinInterval:   parseDurationEnv("ORDERSYSTEM_SL_REFRESH_MIN_INTERVAL", 3*time.Second),
+		SLPollInterval:         parseDurationEnv("ORDERSYSTEM_SL_POLL_INTERVAL", 10*time.Second),
+		SLRefreshMinInterval:   parseDurationEnv("ORDERSYSTEM_SL_REFRESH_MIN_INTERVAL", 10*time.Second),
 		AccountInitialCash:     parseFloatEnv("ACCOUNT_INITIAL_CASH", 0),
 		UpstoxBaseURL:          strings.TrimRight(getEnv("UPSTOX_API_BASE_URL", "https://api.upstox.com"), "/"),
 		UpstoxAccessToken:      strings.TrimSpace(os.Getenv("UPSTOX_API_ACCESS_TOKEN")),
@@ -48,8 +48,8 @@ func Load() (Config, error) {
 		UpstoxOrderTradesPath:  normalizePath(getEnv("UPSTOX_ORDER_TRADES_PATH", "/v2/order/trades")),
 		UpstoxBrokeragePath:    normalizePath(getEnv("UPSTOX_BROKERAGE_PATH", "/v2/charges/brokerage")),
 		UpstoxAPIVersion:       strings.TrimSpace(getEnv("UPSTOX_API_VERSION", "2.0")),
-		UpstoxStatusRequestGap: parseDurationEnv("ORDERSYSTEM_UPSTOX_STATUS_REQUEST_GAP", 500*time.Millisecond),
-		UpstoxStatusCacheTTL:   parseDurationEnv("ORDERSYSTEM_UPSTOX_STATUS_CACHE_TTL", 2*time.Second),
+		UpstoxStatusRequestGap: parseDurationEnv("ORDERSYSTEM_UPSTOX_STATUS_REQUEST_GAP", 750*time.Millisecond),
+		UpstoxStatusCacheTTL:   parseDurationEnv("ORDERSYSTEM_UPSTOX_STATUS_CACHE_TTL", 5*time.Second),
 	}
 
 	if cfg.DatabaseURL == "" {
