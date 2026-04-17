@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       image_tag:
-        description: "Image tag suffix, for example v1.0.0 or 2026-04-15"
+        description: "Optional tag suffix, e.g. v1.0.0"
         required: false
         type: string
 
@@ -93,9 +93,6 @@ jobs:
           cache-from: type=gha,scope=${{ matrix.service }}
           cache-to: type=gha,mode=max,scope=${{ matrix.service }}
 
-      - name: Summary
-        run: echo "Pushed ${{ steps.tag.outputs.image }}" >> "${GITHUB_STEP_SUMMARY}"
-
   update-infra:
     name: Update infrastructure values.yaml
     runs-on: ubuntu-latest
@@ -144,6 +141,7 @@ jobs:
           IMAGE_TAG: ${{ steps.tag.outputs.value }}
         run: |
           python3 <<'PY'
+          import os
           from pathlib import Path
           from ruamel.yaml import YAML
 
@@ -155,7 +153,7 @@ jobs:
               data = yaml.load(f)
 
           repo = "docker.io/bizzkpm/botsquadimage"
-          tag = "${IMAGE_TAG}"
+          tag = os.environ["IMAGE_TAG"]
 
           data["ordersystem"]["image"]["repository"] = repo
           data["ordersystem"]["image"]["tag"] = f"ordersystem-{tag}"
@@ -169,6 +167,11 @@ jobs:
           with path.open("w") as f:
               yaml.dump(data, f)
           PY
+
+      - name: Show updated values
+        run: |
+          echo "Updated infrastructure values:"
+          cat infrastructure/helm/botsquadron/values.yaml
 
       - name: Commit and push infrastructure change
         run: |
