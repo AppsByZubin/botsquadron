@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       image_tag:
-        description: "Optional tag suffix, e.g. v1.0.0"
+        description: "Optional image tag override"
         required: false
         type: string
 
@@ -20,9 +20,8 @@ env:
 
 jobs:
   docker:
-    name: Push ${{ matrix.service }}
+    name: Build and push ${{ matrix.service }}
     runs-on: ubuntu-latest
-
     strategy:
       fail-fast: false
       matrix:
@@ -38,7 +37,7 @@ jobs:
             dockerfile: bots/solobot/Dockerfile
 
     steps:
-      - name: Checkout
+      - name: Checkout botsquadron
         uses: actions/checkout@v4
 
       - name: Resolve image tag
@@ -47,27 +46,26 @@ jobs:
         run: |
           set -euo pipefail
 
-          raw_tag="${{ github.event.inputs.image_tag || '' }}"
+          RAW_TAG="${{ github.event.inputs.image_tag || '' }}"
 
-          if [[ -z "${raw_tag}" && "${GITHUB_REF_TYPE}" == "tag" ]]; then
-            raw_tag="${GITHUB_REF_NAME}"
+          if [[ -z "${RAW_TAG}" && "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            RAW_TAG="${GITHUB_REF_NAME}"
           fi
 
-          if [[ -z "${raw_tag}" ]]; then
-            raw_tag="${GITHUB_SHA::7}"
+          if [[ -z "${RAW_TAG}" ]]; then
+            RAW_TAG="${GITHUB_SHA::7}"
           fi
 
-          safe_tag="$(printf '%s' "${raw_tag}" \
+          SAFE_TAG="$(printf '%s' "${RAW_TAG}" \
             | tr '[:upper:]' '[:lower:]' \
             | sed -E 's/[^a-z0-9._-]+/-/g; s/^-+//; s/-+$//' \
             | cut -c1-80)"
 
-          if [[ -z "${safe_tag}" ]]; then
-            safe_tag="${GITHUB_SHA::7}"
+          if [[ -z "${SAFE_TAG}" ]]; then
+            SAFE_TAG="${GITHUB_SHA::7}"
           fi
 
-          echo "value=${safe_tag}" >> "${GITHUB_OUTPUT}"
-          echo "image=${DOCKERHUB_REPOSITORY}:${{ matrix.service }}-${safe_tag}" >> "${GITHUB_OUTPUT}"
+          echo "value=${SAFE_TAG}" >> "${GITHUB_OUTPUT}"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -78,14 +76,14 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build and push
+      - name: Build and push image
         uses: docker/build-push-action@v6
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.dockerfile }}
           platforms: ${{ env.PLATFORMS }}
           push: true
-          tags: ${{ steps.tag.outputs.image }}
+          tags: ${{ env.DOCKERHUB_REPOSITORY }}:${{ matrix.service }}-${{ steps.tag.outputs.value }}
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
@@ -94,7 +92,7 @@ jobs:
           cache-to: type=gha,mode=max,scope=${{ matrix.service }}
 
   update-infra:
-    name: Update infrastructure values.yaml
+    name: Update infrastructure values
     runs-on: ubuntu-latest
     needs: docker
 
@@ -105,26 +103,26 @@ jobs:
         run: |
           set -euo pipefail
 
-          raw_tag="${{ github.event.inputs.image_tag || '' }}"
+          RAW_TAG="${{ github.event.inputs.image_tag || '' }}"
 
-          if [[ -z "${raw_tag}" && "${GITHUB_REF_TYPE}" == "tag" ]]; then
-            raw_tag="${GITHUB_REF_NAME}"
+          if [[ -z "${RAW_TAG}" && "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            RAW_TAG="${GITHUB_REF_NAME}"
           fi
 
-          if [[ -z "${raw_tag}" ]]; then
-            raw_tag="${GITHUB_SHA::7}"
+          if [[ -z "${RAW_TAG}" ]]; then
+            RAW_TAG="${GITHUB_SHA::7}"
           fi
 
-          safe_tag="$(printf '%s' "${raw_tag}" \
+          SAFE_TAG="$(printf '%s' "${RAW_TAG}" \
             | tr '[:upper:]' '[:lower:]' \
             | sed -E 's/[^a-z0-9._-]+/-/g; s/^-+//; s/-+$//' \
             | cut -c1-80)"
 
-          if [[ -z "${safe_tag}" ]]; then
-            safe_tag="${GITHUB_SHA::7}"
+          if [[ -z "${SAFE_TAG}" ]]; then
+            SAFE_TAG="${GITHUB_SHA::7}"
           fi
 
-          echo "value=${safe_tag}" >> "${GITHUB_OUTPUT}"
+          echo "value=${SAFE_TAG}" >> "${GITHUB_OUTPUT}"
 
       - name: Checkout infrastructure repo
         uses: actions/checkout@v4
@@ -136,7 +134,7 @@ jobs:
       - name: Install ruamel.yaml
         run: python3 -m pip install ruamel.yaml
 
-      - name: Update Helm values
+      - name: Update Helm values.yaml
         env:
           IMAGE_TAG: ${{ steps.tag.outputs.value }}
         run: |
@@ -168,16 +166,19 @@ jobs:
               yaml.dump(data, f)
           PY
 
-      - name: Show updated values
+      - name: Verify no placeholder remains
         run: |
-          echo "Updated infrastructure values:"
+          if grep -R '\${IMAGE_TAG}' infrastructure/helm/botsquadron/values.yaml; then
+            echo "Placeholder IMAGE_TAG still present"
+            exit 1
+          fi
           cat infrastructure/helm/botsquadron/values.yaml
 
-      - name: Commit and push infrastructure change
+      - name: Commit and push infra repo
         run: |
           cd infrastructure
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add helm/botsquadron/values.yaml
           git commit -m "Deploy botsquadron ${GITHUB_SHA::7}" || echo "No changes to commit"
-          git push
+          git push origin HEAD
