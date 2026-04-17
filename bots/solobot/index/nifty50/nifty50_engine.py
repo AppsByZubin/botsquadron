@@ -27,11 +27,66 @@ from index.nifty50.nifty50_utils import (
 ist = ZoneInfo("Asia/Kolkata")
 logger = create_logger("Nifty50EngineLogger")
 
+
+def _env_int(name, default):
+    raw = os.getenv(name, "")
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        logger.warning(f"Invalid {name}={raw!r}; using {default}")
+        return default
+
+
+def _env_float(name, default):
+    raw = os.getenv(name, "")
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning(f"Invalid {name}={raw!r}; using {default}")
+        return default
+    return value if value > 0 else default
+
+
+async def _connect_nats_with_retry():
+    max_attempts = _env_int("NATS_CONNECT_RETRY_MAX", 0)
+    retry_wait = _env_float("NATS_CONNECT_RETRY_WAIT_SEC", 2.0)
+    connect_timeout = _env_float("NATS_CONNECT_TIMEOUT_SEC", 5.0)
+
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            return await nats.connect(
+                constants.NATS_URL,
+                name="solobot",
+                connect_timeout=connect_timeout,
+                reconnect_time_wait=retry_wait,
+                max_reconnect_attempts=-1,
+            )
+        except Exception as exc:
+            if max_attempts > 0 and attempt >= max_attempts:
+                raise
+            if max_attempts > 0:
+                logger.warning(
+                    f"NATS connect to {constants.NATS_URL} failed on attempt "
+                    f"{attempt}/{max_attempts}: {exc}; retrying in {retry_wait}s"
+                )
+            else:
+                logger.warning(
+                    f"NATS connect to {constants.NATS_URL} failed on attempt "
+                    f"{attempt}: {exc}; retrying in {retry_wait}s"
+                )
+            await asyncio.sleep(retry_wait)
+
 async def nifty50_engine(strategy, mode, param_data):
     logger.info(f"Starting Nifty50 Engine with strategy: {strategy}, mode: {mode}")
     
     # Connect to NATS
-    nc = await nats.connect(constants.NATS_URL)
+    nc = await _connect_nats_with_retry()
     logger.info("Connected to NATS")
 
     try:

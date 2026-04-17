@@ -39,6 +39,9 @@ Set the following environment variables:
 
 ```bash
 export NATS_URL="nats://localhost:4222"
+export NATS_CONNECT_RETRY_MAX="0"      # 0 keeps retrying until NATS is reachable
+export NATS_CONNECT_RETRY_WAIT_SEC="2"
+export NATS_CONNECT_TIMEOUT_SEC="5"
 export UPSTOX_API_ACCESS_TOKEN="your_upstox_token"
 ```
 
@@ -70,7 +73,7 @@ export UPSTOX_API_ACCESS_TOKEN="your_upstox_token"
 
 ```bash
 # Using Docker
-docker run -p 4222:4222 -p 8222:8222 nats:latest
+docker run -p 4222:4222 -p 8222:8222 nats:2.10-alpine
 
 # Or install and run locally
 nats-server -DV
@@ -178,22 +181,15 @@ make test-nats
 
 ## Kubernetes Deployment
 
-The platform can be deployed to Kubernetes:
+The GitOps Helm chart for the full platform lives in the infrastructure repo:
 
-1. **Deploy NATS:**
-   ```bash
-   kubectl apply -f k8s/nats-deployment.yaml
-   ```
+```bash
+helm upgrade --install botsquadron ../infrastructure/helm/botsquadron \
+  --namespace botspace \
+  --create-namespace
+```
 
-2. **Create Upstox secret:**
-   ```bash
-   kubectl create secret generic upstox-secrets --from-literal=api-token=your_token
-   ```
-
-3. **Deploy marketfeeder:**
-   ```bash
-   kubectl apply -f k8s/marketfeeder-deployment.yaml
-   ```
+Set production credentials through the chart's `secretEnv` values, including `DATABASE_URL`, `UPSTOX_API_ACCESS_TOKEN`, and `upstox_api_access_token`. The chart deploys NATS, ordersystem, marketfeeder, and the solobot Job together.
 
 ## Development
 

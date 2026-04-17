@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -435,6 +436,71 @@ func getenvDefault(key, fallback string) string {
 	return v
 }
 
+func getenvInt(key string, fallback int) int {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(v)
+	if err != nil {
+		log.Printf("Invalid %s=%q, using %d", key, v, fallback)
+		return fallback
+	}
+	return parsed
+}
+
+func getenvSeconds(key string, fallback time.Duration) time.Duration {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return fallback
+	}
+	seconds, err := strconv.ParseFloat(v, 64)
+	if err != nil || seconds <= 0 {
+		log.Printf("Invalid %s=%q, using %s", key, v, fallback)
+		return fallback
+	}
+	return time.Duration(seconds * float64(time.Second))
+}
+
+func connectNATSWithRetry(natsURL string) (*nats.Conn, error) {
+	maxAttempts := getenvInt("NATS_CONNECT_RETRY_MAX", 0)
+	retryWait := getenvSeconds("NATS_CONNECT_RETRY_WAIT_SEC", 2*time.Second)
+	connectTimeout := getenvSeconds("NATS_CONNECT_TIMEOUT_SEC", 5*time.Second)
+
+	for attempt := 1; ; attempt++ {
+		nc, err := nats.Connect(
+			natsURL,
+			nats.Name("marketfeeder"),
+			nats.Timeout(connectTimeout),
+			nats.MaxReconnects(-1),
+			nats.ReconnectWait(retryWait),
+			nats.DisconnectErrHandler(func(conn *nats.Conn, err error) {
+				log.Printf("NATS disconnected: %v", err)
+			}),
+			nats.ReconnectHandler(func(conn *nats.Conn) {
+				log.Printf("NATS reconnected to %s", conn.ConnectedUrl())
+			}),
+			nats.ClosedHandler(func(conn *nats.Conn) {
+				log.Printf("NATS connection closed: %v", conn.LastError())
+			}),
+		)
+		if err == nil {
+			return nc, nil
+		}
+
+		if maxAttempts > 0 && attempt >= maxAttempts {
+			return nil, fmt.Errorf("connect to NATS at %s after %d attempts: %w", natsURL, attempt, err)
+		}
+
+		if maxAttempts > 0 {
+			log.Printf("NATS connect to %s failed on attempt %d/%d: %v; retrying in %s", natsURL, attempt, maxAttempts, err, retryWait)
+		} else {
+			log.Printf("NATS connect to %s failed on attempt %d: %v; retrying in %s", natsURL, attempt, err, retryWait)
+		}
+		time.Sleep(retryWait)
+	}
+}
+
 type authorizeResponse struct {
 	Status string `json:"status"`
 	Data   struct {
@@ -458,7 +524,7 @@ func Run() {
 		natsURL = nats.DefaultURL
 	}
 
-	nc, err := nats.Connect(natsURL)
+	nc, err := connectNATSWithRetry(natsURL)
 	if err != nil {
 		log.Fatal(err)
 	}
