@@ -129,6 +129,7 @@ jobs:
         with:
           repository: AppsByZubin/botyard
           token: ${{ secrets.BOTYARD_REPO_TOKEN }}
+          ref: master
           path: botyard
 
       - name: Install ruamel.yaml

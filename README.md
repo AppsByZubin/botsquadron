@@ -181,7 +181,9 @@ make test-nats
 
 ## Kubernetes Deployment
 
-The GitOps Helm chart for the full platform lives in the botyard repo:
+The GitOps Helm chart for the full platform lives in the botyard repo. For prod, deploy it through Argo CD from `botyard/argocd/botsquadron-prod.yaml`; the publish workflow updates `botyard/helm/botsquadron/values.yaml` with new image tags, and Argo CD syncs those changes into the `botspace` namespace on the prod VM.
+
+For a one-off manual Helm deploy:
 
 ```bash
 helm upgrade --install botsquadron ../botyard/helm/botsquadron \
