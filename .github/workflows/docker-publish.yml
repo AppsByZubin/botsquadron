@@ -1,4 +1,4 @@
-name: Build Push And Update Infra
+name: Build Push And Update Botyard
 
 on:
   push:
@@ -91,8 +91,8 @@ jobs:
           cache-from: type=gha,scope=${{ matrix.service }}
           cache-to: type=gha,mode=max,scope=${{ matrix.service }}
 
-  update-infra:
-    name: Update infrastructure values
+  update-botyard:
+    name: Update botyard values
     runs-on: ubuntu-latest
     needs: docker
 
@@ -124,12 +124,12 @@ jobs:
 
           echo "value=${SAFE_TAG}" >> "${GITHUB_OUTPUT}"
 
-      - name: Checkout infrastructure repo
+      - name: Checkout botyard repo
         uses: actions/checkout@v4
         with:
-          repository: AppsByZubin/infrastructure
-          token: ${{ secrets.INFRA_REPO_TOKEN }}
-          path: infrastructure
+          repository: AppsByZubin/botyard
+          token: ${{ secrets.BOTYARD_REPO_TOKEN }}
+          path: botyard
 
       - name: Install ruamel.yaml
         run: python3 -m pip install ruamel.yaml
@@ -143,7 +143,7 @@ jobs:
           from pathlib import Path
           from ruamel.yaml import YAML
 
-          path = Path("infrastructure/helm/botsquadron/values.yaml")
+          path = Path("botyard/helm/botsquadron/values.yaml")
           yaml = YAML()
           yaml.preserve_quotes = True
 
@@ -168,15 +168,15 @@ jobs:
 
       - name: Verify no placeholder remains
         run: |
-          if grep -R '\${IMAGE_TAG}' infrastructure/helm/botsquadron/values.yaml; then
+          if grep -R '\${IMAGE_TAG}' botyard/helm/botsquadron/values.yaml; then
             echo "Placeholder IMAGE_TAG still present"
             exit 1
           fi
-          cat infrastructure/helm/botsquadron/values.yaml
+          cat botyard/helm/botsquadron/values.yaml
 
-      - name: Commit and push infra repo
+      - name: Commit and push botyard repo
         run: |
-          cd infrastructure
+          cd botyard
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add helm/botsquadron/values.yaml

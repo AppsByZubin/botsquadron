@@ -181,10 +181,10 @@ make test-nats
 
 ## Kubernetes Deployment
 
-The GitOps Helm chart for the full platform lives in the infrastructure repo:
+The GitOps Helm chart for the full platform lives in the botyard repo:
 
 ```bash
-helm upgrade --install botsquadron ../infrastructure/helm/botsquadron \
+helm upgrade --install botsquadron ../botyard/helm/botsquadron \
   --namespace botspace \
   --create-namespace
 ```
