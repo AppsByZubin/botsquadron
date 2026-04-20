@@ -69,12 +69,27 @@ UPSTOX_API_ACCESS_TOKEN = "upstox_api_access_token"
 UPSTOX_SANDBOX_API_ACCESS_TOKEN = "upstox_sandbox_api_access_token"
 UPSTOX_NSE_INSTRUMENT_FQDN = "https://assets.upstox.com/market-quote/instruments/exchange/NSE.json.gz"
 
-PARAM_PATH = os.path.join(SOLOBOT_FILES_DIR, "param.yaml")
-
 #Execution mode
 SANDBOX = "sandbox"
 MOCK="mock"
 PRODUCTION="production"
+EXECUTION_MODES = (MOCK, SANDBOX, PRODUCTION)
+
+
+def normalize_execution_mode(mode):
+    normalized = str(mode or "").strip().lower()
+    if normalized == "prod":
+        return PRODUCTION
+    return normalized
+
+
+def resolve_execution_mode(fallback_mode=None):
+    mode = os.getenv("SOLOBOT_MODE") or fallback_mode or os.getenv("APP_MODE") or MOCK
+    normalized = normalize_execution_mode(mode)
+    if normalized not in EXECUTION_MODES:
+        allowed = ", ".join(EXECUTION_MODES)
+        raise ValueError(f"execution mode must be one of: {allowed}")
+    return normalized
 
 #Params
 SMA_LONG = 20
@@ -107,4 +122,3 @@ EOD_SQUARE_OFF="EOD_SQUARE_OFF"
 BULLISH="bullish"
 SIDEWAYS="sideways"
 BEARISH="bearish"
-

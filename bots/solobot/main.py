@@ -29,13 +29,22 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Take parameters from the command line.")
     parser.add_argument("-i", "--instruments", help="Instrument Name")
     parser.add_argument("-s", "--strategy", help="Strategy Name")
-    parser.add_argument("-l","--level", help="Execution Mode", choices=[constants.MOCK, constants.SANDBOX, constants.PRODUCTION])
+    parser.add_argument(
+        "-l",
+        "--level",
+        help="Execution Mode fallback when SOLOBOT_MODE is not set",
+        choices=constants.EXECUTION_MODES,
+    )
 
     args = parser.parse_args()
     instruments = args.instruments
     strategy = args.strategy
+    try:
+        mode = constants.resolve_execution_mode(args.level)
+    except ValueError as exc:
+        parser.error(str(exc))
 
     logger.info(f"Received instruments: {instruments}")
-    logger.info(f"Mode: {args.level}")
+    logger.info(f"Mode: {mode}")
 
-    orchestrator(instruments, strategy, mode=args.level)
+    orchestrator(instruments, strategy, mode=mode)

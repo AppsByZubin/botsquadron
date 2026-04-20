@@ -248,7 +248,7 @@ class PCRVwmaEmaOrbStrategy:
                 if mode:
                     return str(mode)
 
-        return os.getenv("APP_MODE") or os.getenv("SOLOBOT_MODE")
+        return os.getenv("SOLOBOT_MODE") or os.getenv("APP_MODE")
 
     # ------------------------------------------------------------------
     # ORB helpers

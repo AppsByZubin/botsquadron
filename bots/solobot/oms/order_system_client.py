@@ -108,7 +108,7 @@ class OrderSystemClient:
             else (_first_env("ORDERSYSTEM_TIMEOUT_SEC", "ORDER_SYSTEM_TIMEOUT_SEC", "OMS_TIMEOUT_SEC") or 15)
         )
         self.bot_name = str(bot_name or os.getenv("SOLOBOT_BOT_NAME") or "solobot").strip()
-        self.mode = str(mode or os.getenv("APP_MODE") or constants.MOCK).strip() or constants.MOCK
+        self.mode = constants.resolve_execution_mode(mode)
         self.initial_cash = _to_float(init_cash, _to_float(os.getenv("ACCOUNT_INITIAL_CASH"), 0.0))
         self.curr_date = curr_date or os.getenv("SOLOBOT_CURR_DATE") or _now_ist().strftime("%d-%m-%Y")
         self.month_year = month_year or os.getenv("SOLOBOT_MONTH_YEAR") or _now_ist().strftime("%m%Y")

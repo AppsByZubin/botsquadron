@@ -34,6 +34,11 @@ def orchestrator(instruments, strategy, mode=None):
     Notes:
     - Orchestrator to manage the trading workflow.
     """
+    try:
+        mode = constants.resolve_execution_mode(mode)
+    except ValueError as exc:
+        logger.error(str(exc))
+        sys.exit(constants.FAIL_CODE)
 
     logger.info(f"Starting orchestrator for instruments: {instruments} with strategy: {strategy}, mode: {mode}")
 
@@ -49,7 +54,7 @@ def orchestrator(instruments, strategy, mode=None):
     
     param_data = load_param_data(mode)
     if param_data is None:
-        logger.error("Param data not found in kubernetes config or local param.yaml fallback.")
+        logger.error("Param data not found in Helm-provided environment config.")
         sys.exit(constants.FAIL_CODE)
 
     if instruments.lower() == constants.NIFTY50:
