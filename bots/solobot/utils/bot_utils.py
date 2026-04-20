@@ -2,8 +2,10 @@
 # -*- coding: utf-8 -*-
 
 from pathlib import Path
+from datetime import datetime
 import os
 from typing import Any, Dict, Optional
+from zoneinfo import ZoneInfo
 
 import yaml
 
@@ -11,6 +13,7 @@ from common import constants
 from logger import create_logger
 
 logger = create_logger("botutilsLogger")
+IST = ZoneInfo("Asia/Kolkata")
 
 K8S_PARAM_ENV_KEYS = (
     "SOLOBOT_PARAM_YAML",
@@ -27,6 +30,50 @@ K8S_PARAM_FILE_ENV_KEYS = (
     "PARAM_FILE",
     "PARAM_PATH",
 )
+
+
+def stable_bot_id(bot_name: Optional[str], mode: Optional[str], date_value: Optional[str] = None) -> str:
+    parts = [
+        bot_name or "solobot",
+        _bot_id_mode(mode),
+        _bot_id_date(date_value),
+    ]
+    return _normalize_bot_id("_".join(str(part or "").strip() for part in parts if str(part or "").strip()))
+
+
+def _bot_id_mode(mode: Optional[str]) -> str:
+    normalized = str(mode or "").strip().lower()
+    if normalized in {"production", "prod"}:
+        return "prod"
+    if normalized in {"sandbox", "mock"}:
+        return normalized
+    return normalized or "mock"
+
+
+def _bot_id_date(value: Optional[str]) -> str:
+    raw = str(value or "").strip()
+    for layout in ("%d-%m-%Y", "%Y-%m-%d", "%d/%m/%Y", "%d%m%Y", "%Y%m%d"):
+        try:
+            return datetime.strptime(raw, layout).strftime("%d%m%Y")
+        except ValueError:
+            pass
+
+    digits_only = "".join(ch for ch in raw if ch.isdigit())
+    if len(digits_only) == 8:
+        if digits_only.startswith(("19", "20")):
+            try:
+                return datetime.strptime(digits_only, "%Y%m%d").strftime("%d%m%Y")
+            except ValueError:
+                pass
+        return digits_only
+
+    return datetime.now(IST).strftime("%d%m%Y")
+
+
+def _normalize_bot_id(value: str) -> str:
+    normalized = "".join(ch.lower() if ch.isalnum() else "_" for ch in str(value or "").strip())
+    normalized = "_".join(part for part in normalized.split("_") if part)
+    return normalized or "solobot"
 
 
 def _deep_merge_dict(defaults: Dict[str, Any], overrides: Dict[str, Any]) -> Dict[str, Any]:

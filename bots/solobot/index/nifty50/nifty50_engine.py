@@ -13,6 +13,7 @@ from common import constants
 from broker.upstox_helper import UpstoxHelper
 from logger import create_logger
 from oms.order_system_client import OrderSystemClient
+from utils.bot_utils import stable_bot_id
 
 from index.nifty50.nifty50_utils import (
     premarket,
@@ -49,6 +50,25 @@ def _env_float(name, default):
         logger.warning(f"Invalid {name}={raw!r}; using {default}")
         return default
     return value if value > 0 else default
+
+
+async def _publish_marketfeeder_unsubscribe(nc, bot_id, instrument_keys=None):
+    bot_id = str(bot_id or "").strip()
+    if not bot_id:
+        logger.warning("Skipping marketfeeder unsubscribe because bot_id is empty")
+        return
+
+    payload = {
+        "bot_id": bot_id,
+        "instrument_keys": list(instrument_keys or []),
+        "action": "unsubscribe",
+    }
+    await nc.publish(constants.NATS_SUBJECT_INSTRUMENT_KEYS, json.dumps(payload).encode())
+    try:
+        await nc.flush(timeout=2)
+    except TypeError:
+        await nc.flush()
+    logger.info(f"Published marketfeeder unsubscribe for bot_id={bot_id}")
 
 
 async def _connect_nats_with_retry():
@@ -162,6 +182,18 @@ async def nifty50_engine(strategy, mode, param_data):
 
         if current_time > market_end_time:
             logger.info("Market already closed for the day. Exiting.")
+            cleanup_order_manager = OrderSystemClient.from_params(
+                strategy_name=strategy,
+                mode=mode,
+                params=param_data,
+                instrument=constants.NIFTY50,
+            )
+            bot_id = stable_bot_id(
+                cleanup_order_manager.bot_name,
+                cleanup_order_manager.mode or mode,
+                cleanup_order_manager.curr_date,
+            )
+            await _publish_marketfeeder_unsubscribe(nc, bot_id)
             sys.exit(constants.SUCCESS_CODE)
         
         elif current_time < market_start_time:
@@ -301,8 +333,12 @@ async def nifty50_engine(strategy, mode, param_data):
             for contract in contracts:
                 instrument_keys.append(contract['instrument_key'])
 
-        # Send instrument keys to marketfeeder via NATS
-        bot_id = f"nifty50_{strategy}_{mode}_{int(t.time())}"
+        # Keep bot_id stable for the bot/mode/trading day so pod restarts update the same handler.
+        bot_id = stable_bot_id(
+            account_info.get("bot_name") or order_manager.bot_name,
+            order_manager.mode or mode,
+            account_info.get("curr_date") or order_manager.curr_date,
+        )
         instrument_data = {
             'bot_id': bot_id,
             'instrument_keys': instrument_keys,
@@ -392,9 +428,16 @@ async def nifty50_engine(strategy, mode, param_data):
         if tick_watchdog_enabled:
             watchdog_task = asyncio.create_task(nats_tick_watchdog(), name="nats_tick_watchdog")
 
+        marketfeeder_unsubscribed = False
+
         try:
             # Keep the connection alive and process messages
             while True:
+                if datetime.now(ist).time() >= market_end_time:
+                    await _publish_marketfeeder_unsubscribe(nc, bot_id, instrument_keys)
+                    marketfeeder_unsubscribed = True
+                    logger.info("Market closed at/after 15:30 IST. Stopping NATS subscriptions.")
+                    break
                 await asyncio.sleep(1)
         finally:
             if watchdog_task is not None:
@@ -403,6 +446,11 @@ async def nifty50_engine(strategy, mode, param_data):
                     await watchdog_task
                 except asyncio.CancelledError:
                     pass
+            if not marketfeeder_unsubscribed and datetime.now(ist).time() >= market_end_time:
+                try:
+                    await _publish_marketfeeder_unsubscribe(nc, bot_id, instrument_keys)
+                except Exception as exc:
+                    logger.warning(f"Failed marketfeeder unsubscribe during shutdown: {exc}")
             await sub.unsubscribe()
                 
     except Exception as e:
