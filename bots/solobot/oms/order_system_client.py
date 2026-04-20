@@ -816,13 +816,14 @@ def _clean_base_url(value: str) -> str:
 
 def _default_orders_csv(mode: str) -> str:
     mode_key = str(mode or constants.MOCK).strip().lower()
-    folder_name = {
-        constants.PRODUCTION: "prod",
-        constants.SANDBOX: "sandbox",
-        constants.MOCK: "mock",
-    }.get(mode_key, mode_key or "mock")
-    solobot_root = Path(__file__).resolve().parents[1]
-    return str(solobot_root / "files" / "execution_results" / folder_name / "order_log.csv")
+    order_log_by_mode = {
+        constants.PRODUCTION: constants.ORDER_PROD_LOG,
+        constants.SANDBOX: constants.ORDER_SANDBOX_LOG,
+        constants.MOCK: constants.ORDER_MOCK_LOG,
+    }
+    if mode_key in order_log_by_mode:
+        return order_log_by_mode[mode_key]
+    return str(Path(constants.SOLOBOT_EXECUTION_RESULTS_DIR) / (mode_key or constants.MOCK) / "order_log.csv")
 
 
 def _trade_order_ids(trade: Mapping[str, Any], order_type: str) -> List[str]:

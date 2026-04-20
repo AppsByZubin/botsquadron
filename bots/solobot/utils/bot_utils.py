@@ -97,7 +97,14 @@ def _load_k8s_param_data() -> Dict[str, Any]:
 
 def _candidate_param_files(mode: Optional[str]):
     solobot_root = Path(__file__).resolve().parents[1]  # .../bots/solobot
+    configured_files_dir = Path(constants.SOLOBOT_FILES_DIR).resolve(strict=False)
+    default_files_dir = (solobot_root / "files").resolve(strict=False)
     candidates = []
+
+    if configured_files_dir != default_files_dir:
+        if mode in {constants.MOCK, constants.SANDBOX, constants.PRODUCTION}:
+            candidates.append(configured_files_dir / "execution_results" / mode / "param.yaml")
+        candidates.append(configured_files_dir / "param.yaml")
 
     if mode in {constants.MOCK, constants.SANDBOX, constants.PRODUCTION}:
         candidates.append(solobot_root / "files" / "execution_results" / mode / "param.yaml")
@@ -144,4 +151,3 @@ def load_param_data(mode: Optional[str]) -> Optional[Dict[str, Any]]:
     if file_param_data:
         return file_param_data
     return None
-

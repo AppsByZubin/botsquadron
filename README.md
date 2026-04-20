@@ -191,7 +191,9 @@ helm upgrade --install botsquadron ../botyard/helm/botsquadron \
   --create-namespace
 ```
 
-Set production credentials through the chart's `secretEnv` values, including `DATABASE_URL`, `UPSTOX_API_ACCESS_TOKEN`, and `upstox_api_access_token`. The chart deploys NATS, ordersystem, marketfeeder, and the solobot Job together.
+Set production credentials through the chart's `secretEnv` values, including `DATABASE_URL`, `UPSTOX_API_ACCESS_TOKEN`, and `upstox_api_access_token`. The chart deploys NATS, ordersystem, marketfeeder, and the solobot workload together.
+
+Persistent runtime storage and stop/start operations are managed in the `botyard` Helm chart.
 
 ## Development
 

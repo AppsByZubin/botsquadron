@@ -59,8 +59,9 @@ def create_logger(name):
     logger.addHandler(console_handler)
 
     # File handler without color
-    os.makedirs("logs", exist_ok=True)
-    log_filename = f"logs/{datetime.now().strftime('%d-%m-%y_solobot.log')}"
+    log_dir = os.getenv("SOLOBOT_LOG_DIR", "logs")
+    os.makedirs(log_dir, exist_ok=True)
+    log_filename = os.path.join(log_dir, f"{datetime.now().strftime('%d-%m-%y_solobot.log')}")
     file_handler = logging.FileHandler(log_filename)
     file_handler.setLevel(logging.DEBUG)
     file_formatter = LogFormatter(fmt=format_str, color=False)
