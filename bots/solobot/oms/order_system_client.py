@@ -63,6 +63,18 @@ ORDER_COLUMNS = [
 
 JSON_COLUMNS = {"entry_order_ids", "sl_order_ids", "sl_order_qty_map"}
 
+DAILY_PNL_COLUMNS = [
+    "date",
+    "daily_pnl",
+    "num_trades",
+    "win_rate",
+    "cash",
+    "equity",
+    "peak_equity",
+    "drawdown",
+    "drawdown_pct",
+]
+
 
 class OrderSystemError(RuntimeError):
     def __init__(self, message: str, status_code: Optional[int] = None, payload: Any = None):
@@ -94,6 +106,8 @@ class OrderSystemClient:
         tick_size: float = 0.05,
         sl_limit_gap: float = 1.0,
         orders_csv: Optional[str] = None,
+        daily_csv: Optional[str] = None,
+        events_json_path: Optional[str] = None,
         local_copy_enabled: bool = True,
         session: Optional[requests.Session] = None,
     ):
@@ -123,6 +137,16 @@ class OrderSystemClient:
             or _first_env("ORDERSYSTEM_ORDERS_CSV", "ORDER_SYSTEM_ORDERS_CSV", "OMS_ORDERS_CSV")
             or _default_orders_csv(self.mode)
         )
+        self.daily_csv = str(
+            daily_csv
+            or _first_env("ORDERSYSTEM_DAILY_PNL_CSV", "ORDER_SYSTEM_DAILY_PNL_CSV", "OMS_DAILY_PNL_CSV")
+            or _default_daily_csv(self.mode)
+        )
+        self.events_json_path = str(
+            events_json_path
+            or _first_env("ORDERSYSTEM_EVENTS_JSON", "ORDER_SYSTEM_EVENTS_JSON", "OMS_EVENTS_JSON")
+            or _default_events_json(self.mode)
+        )
         self.session = session or requests.Session()
         self._last_trade_id: Optional[str] = None
         self._active_trade_by_symbol: Dict[str, str] = {}
@@ -138,6 +162,17 @@ class OrderSystemClient:
         params: Optional[Mapping[str, Any]],
         instrument: str = constants.NIFTY50,
     ) -> "OrderSystemClient":
+        resolved_mode = constants.resolve_execution_mode(mode)
+        if cls is OrderSystemClient and resolved_mode == constants.MOCK:
+            from oms.mock_order_system_client import MockOrderSystemClient
+
+            return MockOrderSystemClient.from_params(
+                strategy_name=strategy_name,
+                mode=resolved_mode,
+                params=params,
+                instrument=instrument,
+            )
+
         params = params if isinstance(params, Mapping) else {}
         sp = params.get("strategy-parameters") if isinstance(params, Mapping) else {}
         sp = sp if isinstance(sp, Mapping) else {}
@@ -170,7 +205,7 @@ class OrderSystemClient:
             base_url=_first_value(oms_cfg.get("base_url"), oms_cfg.get("base-url"), oms_cfg.get("url")),
             timeout=_to_float(_first_value(oms_cfg.get("timeout_sec"), oms_cfg.get("timeout"), oms_cfg.get("timeout-sec")), None),
             bot_name=str(bot_name),
-            mode=mode,
+            mode=resolved_mode,
             init_cash=_to_float(init_cash, 0.0),
             curr_date=_first_value(oms_cfg.get("curr_date"), oms_cfg.get("curr-date")),
             month_year=_first_value(oms_cfg.get("month_year"), oms_cfg.get("month-year")),
@@ -183,6 +218,24 @@ class OrderSystemClient:
                 oms_cfg.get("orders-csv"),
                 oms_cfg.get("local_orders_csv"),
                 oms_cfg.get("local-orders-csv"),
+            ),
+            daily_csv=_first_value(
+                oms_cfg.get("daily_csv"),
+                oms_cfg.get("daily-csv"),
+                oms_cfg.get("daily_pnl_csv"),
+                oms_cfg.get("daily-pnl-csv"),
+                oms_cfg.get("local_daily_csv"),
+                oms_cfg.get("local-daily-csv"),
+            ),
+            events_json_path=_first_value(
+                oms_cfg.get("events_json"),
+                oms_cfg.get("events-json"),
+                oms_cfg.get("events_json_path"),
+                oms_cfg.get("events-json-path"),
+                oms_cfg.get("order_event_log"),
+                oms_cfg.get("order-event-log"),
+                oms_cfg.get("local_events_json"),
+                oms_cfg.get("local-events-json"),
             ),
             local_copy_enabled=_to_bool(
                 _first_value(oms_cfg.get("local_copy_enabled"), oms_cfg.get("local-copy-enabled"), True),
@@ -251,8 +304,69 @@ class OrderSystemClient:
         total_brokerage: Optional[float] = None,
         is_amo: bool = False,
         slice: Optional[bool] = None,
+        ts: Optional[datetime] = None,
     ) -> Dict[str, Any]:
-        payload = _without_none({
+        payload = self._build_create_trade_payload(
+            symbol=symbol,
+            instrument_token=instrument_token,
+            qty=qty,
+            side=side,
+            entry_price=entry_price,
+            target=target,
+            sl_trigger=sl_trigger,
+            sl_limit=sl_limit,
+            trail_points=trail_points,
+            start_trail_after=start_trail_after,
+            description=description,
+            product=product,
+            validity=validity,
+            mode=mode,
+            tag_entry=tag_entry,
+            tag_sl=tag_sl,
+            entry_spot=entry_spot,
+            spot_ltp=spot_ltp,
+            spot_trail_anchor=spot_trail_anchor,
+            total_brokerage=total_brokerage,
+            is_amo=is_amo,
+            slice=slice,
+        )
+        response = self._request("POST", "/v1/trades", json=payload)
+        trade_id = str(response.get("trade_id") or "").strip()
+        if trade_id:
+            local_row = self._local_row_from_create(payload, response, ts=ts)
+            self._last_trade_id = trade_id
+            self._active_trade_by_symbol[str(symbol)] = trade_id
+            self._remember_trade(local_row)
+            self._upsert_local_trade(local_row)
+            self._log_local_event("CREATE_TRADE", local_row, extra={"response": dict(response)})
+        return response
+
+    def _build_create_trade_payload(
+        self,
+        symbol: str,
+        instrument_token: str,
+        qty: int,
+        side: str = constants.BUY,
+        entry_price: Optional[float] = None,
+        target: Optional[float] = None,
+        sl_trigger: Optional[float] = None,
+        sl_limit: Optional[float] = None,
+        trail_points: Optional[float] = None,
+        start_trail_after: Optional[float] = None,
+        description: Optional[str] = None,
+        product: Optional[str] = None,
+        validity: Optional[str] = None,
+        mode: Optional[str] = None,
+        tag_entry: Optional[str] = None,
+        tag_sl: Optional[str] = None,
+        entry_spot: Optional[float] = None,
+        spot_ltp: Optional[float] = None,
+        spot_trail_anchor: Optional[float] = None,
+        total_brokerage: Optional[float] = None,
+        is_amo: bool = False,
+        slice: Optional[bool] = None,
+    ) -> Dict[str, Any]:
+        return _without_none({
             "bot_name": self.bot_name,
             "init_cash": self.initial_cash,
             "curr_date": self.curr_date,
@@ -281,15 +395,6 @@ class OrderSystemClient:
             "is_amo": bool(is_amo),
             "slice": slice,
         })
-        response = self._request("POST", "/v1/trades", json=payload)
-        trade_id = str(response.get("trade_id") or "").strip()
-        if trade_id:
-            local_row = self._local_row_from_create(payload, response)
-            self._last_trade_id = trade_id
-            self._active_trade_by_symbol[str(symbol)] = trade_id
-            self._remember_trade(local_row)
-            self._upsert_local_trade(local_row)
-        return response
 
     def buy(
         self,
@@ -306,7 +411,6 @@ class OrderSystemClient:
         ts: Optional[datetime] = None,
         **kwargs: Any,
     ) -> Optional[str]:
-        del ts  # ordersystem owns persistence timestamps today.
         response = self.create_trade(
             symbol=symbol,
             instrument_token=instrument_token,
@@ -319,6 +423,7 @@ class OrderSystemClient:
             trail_points=trail_points,
             start_trail_after=start_trail_after,
             description=description,
+            ts=ts,
             **kwargs,
         )
         return response.get("trade_id")
@@ -353,6 +458,7 @@ class OrderSystemClient:
         }
         self._patch_cached_trade(trade_id, updates)
         self._patch_local_trade(trade_id, updates)
+        self._log_local_event("MODIFY_TRADE", self._get_cached_trade(trade_id) or {"id": trade_id}, extra={"request": payload, "response": dict(response)})
         return response
 
     def get_trade_by_id(self, trade_id: str) -> Dict[str, Any]:
@@ -361,10 +467,10 @@ class OrderSystemClient:
         return self._remember_trade(trade)
 
     def refresh_trade(self, trade_id: str, ts: Optional[datetime] = None) -> Optional[Dict[str, Any]]:
-        del ts
         trade = self.get_trade_by_id(trade_id)
         status = str(trade.get("status") or "").strip().upper()
         if status in self.CLOSED_STATUSES:
+            self._log_local_event("SYNC_CLOSED_TRADE", trade, ts=ts)
             self._forget_trade(trade)
         return trade
 
@@ -385,7 +491,6 @@ class OrderSystemClient:
         ts: Optional[datetime] = None,
         trade_id: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
-        del ts
         price = _first_float(c, h, l, o)
         if price is None or price <= 0:
             return None
@@ -410,6 +515,24 @@ class OrderSystemClient:
             return trade
         if status and status != constants.OPEN:
             return trade
+
+        if self.mode == constants.SANDBOX:
+            exit_signal = self._local_exit_signal(trade, o=o, h=h, l=l, c=c, include_target=False)
+            if exit_signal and exit_signal.get("reason") == constants.STOPLOSS_HIT:
+                log.info(
+                    "Sandbox SL hit detected locally trade_id=%s symbol=%s price=%.2f stoploss=%.2f",
+                    resolved_trade_id,
+                    symbol,
+                    price,
+                    _to_float(trade.get("stoploss"), 0.0) or 0.0,
+                )
+                return self.square_off_trade(
+                    trade_id=resolved_trade_id,
+                    exit_price=exit_signal.get("exit_price") or price,
+                    ts=ts,
+                    reason=constants.STOPLOSS_HIT,
+                )
+
         if not _to_bool(trade.get("tsl_active"), False):
             return trade
 
@@ -464,8 +587,15 @@ class OrderSystemClient:
         self._patch_local_trade(trade_id, updates)
 
         try:
-            return self.get_trade_by_id(trade_id)
+            trade = self.get_trade_by_id(trade_id)
+            self._log_local_event("SQUARE_OFF_TRADE", trade, extra={"request": payload, "response": dict(response)})
+            return trade
         except OrderSystemError:
+            self._log_local_event(
+                "SQUARE_OFF_TRADE",
+                self._get_cached_trade(trade_id) or {"id": trade_id},
+                extra={"request": payload, "response": dict(response)},
+            )
             return response
 
     def _init_local_ledger(self) -> None:
@@ -473,6 +603,16 @@ class OrderSystemClient:
         path.parent.mkdir(parents=True, exist_ok=True)
         if not path.exists():
             self._write_local_rows([])
+
+        daily_path = Path(self.daily_csv)
+        daily_path.parent.mkdir(parents=True, exist_ok=True)
+        if not daily_path.exists():
+            self._write_daily_rows([])
+
+        events_path = Path(self.events_json_path)
+        events_path.parent.mkdir(parents=True, exist_ok=True)
+        if not events_path.exists():
+            self._write_events_payload({"events": []})
 
     def _sync_account_trades(self, account: Mapping[str, Any]) -> None:
         trades = account.get("trades")
@@ -483,8 +623,13 @@ class OrderSystemClient:
                 self._remember_trade(trade)
                 self._upsert_local_trade(self._local_row_from_trade(trade))
 
-    def _local_row_from_create(self, payload: Mapping[str, Any], response: Mapping[str, Any]) -> Dict[str, Any]:
-        now = _now_ist().isoformat()
+    def _local_row_from_create(
+        self,
+        payload: Mapping[str, Any],
+        response: Mapping[str, Any],
+        ts: Optional[datetime] = None,
+    ) -> Dict[str, Any]:
+        now = _normalize_timestamp(ts) or _now_ist().isoformat()
         return {
             "id": response.get("trade_id"),
             "symbol": payload.get("symbol"),
@@ -644,7 +789,7 @@ class OrderSystemClient:
         if not trade_id:
             return
 
-        rows = [r for r in self._read_local_rows() if self._row_belongs_to_active_day(r)]
+        rows = self._read_local_rows()
         by_id = {str(r.get("id") or "").strip(): i for i, r in enumerate(rows)}
 
         if trade_id in by_id:
@@ -653,10 +798,15 @@ class OrderSystemClient:
                 value = row.get(key)
                 if value is not None and value != "":
                     existing[key] = _local_csv_value(key, value)
+            self._enrich_closed_row(existing)
         else:
-            rows.append({key: _local_csv_value(key, row.get(key)) for key in ORDER_COLUMNS})
+            new_row = {key: _local_csv_value(key, row.get(key)) for key in ORDER_COLUMNS}
+            self._enrich_closed_row(new_row)
+            rows.append(new_row)
 
         self._write_local_rows(rows)
+        saved_row = next((r for r in rows if str(r.get("id") or "").strip() == trade_id), row)
+        self._update_daily_pnl_for_trade(saved_row)
 
     def _patch_local_trade(self, trade_id: str, updates: Mapping[str, Any]) -> None:
         if not self.local_copy_enabled:
@@ -666,19 +816,23 @@ class OrderSystemClient:
         if not trade_id:
             return
 
-        rows = [r for r in self._read_local_rows() if self._row_belongs_to_active_day(r)]
+        rows = self._read_local_rows()
         patched = False
+        patched_row = None
         for row in rows:
             if str(row.get("id") or "").strip() != trade_id:
                 continue
             for key, value in updates.items():
                 if key in ORDER_COLUMNS and value is not None:
                     row[key] = _local_csv_value(key, value)
+            self._enrich_closed_row(row)
+            patched_row = row
             patched = True
             break
 
         if patched:
             self._write_local_rows(rows)
+            self._update_daily_pnl_for_trade(patched_row or {"id": trade_id})
 
     def _read_local_rows(self) -> List[Dict[str, Any]]:
         try:
@@ -720,10 +874,235 @@ class OrderSystemClient:
                     pass
             log.warning("Failed writing local OMS ledger %s: %s", self.orders_csv, exc)
 
+    def _read_daily_rows(self) -> List[Dict[str, Any]]:
+        try:
+            with open(self.daily_csv, "r", encoding="utf-8", newline="") as file:
+                reader = csv.DictReader(file)
+                return [{key: row.get(key, "") for key in DAILY_PNL_COLUMNS} for row in reader]
+        except FileNotFoundError:
+            return []
+        except Exception as exc:
+            log.warning("Failed reading local daily pnl %s: %s", self.daily_csv, exc)
+            return []
+
+    def _write_daily_rows(self, rows: List[Mapping[str, Any]]) -> None:
+        path = Path(self.daily_csv)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = ""
+        try:
+            fd, tmp_path = tempfile.mkstemp(
+                prefix=f".{path.name}.",
+                suffix=".tmp",
+                dir=str(path.parent),
+            )
+            os.close(fd)
+            with open(tmp_path, "w", encoding="utf-8", newline="") as file:
+                writer = csv.DictWriter(file, fieldnames=DAILY_PNL_COLUMNS)
+                writer.writeheader()
+                for row in rows:
+                    writer.writerow({key: row.get(key, "") for key in DAILY_PNL_COLUMNS})
+            os.replace(tmp_path, path)
+        except Exception as exc:
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
+            log.warning("Failed writing local daily pnl %s: %s", self.daily_csv, exc)
+
+    def _load_events_payload(self) -> Dict[str, Any]:
+        try:
+            with open(self.events_json_path, "r", encoding="utf-8") as file:
+                payload = jsonlib.load(file)
+        except FileNotFoundError:
+            return {"events": []}
+        except Exception as exc:
+            log.warning("Failed reading local event log %s: %s", self.events_json_path, exc)
+            return {"events": []}
+
+        if not isinstance(payload, dict) or not isinstance(payload.get("events"), list):
+            return {"events": []}
+        return payload
+
+    def _write_events_payload(self, payload: Mapping[str, Any]) -> None:
+        path = Path(self.events_json_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = ""
+        try:
+            fd, tmp_path = tempfile.mkstemp(
+                prefix=f".{path.name}.",
+                suffix=".tmp",
+                dir=str(path.parent),
+            )
+            os.close(fd)
+            with open(tmp_path, "w", encoding="utf-8") as file:
+                jsonlib.dump(payload, file, indent=2)
+            os.replace(tmp_path, path)
+        except Exception as exc:
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
+            log.warning("Failed writing local event log %s: %s", self.events_json_path, exc)
+
+    def _log_local_event(
+        self,
+        event_type: str,
+        trade: Mapping[str, Any],
+        ts: Optional[datetime] = None,
+        extra: Optional[Mapping[str, Any]] = None,
+    ) -> None:
+        if not self.local_copy_enabled:
+            return
+
+        payload = self._load_events_payload()
+        event = {
+            "ts": _normalize_timestamp(ts) or _now_ist().isoformat(),
+            "event_type": event_type,
+            "trade_id": trade.get("id") or trade.get("trade_id"),
+            "symbol": trade.get("symbol"),
+            "instrument_token": trade.get("instrument_token"),
+            "side": trade.get("side"),
+            "qty": trade.get("qty"),
+            "status": trade.get("status"),
+            "entry_order_ids": _json_list(trade.get("entry_order_ids")),
+            "sl_order_ids": _json_list(trade.get("sl_order_ids")),
+            "target_order_id": trade.get("target_order_id"),
+            "entry_price": _to_float(trade.get("entry_price"), None),
+            "target": _to_float(trade.get("target"), None),
+            "stoploss": _to_float(trade.get("stoploss"), None),
+            "exit_price": _to_float(trade.get("exit_price"), None),
+            "pnl": _to_float(trade.get("pnl"), None),
+            "exit_time": trade.get("exit_time"),
+        }
+        if extra:
+            event.update(dict(extra))
+
+        payload["events"].append(event)
+        self._write_events_payload(payload)
+
+    def _enrich_closed_row(self, row: Dict[str, Any]) -> None:
+        status = str(row.get("status") or "").strip().upper()
+        if status not in self.CLOSED_STATUSES:
+            return
+
+        exit_price = _to_float(row.get("exit_price"), None)
+        if exit_price is None or exit_price <= 0:
+            return
+
+        if not str(row.get("exit_time") or "").strip():
+            row["exit_time"] = _now_ist().isoformat()
+
+        if str(row.get("pnl") or "").strip():
+            return
+
+        entry_price = _to_float(row.get("entry_price"), None)
+        qty = _to_float(row.get("qty"), None)
+        if entry_price is None or qty is None:
+            return
+
+        side = str(row.get("side") or constants.BUY).upper()
+        pnl = (exit_price - entry_price) * qty
+        if side == constants.SELL:
+            pnl = (entry_price - exit_price) * qty
+        row["pnl"] = round(float(pnl), 2)
+
+    def _update_daily_pnl_for_trade(self, trade: Optional[Mapping[str, Any]]) -> None:
+        if not self.local_copy_enabled or not trade:
+            return
+
+        status = str(trade.get("status") or "").strip().upper()
+        if status not in self.CLOSED_STATUSES:
+            return
+
+        day = _timestamp_day_iso(trade.get("exit_time"))
+        if not day:
+            return
+
+        order_rows = self._read_local_rows()
+        closed_rows = []
+        for row in order_rows:
+            row_status = str(row.get("status") or "").strip().upper()
+            if row_status not in self.CLOSED_STATUSES:
+                continue
+            if _timestamp_day_iso(row.get("exit_time")) != day:
+                continue
+            closed_rows.append(row)
+
+        daily_pnl = sum(_to_float(row.get("pnl"), 0.0) or 0.0 for row in closed_rows)
+        num_trades = len(closed_rows)
+        wins = sum(1 for row in closed_rows if (_to_float(row.get("pnl"), 0.0) or 0.0) > 0)
+        win_rate = (wins / num_trades) * 100.0 if num_trades else 0.0
+
+        rows = self._read_daily_rows()
+        by_date = {str(row.get("date") or ""): i for i, row in enumerate(rows)}
+        row = {
+            "date": day,
+            "daily_pnl": round(float(daily_pnl), 2),
+            "num_trades": num_trades,
+            "win_rate": round(float(win_rate), 2),
+        }
+        if day in by_date:
+            rows[by_date[day]].update(row)
+        else:
+            rows.append(row)
+
+        rows = sorted(rows, key=lambda item: str(item.get("date") or ""))
+        running_pnl = 0.0
+        peak_equity = float(self.initial_cash)
+        for daily_row in rows:
+            pnl = _to_float(daily_row.get("daily_pnl"), 0.0) or 0.0
+            running_pnl += pnl
+            equity = float(self.initial_cash) + running_pnl
+            peak_equity = max(peak_equity, equity)
+            drawdown = equity - peak_equity
+            drawdown_pct = (drawdown / peak_equity) if peak_equity else 0.0
+            daily_row["cash"] = round(equity, 2)
+            daily_row["equity"] = round(equity, 2)
+            daily_row["peak_equity"] = round(peak_equity, 2)
+            daily_row["drawdown"] = round(drawdown, 2)
+            daily_row["drawdown_pct"] = round(drawdown_pct, 6)
+
+        self._write_daily_rows(rows)
+
     def _row_belongs_to_active_day(self, row: Mapping[str, Any]) -> bool:
         active_day = _curr_date_iso(self.curr_date)
         row_day = _timestamp_day_iso(row.get("timestamp")) or _timestamp_day_iso(row.get("exit_time"))
         return row_day is None or row_day == active_day
+
+    def _local_exit_signal(
+        self,
+        trade: Mapping[str, Any],
+        o: Optional[float] = None,
+        h: Optional[float] = None,
+        l: Optional[float] = None,
+        c: Optional[float] = None,
+        include_target: bool = False,
+    ) -> Optional[Dict[str, Any]]:
+        side = str(trade.get("side") or constants.BUY).upper()
+        high = _first_float(h, c, o, l)
+        low = _first_float(l, c, o, h)
+        close = _first_float(c, h, l, o)
+        if high is None or low is None or close is None:
+            return None
+
+        stoploss = _to_float(trade.get("stoploss"), None)
+        target = _to_float(trade.get("target"), None)
+
+        if side == constants.SELL:
+            sl_hit = stoploss is not None and high >= stoploss
+            target_hit = target is not None and low <= target
+        else:
+            sl_hit = stoploss is not None and low <= stoploss
+            target_hit = target is not None and high >= target
+
+        # If a candle spans both levels, choose the conservative close.
+        if sl_hit:
+            return {"reason": constants.STOPLOSS_HIT, "exit_price": float(stoploss)}
+        if include_target and target_hit:
+            return {"reason": constants.TARGET_HIT, "exit_price": float(target)}
+        return None
 
     def _build_trailing_update(self, trade: Mapping[str, Any], price: float) -> Optional[Dict[str, float]]:
         entry = _to_float(trade.get("entry_price"), 0.0)
@@ -845,6 +1224,44 @@ def _default_orders_csv(mode: str) -> str:
     if mode_key in order_log_by_mode:
         return order_log_by_mode[mode_key]
     return str(Path(constants.SOLOBOT_EXECUTION_RESULTS_DIR) / (mode_key or constants.MOCK) / "order_log.csv")
+
+
+def _default_daily_csv(mode: str) -> str:
+    mode_key = str(mode or constants.MOCK).strip().lower()
+    daily_by_mode = {
+        constants.PRODUCTION: constants.DAILY_PROD_PNL,
+        constants.SANDBOX: constants.DAILY_SANDBOX_PNL,
+        constants.MOCK: constants.DAILY_MOCK_PNL,
+    }
+    if mode_key in daily_by_mode:
+        return daily_by_mode[mode_key]
+    return str(Path(constants.SOLOBOT_EXECUTION_RESULTS_DIR) / (mode_key or constants.MOCK) / "daily_pnl.csv")
+
+
+def _default_events_json(mode: str) -> str:
+    mode_key = str(mode or constants.MOCK).strip().lower()
+    events_by_mode = {
+        constants.PRODUCTION: constants.ORDER_PROD_EVENT_LOG,
+        constants.SANDBOX: constants.ORDER_SANDBOX_EVENT_LOG,
+        constants.MOCK: constants.ORDER_MOCK_EVENT_LOG,
+    }
+    if mode_key in events_by_mode:
+        return events_by_mode[mode_key]
+    return str(Path(constants.SOLOBOT_EXECUTION_RESULTS_DIR) / (mode_key or constants.MOCK) / "order_event_log.json")
+
+
+def _json_list(value: Any) -> List[str]:
+    if isinstance(value, list):
+        return [str(item) for item in value if str(item or "").strip()]
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = jsonlib.loads(value)
+            if isinstance(parsed, list):
+                return [str(item) for item in parsed if str(item or "").strip()]
+        except ValueError:
+            pass
+        return [value]
+    return []
 
 
 def _trade_order_ids(trade: Mapping[str, Any], order_type: str) -> List[str]:
