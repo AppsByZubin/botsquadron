@@ -57,6 +57,7 @@ class PCRVwmaEmaOrbStrategy:
         previous_day_trend: str,
         selected_contracts: Dict[str, Any],
         order_manager=None,
+        acct_id: Optional[str] = None,
         option_exipry_date: Optional[str] = None,
         params: Optional[Dict[str, Any]] = None,
         index_minutes_processed: Optional[Dict[str, bool]] = None,
@@ -68,6 +69,7 @@ class PCRVwmaEmaOrbStrategy:
         self.previous_day_trend = previous_day_trend
         self.selected_contracts = selected_contracts or {}
         self.option_exipry_date = option_exipry_date
+        self.acct_id = str(acct_id or "").strip() or None
 
         self.params = params or {}
         sp = (self.params.get("strategy-parameters") or {}) if isinstance(self.params, dict) else {}
@@ -79,6 +81,8 @@ class PCRVwmaEmaOrbStrategy:
                 "Order manager configured: %s",
                 self.order_manager.__class__.__name__,
             )
+        if self.acct_id:
+            log.info("OMS account id configured: %s", self.acct_id)
         ht: Dict[str, Any] = {}
         if isinstance(self.params, dict):
             # Support both keys while keeping backward compatibility with old configs.
@@ -244,7 +248,7 @@ class PCRVwmaEmaOrbStrategy:
                 if mode:
                     return str(mode)
 
-        return os.getenv("APP_MODE") or os.getenv("SOLOBOT_MODE")
+        return os.getenv("SOLOBOT_MODE") or os.getenv("APP_MODE")
 
     # ------------------------------------------------------------------
     # ORB helpers

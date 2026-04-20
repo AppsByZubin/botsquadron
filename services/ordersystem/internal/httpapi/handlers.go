@@ -22,6 +22,7 @@ type Business interface {
 	GetAccountDetails(context.Context, model.GetAccountDetailsRequest) (model.AccountDetailsResponse, error)
 	GetTradeByID(context.Context, string) (model.Trade, error)
 	ModifyTrade(context.Context, string, model.ModifyTradeRequest) (model.ModifyTradeResponse, error)
+	SquareOffTrade(context.Context, string, model.SquareOffTradeRequest) (model.SquareOffTradeResponse, error)
 }
 
 type errorResponse struct {
@@ -39,6 +40,7 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("GET /v1/accounts", h.handleGetAccountDetails)
 	mux.HandleFunc("POST /v1/trades", h.handleCreateTrade)
 	mux.HandleFunc("POST /v1/trades/{id}/modify", h.handleModifyTrade)
+	mux.HandleFunc("POST /v1/trades/{id}/square-off", h.handleSquareOffTrade)
 	mux.HandleFunc("GET /v1/trades/{id}", h.handleGetTradeByID)
 	return mux
 }
@@ -156,6 +158,42 @@ func (h *Handler) handleModifyTrade(w http.ResponseWriter, r *http.Request) {
 			statusCode = http.StatusBadRequest
 		}
 		if strings.Contains(strings.ToLower(err.Error()), "no rows") {
+			statusCode = http.StatusNotFound
+		}
+		writeJSON(w, statusCode, errorResponse{Error: err.Error()})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (h *Handler) handleSquareOffTrade(w http.ResponseWriter, r *http.Request) {
+	tradeID := strings.TrimSpace(r.PathValue("id"))
+	if tradeID == "" {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "trade id is required"})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), h.requestTimeout)
+	defer cancel()
+
+	defer r.Body.Close()
+	var req model.SquareOffTradeRequest
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid request body: " + err.Error()})
+		return
+	}
+
+	resp, err := h.business.SquareOffTrade(ctx, tradeID, req)
+	if err != nil {
+		statusCode := http.StatusInternalServerError
+		lowerErr := strings.ToLower(err.Error())
+		if strings.Contains(lowerErr, "required") || strings.Contains(lowerErr, "must be") {
+			statusCode = http.StatusBadRequest
+		}
+		if strings.Contains(lowerErr, "no rows") || strings.Contains(lowerErr, "not found") {
 			statusCode = http.StatusNotFound
 		}
 		writeJSON(w, statusCode, errorResponse{Error: err.Error()})

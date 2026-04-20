@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"math"
 	"strings"
@@ -17,6 +18,8 @@ const (
 	tradesTableName = "trades"
 	ordersTableName = "orders"
 )
+
+var ErrAccountNotFound = errors.New("account row not found")
 
 type Store struct {
 	pool               *pgxpool.Pool
@@ -586,9 +589,33 @@ WHERE botname = $1
 ORDER BY id
 LIMIT 1`, botName, currDate).Scan(&account.ID, &account.BotName, &account.CurrDate, &account.MonthYear, &account.InitCash, &account.NetProfit); err != nil {
 		if err == pgx.ErrNoRows {
-			return model.Account{}, fmt.Errorf("account row not found for bot_name=%s curr_date=%s", botName, currDate)
+			return model.Account{}, fmt.Errorf("%w for bot_name=%s curr_date=%s", ErrAccountNotFound, botName, currDate)
 		}
 		return model.Account{}, fmt.Errorf("load account for bot/date: %w", err)
+	}
+	return account, nil
+}
+
+func (s *Store) GetAccountByBotMonthYear(ctx context.Context, botName string, monthYear string) (model.Account, error) {
+	currentTime := time.Now().In(s.loc)
+	botName = normalizeBotName(botName)
+	if strings.TrimSpace(monthYear) == "" {
+		return model.Account{}, fmt.Errorf("%w for bot_name=%s month_year=", ErrAccountNotFound, botName)
+	}
+	monthYear = normalizeMonthYear(monthYear, currentTime)
+
+	var account model.Account
+	if err := s.pool.QueryRow(ctx, `
+SELECT id::text, COALESCE(botname, ''), COALESCE(curr_date, ''), COALESCE(month_year, ''), COALESCE(init_cash, 0)::float8, COALESCE(net_profit, 0)::float8
+FROM accounts
+WHERE botname = $1
+  AND month_year = $2
+ORDER BY curr_date DESC, id
+LIMIT 1`, botName, monthYear).Scan(&account.ID, &account.BotName, &account.CurrDate, &account.MonthYear, &account.InitCash, &account.NetProfit); err != nil {
+		if err == pgx.ErrNoRows {
+			return model.Account{}, fmt.Errorf("%w for bot_name=%s month_year=%s", ErrAccountNotFound, botName, monthYear)
+		}
+		return model.Account{}, fmt.Errorf("load account for bot/month_year: %w", err)
 	}
 	return account, nil
 }
@@ -1299,6 +1326,96 @@ WHERE trade_id::text = $1
 	return nil
 }
 
+func (s *Store) SquareOffTrade(ctx context.Context, tradeID string, brokerOrderIDs []string, exitPrice float64, qty int, exitTime *time.Time, exitStatus string) error {
+	tradeID = strings.TrimSpace(tradeID)
+	if tradeID == "" {
+		return fmt.Errorf("trade id is required")
+	}
+	if exitPrice <= 0 {
+		return fmt.Errorf("exit_price must be > 0")
+	}
+	if qty < 0 {
+		qty = int(math.Abs(float64(qty)))
+	}
+	orderIDs := cleanOrderIDs(brokerOrderIDs)
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin square-off transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	var instrumentToken string
+	var tradeQty int
+	if err := tx.QueryRow(ctx, fmt.Sprintf(`
+SELECT COALESCE(instrument_token, ''), COALESCE(qty, 0)
+FROM %s
+WHERE id::text = $1
+FOR UPDATE`, s.tradesTable), tradeID).Scan(&instrumentToken, &tradeQty); err != nil {
+		return fmt.Errorf("load trade for square-off: %w", err)
+	}
+	if qty <= 0 && tradeQty != 0 {
+		qty = int(math.Abs(float64(tradeQty)))
+	}
+
+	where, args := squareOffOrderWhere(tradeID, orderIDs)
+	var openSLCount int
+	if err := tx.QueryRow(ctx, fmt.Sprintf(`
+SELECT COUNT(*)
+FROM %s
+WHERE %s`, ordersTableName, where), args...).Scan(&openSLCount); err != nil {
+		return fmt.Errorf("count square-off sl orders: %w", err)
+	}
+
+	if openSLCount > 0 {
+		qtyPerOrder := squareOffQtyPerOrder(qty, openSLCount)
+		updateArgs := append(args, exitPrice, nullIntPtr(intPtrIfPositive(qtyPerOrder)), nullTimePtr(exitTime))
+		if _, err := tx.Exec(ctx, fmt.Sprintf(`
+UPDATE %s
+SET
+    exit_price = $%d,
+    qty = COALESCE(qty, $%d::integer),
+    exit_time = COALESCE(exit_time, COALESCE($%d::timestamptz, NOW()))
+WHERE %s`, ordersTableName, len(args)+1, len(args)+2, len(args)+3, where), updateArgs...); err != nil {
+			return fmt.Errorf("update square-off sl orders: %w", err)
+		}
+	} else {
+		insertIDs := orderIDs
+		if len(insertIDs) == 0 {
+			insertIDs = []string{""}
+		}
+		qtyPerOrder := squareOffQtyPerOrder(qty, len(insertIDs))
+		for _, orderID := range insertIDs {
+			if err := insertOrderTx(ctx, tx, tradeID, CreateOrderParams{
+				OrderID:         orderID,
+				InstrumentToken: instrumentToken,
+				OrderType:       "sl",
+				Qty:             intPtrIfPositive(qtyPerOrder),
+				ExitPrice:       &exitPrice,
+				ExitTime:        exitTimeOrNow(exitTime),
+			}); err != nil {
+				return err
+			}
+		}
+	}
+
+	if strings.TrimSpace(exitStatus) == "" {
+		exitStatus = "EOD_SQUARE_OFF"
+	}
+	accountID, err := s.recalculateTradeExecutionTx(ctx, tx, tradeID, exitStatus)
+	if err != nil {
+		return err
+	}
+	if err := s.refreshAccountNetProfitFromOrdersTx(ctx, tx, accountID); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit square-off transaction: %w", err)
+	}
+
+	return nil
+}
+
 func (s *Store) MarkTradeClosedFromSL(ctx context.Context, tradeID string, brokerOrderID string, exitPrice float64, additionalBrokerage float64, exitStatus string) error {
 	var brokerage *float64
 	if additionalBrokerage > 0 {
@@ -1306,6 +1423,69 @@ func (s *Store) MarkTradeClosedFromSL(ctx context.Context, tradeID string, broke
 		brokerage = &value
 	}
 	return s.RecordStopLossFill(ctx, tradeID, brokerOrderID, exitPrice, 0, brokerage, exitStatus)
+}
+
+func cleanOrderIDs(values []string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		seen := false
+		for _, existing := range out {
+			if existing == value {
+				seen = true
+				break
+			}
+		}
+		if !seen {
+			out = append(out, value)
+		}
+	}
+	return out
+}
+
+func squareOffOrderWhere(tradeID string, orderIDs []string) (string, []any) {
+	where := `
+trade_id::text = $1
+  AND lower(COALESCE(order_type, '')) = 'sl'
+  AND exit_time IS NULL`
+	args := []any{strings.TrimSpace(tradeID)}
+	if len(orderIDs) > 0 {
+		where += `
+  AND order_id = ANY($2::text[])`
+		args = append(args, orderIDs)
+	}
+	return where, args
+}
+
+func squareOffQtyPerOrder(totalQty int, orderCount int) int {
+	if totalQty <= 0 || orderCount <= 0 {
+		return 0
+	}
+	if orderCount == 1 {
+		return totalQty
+	}
+	if totalQty%orderCount == 0 {
+		return totalQty / orderCount
+	}
+	return 0
+}
+
+func intPtrIfPositive(value int) *int {
+	if value <= 0 {
+		return nil
+	}
+	return &value
+}
+
+func exitTimeOrNow(value *time.Time) *time.Time {
+	if value != nil {
+		return value
+	}
+	now := time.Now()
+	return &now
 }
 
 type slOrderExecution struct {

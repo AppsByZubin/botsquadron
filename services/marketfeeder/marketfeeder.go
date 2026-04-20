@@ -97,6 +97,8 @@ func (bm *BotManager) handleInstrumentSubscription(msg *nats.Msg) {
 		if bot, exists := bm.bots[sub.BotID]; exists {
 			bot.removeInstruments(sub.InstrumentKeys)
 		}
+	case "unsubscribe":
+		bm.removeBot(sub.BotID)
 	}
 }
 
@@ -121,6 +123,29 @@ func (bm *BotManager) addOrUpdateBot(botID string, instrumentKeys []string) {
 		go bot.startWebSocket(bm.upstoxToken)
 		log.Printf("Started new bot handler for %s with %d instruments", botID, len(instrumentKeys))
 	}
+}
+
+func (bm *BotManager) removeBot(botID string) {
+	botID = strings.TrimSpace(botID)
+	if botID == "" {
+		log.Printf("Ignoring unsubscribe with empty bot_id")
+		return
+	}
+
+	bot, exists := bm.bots[botID]
+	if !exists {
+		log.Printf("No active bot handler to unsubscribe for %s", botID)
+		return
+	}
+
+	bot.cancel()
+	if bot.conn != nil {
+		if err := bot.conn.Close(); err != nil {
+			log.Printf("Error closing websocket for bot %s: %v", botID, err)
+		}
+	}
+	delete(bm.bots, botID)
+	log.Printf("Unsubscribed and removed bot handler for %s", botID)
 }
 
 func (bm *BotManager) shutdown() {

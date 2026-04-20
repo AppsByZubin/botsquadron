@@ -7,7 +7,7 @@ BotSquadron is a distributed trading bot platform that uses NATS for communicati
 ### Components
 
 1. **solobot** (Python): Trading bot that implements trading strategies
-2. **ordersystem** (Go): HTTP OMS that stores trades in PostgreSQL, places production orders via Upstox, and polls SL status
+2. **ordersystem** (Go): HTTP OMS that stores trades in PostgreSQL, places Upstox orders in sandbox/production, and polls SL status in production
 3. **marketfeeder** (Go): Market data feeder that connects to Upstox **v3** websockets
 4. **NATS**: Message broker for communication between components
 
@@ -16,7 +16,7 @@ BotSquadron is a distributed trading bot platform that uses NATS for communicati
 ```
 solobot → ordersystem → PostgreSQL
 solobot → NATS → marketfeeder → Upstox WebSocket → NATS → solobot
-ordersystem (production mode) → Upstox Orders API
+ordersystem (sandbox/production mode) → Upstox Orders API
 ```
 
 1. solobot sends instrument keys to subscribe to marketfeeder via NATS
@@ -100,7 +100,7 @@ docker run -e NATS_URL=nats://host.docker.internal:4222 -e UPSTOX_API_ACCESS_TOK
 
 ```bash
 export DATABASE_URL="postgresql://omsuser:change-me@localhost:5432/omsdb?sslmode=disable"
-export APP_MODE="mock"   # use production to enable Upstox order placement
+export APP_MODE="sandbox"   # use sandbox or production
 ./services/ordersystem/ordersystem
 ```
 
@@ -191,7 +191,9 @@ helm upgrade --install botsquadron ../botyard/helm/botsquadron \
   --create-namespace
 ```
 
-Set production credentials through the chart's `secretEnv` values, including `DATABASE_URL`, `UPSTOX_API_ACCESS_TOKEN`, and `upstox_api_access_token`. The chart deploys NATS, ordersystem, marketfeeder, and the solobot Job together.
+Set production credentials through the chart's `secretEnv` values, including `DATABASE_URL`, `UPSTOX_API_ACCESS_TOKEN`, and `upstox_api_access_token`. The chart deploys NATS, ordersystem, marketfeeder, and the solobot workload together.
+
+Persistent runtime storage and stop/start operations are managed in the `botyard` Helm chart.
 
 ## Development
 

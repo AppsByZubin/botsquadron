@@ -14,6 +14,7 @@ type Service interface {
 	GetAccountDetails(context.Context, model.GetAccountDetailsRequest) (model.AccountDetailsResponse, error)
 	GetTradeByID(context.Context, string) (model.Trade, error)
 	ModifyTrade(context.Context, string, model.ModifyTradeRequest) (model.ModifyTradeResponse, error)
+	SquareOffTrade(context.Context, string, model.SquareOffTradeRequest) (model.SquareOffTradeResponse, error)
 }
 
 type Business struct {
@@ -54,4 +55,8 @@ func (b *Business) GetTradeByID(ctx context.Context, tradeID string) (model.Trad
 
 func (b *Business) ModifyTrade(ctx context.Context, tradeID string, req model.ModifyTradeRequest) (model.ModifyTradeResponse, error) {
 	return b.svc.ModifyTrade(ctx, tradeID, req)
+}
+
+func (b *Business) SquareOffTrade(ctx context.Context, tradeID string, req model.SquareOffTradeRequest) (model.SquareOffTradeResponse, error) {
+	return b.svc.SquareOffTrade(ctx, tradeID, req)
 }

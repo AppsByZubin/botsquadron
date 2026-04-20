@@ -98,6 +98,24 @@ type ModifyTradeResponse struct {
 	Message          string   `json:"message,omitempty"`
 }
 
+type SquareOffTradeRequest struct {
+	Mode         string     `json:"mode,omitempty"`
+	ExitPrice    float64    `json:"exit_price"`
+	ExitTime     *time.Time `json:"exit_time,omitempty"`
+	Reason       string     `json:"reason,omitempty"`
+	Validity     string     `json:"validity,omitempty"`
+	DisclosedQty int        `json:"disclosed_quantity,omitempty"`
+}
+
+type SquareOffTradeResponse struct {
+	TradeID      string     `json:"trade_id"`
+	Status       string     `json:"status"`
+	ExitOrderIDs []string   `json:"exit_order_ids,omitempty"`
+	ExitPrice    float64    `json:"exit_price,omitempty"`
+	ExitTime     *time.Time `json:"exit_time,omitempty"`
+	Message      string     `json:"message,omitempty"`
+}
+
 type Order struct {
 	ID              string     `json:"id"`
 	OrderID         string     `json:"order_id,omitempty"`

@@ -13,7 +13,7 @@ import (
 func TestModifyTradeRequiresTradeID(t *testing.T) {
 	t.Parallel()
 
-	svc := New(config.Config{AppMode: "mock"}, nil, nil)
+	svc := New(config.Config{AppMode: config.ModeSandbox}, nil, nil)
 
 	_, err := svc.ModifyTrade(context.Background(), "", model.ModifyTradeRequest{})
 	if err == nil {
@@ -197,13 +197,13 @@ func TestValidateProductionModifyTradeRequestRequiresBrokerFields(t *testing.T) 
 			name:      "missing stoploss",
 			orderType: "SL",
 			slLimit:   &slLimit,
-			wantErr:   "stoploss is required in production mode",
+			wantErr:   "stoploss is required in sandbox/production mode",
 		},
 		{
 			name:      "missing sl limit for SL",
 			orderType: "SL",
 			stoploss:  &stoploss,
-			wantErr:   "sl_limit is required for SL order modification in production mode",
+			wantErr:   "sl_limit is required for SL order modification in sandbox/production mode",
 		},
 		{
 			name:      "SL-M allows missing sl limit",
@@ -319,6 +319,36 @@ func TestSLOrderQuantityRequiresOrderID(t *testing.T) {
 
 	if got := slOrderQuantity(trade, ""); got != 0 {
 		t.Fatalf("slOrderQuantity(empty order id) = %d, want 0", got)
+	}
+}
+
+func TestSquareOffBrokerOrderQuantityUsesOrderQtyWhenPresent(t *testing.T) {
+	t.Parallel()
+
+	trade := model.Trade{
+		Qty:        150,
+		SLOrderIDs: []string{"sl-1", "sl-2"},
+		Orders: []model.Order{
+			{OrderID: "sl-1", OrderType: "sl", Qty: 75},
+			{OrderID: "sl-2", OrderType: "sl", Qty: 75},
+		},
+	}
+
+	if got := squareOffBrokerOrderQuantity(trade, "sl-1"); got != 75 {
+		t.Fatalf("squareOffBrokerOrderQuantity(sl-1) = %d, want 75", got)
+	}
+}
+
+func TestSquareOffBrokerOrderQuantitySplitsTradeQty(t *testing.T) {
+	t.Parallel()
+
+	trade := model.Trade{
+		Qty:        150,
+		SLOrderIDs: []string{"sl-1", "sl-2"},
+	}
+
+	if got := squareOffBrokerOrderQuantity(trade, "sl-1"); got != 75 {
+		t.Fatalf("squareOffBrokerOrderQuantity(sl-1) = %d, want 75", got)
 	}
 }
 

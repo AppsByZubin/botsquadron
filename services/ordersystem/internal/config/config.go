@@ -31,18 +31,24 @@ type Config struct {
 	UpstoxStatusCacheTTL   time.Duration
 }
 
+const (
+	ModeSandbox    = "sandbox"
+	ModeProduction = "production"
+)
+
 func Load() (Config, error) {
+	appMode := normalizeAppMode(getEnv("APP_MODE", ModeSandbox))
 	cfg := Config{
 		HTTPAddr:               getEnv("ORDERSYSTEM_HTTP_ADDR", ":8081"),
 		DatabaseURL:            strings.TrimSpace(os.Getenv("DATABASE_URL")),
-		AppMode:                strings.TrimSpace(getEnv("APP_MODE", "mock")),
+		AppMode:                appMode,
 		AppTimezone:            strings.TrimSpace(getEnv("APP_TIMEZONE", "Asia/Kolkata")),
 		RequestTimeout:         parseDurationEnv("ORDERSYSTEM_REQUEST_TIMEOUT", 15*time.Second),
 		SLPollInterval:         parseDurationEnv("ORDERSYSTEM_SL_POLL_INTERVAL", 10*time.Second),
 		SLRefreshMinInterval:   parseDurationEnv("ORDERSYSTEM_SL_REFRESH_MIN_INTERVAL", 10*time.Second),
 		AccountInitialCash:     parseFloatEnv("ACCOUNT_INITIAL_CASH", 0),
-		UpstoxBaseURL:          strings.TrimRight(getEnv("UPSTOX_API_BASE_URL", "https://api.upstox.com"), "/"),
-		UpstoxAccessToken:      strings.TrimSpace(os.Getenv("UPSTOX_API_ACCESS_TOKEN")),
+		UpstoxBaseURL:          resolveUpstoxBaseURL(appMode),
+		UpstoxAccessToken:      resolveUpstoxAccessToken(appMode),
 		UpstoxOrderPlacePath:   normalizePath(getEnv("UPSTOX_ORDER_PLACE_PATH", "/v3/order/place")),
 		UpstoxOrderModifyPath:  normalizePath(getEnv("UPSTOX_ORDER_MODIFY_PATH", "/v3/order/modify")),
 		UpstoxOrderDetailsPath: normalizePath(getEnv("UPSTOX_ORDER_DETAILS_PATH", "/v2/order/details")),
@@ -58,7 +64,14 @@ func Load() (Config, error) {
 		return Config{}, errors.New("DATABASE_URL is required")
 	}
 
-	if cfg.IsProduction() && cfg.UpstoxAccessToken == "" {
+	if !isValidAppMode(cfg.AppMode) {
+		return Config{}, errors.New("APP_MODE must be sandbox or production")
+	}
+
+	if cfg.UsesUpstox() && cfg.UpstoxAccessToken == "" {
+		if cfg.IsSandbox() {
+			return Config{}, errors.New("UPSTOX_SANDBOX_API_ACCESS_TOKEN is required when APP_MODE=sandbox")
+		}
 		return Config{}, errors.New("UPSTOX_API_ACCESS_TOKEN is required when APP_MODE=production")
 	}
 
@@ -90,7 +103,15 @@ func Load() (Config, error) {
 }
 
 func (c Config) IsProduction() bool {
-	return strings.EqualFold(strings.TrimSpace(c.AppMode), "production")
+	return normalizeAppMode(c.AppMode) == ModeProduction
+}
+
+func (c Config) IsSandbox() bool {
+	return normalizeAppMode(c.AppMode) == ModeSandbox
+}
+
+func (c Config) UsesUpstox() bool {
+	return c.IsProduction() || c.IsSandbox()
 }
 
 func getEnv(key, fallback string) string {
@@ -99,6 +120,53 @@ func getEnv(key, fallback string) string {
 		return fallback
 	}
 	return value
+}
+
+func getFirstEnv(keys ...string) string {
+	for _, key := range keys {
+		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func normalizeAppMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "prod":
+		return ModeProduction
+	case ModeProduction:
+		return ModeProduction
+	case ModeSandbox:
+		return ModeSandbox
+	case "":
+		return ModeSandbox
+	default:
+		return strings.ToLower(strings.TrimSpace(mode))
+	}
+}
+
+func isValidAppMode(mode string) bool {
+	switch normalizeAppMode(mode) {
+	case ModeSandbox, ModeProduction:
+		return true
+	default:
+		return false
+	}
+}
+
+func resolveUpstoxBaseURL(appMode string) string {
+	if normalizeAppMode(appMode) == ModeSandbox {
+		return strings.TrimRight(getEnv("UPSTOX_SANDBOX_API_BASE_URL", "https://api-sandbox.upstox.com"), "/")
+	}
+	return strings.TrimRight(getEnv("UPSTOX_API_BASE_URL", "https://api.upstox.com"), "/")
+}
+
+func resolveUpstoxAccessToken(appMode string) string {
+	if normalizeAppMode(appMode) == ModeSandbox {
+		return getFirstEnv("UPSTOX_SANDBOX_API_ACCESS_TOKEN", "upstox_sandbox_api_access_token")
+	}
+	return getFirstEnv("UPSTOX_API_ACCESS_TOKEN", "upstox_api_access_token")
 }
 
 func parseDurationEnv(key string, fallback time.Duration) time.Duration {
