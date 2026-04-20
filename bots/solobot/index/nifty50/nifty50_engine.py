@@ -253,15 +253,43 @@ async def nifty50_engine(strategy, mode, param_data):
             order_manager.orders_csv,
         )
 
+        try:
+            account_info = order_manager.create_account()
+        except Exception as exc:
+            logger.error(f"Failed to create/load ordersystem account: {exc}")
+            sys.exit(constants.FAIL_CODE)
+
+        acct_id = str(
+            account_info.get("account_id")
+            or account_info.get("acct_id")
+            or getattr(order_manager, "account_id", "")
+            or ""
+        ).strip()
+        if not acct_id:
+            logger.error(f"Ordersystem account response missing account_id: {account_info}")
+            sys.exit(constants.FAIL_CODE)
+
+        logger.info(
+            "Ordersystem account ready account_id=%s bot_name=%s month_year=%s message=%s",
+            acct_id,
+            account_info.get("bot_name") or order_manager.bot_name,
+            account_info.get("month_year") or order_manager.month_year,
+            account_info.get("message"),
+        )
+
         bot = strategy_cls(
-                    upstox, trend, selected_contracts, order_manager=order_manager,
-                    option_exipry_date=sp.get("trade_expiry"),
-                    params=param_data,
-                    index_minutes_processed=minutes_processed,
-                    future_minutes_processed=future_minutes_processed,
-                    intraday_index_candles=intraday_day_1min_candles,
-                    intraday_future_candles=intraday_day_future_candles,
-                )
+            upstox,
+            trend,
+            selected_contracts,
+            order_manager=order_manager,
+            acct_id=acct_id,
+            option_exipry_date=sp.get("trade_expiry"),
+            params=param_data,
+            index_minutes_processed=minutes_processed,
+            future_minutes_processed=future_minutes_processed,
+            intraday_index_candles=intraday_day_1min_candles,
+            intraday_future_candles=intraday_day_future_candles,
+        )
 
         if bot is None:
             logger.error(f"Strategy {strategy} bot not initialized.")

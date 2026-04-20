@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"math"
 	"strings"
@@ -17,6 +18,8 @@ const (
 	tradesTableName = "trades"
 	ordersTableName = "orders"
 )
+
+var ErrAccountNotFound = errors.New("account row not found")
 
 type Store struct {
 	pool               *pgxpool.Pool
@@ -586,9 +589,33 @@ WHERE botname = $1
 ORDER BY id
 LIMIT 1`, botName, currDate).Scan(&account.ID, &account.BotName, &account.CurrDate, &account.MonthYear, &account.InitCash, &account.NetProfit); err != nil {
 		if err == pgx.ErrNoRows {
-			return model.Account{}, fmt.Errorf("account row not found for bot_name=%s curr_date=%s", botName, currDate)
+			return model.Account{}, fmt.Errorf("%w for bot_name=%s curr_date=%s", ErrAccountNotFound, botName, currDate)
 		}
 		return model.Account{}, fmt.Errorf("load account for bot/date: %w", err)
+	}
+	return account, nil
+}
+
+func (s *Store) GetAccountByBotMonthYear(ctx context.Context, botName string, monthYear string) (model.Account, error) {
+	currentTime := time.Now().In(s.loc)
+	botName = normalizeBotName(botName)
+	if strings.TrimSpace(monthYear) == "" {
+		return model.Account{}, fmt.Errorf("%w for bot_name=%s month_year=", ErrAccountNotFound, botName)
+	}
+	monthYear = normalizeMonthYear(monthYear, currentTime)
+
+	var account model.Account
+	if err := s.pool.QueryRow(ctx, `
+SELECT id::text, COALESCE(botname, ''), COALESCE(curr_date, ''), COALESCE(month_year, ''), COALESCE(init_cash, 0)::float8, COALESCE(net_profit, 0)::float8
+FROM accounts
+WHERE botname = $1
+  AND month_year = $2
+ORDER BY curr_date DESC, id
+LIMIT 1`, botName, monthYear).Scan(&account.ID, &account.BotName, &account.CurrDate, &account.MonthYear, &account.InitCash, &account.NetProfit); err != nil {
+		if err == pgx.ErrNoRows {
+			return model.Account{}, fmt.Errorf("%w for bot_name=%s month_year=%s", ErrAccountNotFound, botName, monthYear)
+		}
+		return model.Account{}, fmt.Errorf("load account for bot/month_year: %w", err)
 	}
 	return account, nil
 }

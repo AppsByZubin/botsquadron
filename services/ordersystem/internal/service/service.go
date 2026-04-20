@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"math"
@@ -40,6 +41,14 @@ func (s *Service) CreateAccount(ctx context.Context, req model.CreateAccountRequ
 		return model.AccountResponse{}, fmt.Errorf("store is not configured")
 	}
 
+	existingAccount, err := s.store.GetAccountByBotMonthYear(ctx, req.BotName, req.MonthYear)
+	if err == nil {
+		return accountResponse(existingAccount, "Account already created"), nil
+	}
+	if !errors.Is(err, store.ErrAccountNotFound) {
+		return model.AccountResponse{}, err
+	}
+
 	account, err := s.store.CreateAccount(ctx, store.CreateAccountParams{
 		BotName:   req.BotName,
 		CurrDate:  req.CurrDate,
@@ -50,15 +59,7 @@ func (s *Service) CreateAccount(ctx context.Context, req model.CreateAccountRequ
 		return model.AccountResponse{}, err
 	}
 
-	return model.AccountResponse{
-		AccountID: account.ID,
-		BotName:   account.BotName,
-		CurrDate:  account.CurrDate,
-		MonthYear: account.MonthYear,
-		InitCash:  account.InitCash,
-		NetProfit: account.NetProfit,
-		Message:   "account row ready",
-	}, nil
+	return accountResponse(account, "account row ready"), nil
 }
 
 func (s *Service) GetAccountDetails(ctx context.Context, req model.GetAccountDetailsRequest) (model.AccountDetailsResponse, error) {
@@ -194,7 +195,15 @@ func (s *Service) CreateTrade(ctx context.Context, req model.CreateTradeRequest)
 
 	accountID, err := s.store.GetAccountIDForBotDate(ctx, req.BotName, req.CurrDate)
 	if err != nil {
-		return model.CreateTradeResponse{}, fmt.Errorf("load account for trade: %w", err)
+		if strings.TrimSpace(req.MonthYear) == "" || !errors.Is(err, store.ErrAccountNotFound) {
+			return model.CreateTradeResponse{}, fmt.Errorf("load account for trade: %w", err)
+		}
+
+		account, monthErr := s.store.GetAccountByBotMonthYear(ctx, req.BotName, req.MonthYear)
+		if monthErr != nil {
+			return model.CreateTradeResponse{}, fmt.Errorf("load account for trade by month_year: %w", monthErr)
+		}
+		accountID = account.ID
 	}
 
 	orders := make([]store.CreateOrderParams, 0, len(entryOrderIDs)+len(slOrderIDs)+2)
@@ -250,6 +259,18 @@ func (s *Service) CreateTrade(ctx context.Context, req model.CreateTradeRequest)
 		SLOrderIDs:    slOrderIDs,
 		Message:       message,
 	}, nil
+}
+
+func accountResponse(account model.Account, message string) model.AccountResponse {
+	return model.AccountResponse{
+		AccountID: account.ID,
+		BotName:   account.BotName,
+		CurrDate:  account.CurrDate,
+		MonthYear: account.MonthYear,
+		InitCash:  account.InitCash,
+		NetProfit: account.NetProfit,
+		Message:   message,
+	}
 }
 
 func (s *Service) GetTradeByID(ctx context.Context, tradeID string) (model.Trade, error) {

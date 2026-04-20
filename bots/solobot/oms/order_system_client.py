@@ -116,6 +116,7 @@ class OrderSystemClient:
         self.validity = str(validity or "DAY").upper()
         self.tick_size = float(tick_size or 0.05)
         self.sl_limit_gap = float(sl_limit_gap or 1.0)
+        self.account_id: Optional[str] = None
         self.local_copy_enabled = _to_bool(local_copy_enabled, True)
         self.orders_csv = str(
             orders_csv
@@ -786,6 +787,11 @@ class OrderSystemClient:
         return {"data": payload}
 
     def _sync_account_state(self, payload: Mapping[str, Any]) -> None:
+        account_id = str(
+            _first_value(payload.get("account_id"), payload.get("acct_id"), payload.get("id"), "") or ""
+        ).strip()
+        if account_id:
+            self.account_id = account_id
         init_cash = _to_float(payload.get("init_cash"), None)
         if init_cash is not None:
             self.initial_cash = init_cash
