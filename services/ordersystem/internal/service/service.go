@@ -113,6 +113,10 @@ func (s *Service) CreateTrade(ctx context.Context, req model.CreateTradeRequest)
 	if mode == "" {
 		mode = s.cfg.AppMode
 	}
+	mode, err := normalizeRuntimeMode(mode)
+	if err != nil {
+		return model.CreateTradeResponse{}, err
+	}
 
 	side := strings.ToUpper(strings.TrimSpace(req.Side))
 	if side == "" {
@@ -140,57 +144,54 @@ func (s *Service) CreateTrade(ctx context.Context, req model.CreateTradeRequest)
 	entryOrderIDs := make([]string, 0, 1)
 	slOrderIDs := make([]string, 0, 1)
 
-	isProduction := strings.EqualFold(mode, "production")
-	if isProduction {
-		if s.upstox == nil || !s.upstox.Enabled() {
-			return model.CreateTradeResponse{}, fmt.Errorf("production mode is enabled but upstox client is not configured")
+	if s.upstox == nil || !s.upstox.Enabled() {
+		return model.CreateTradeResponse{}, fmt.Errorf("%s mode is enabled but upstox client is not configured", mode)
+	}
+
+	entryResp, err := s.upstox.PlaceOrder(ctx, upstox.PlaceOrderRequest{
+		Quantity:        req.Qty,
+		Product:         product,
+		Validity:        validity,
+		Price:           0,
+		Tag:             req.TagEntry,
+		InstrumentToken: req.InstrumentToken,
+		OrderType:       "MARKET",
+		TransactionType: side,
+		DisclosedQty:    0,
+		TriggerPrice:    0,
+		IsAMO:           false,
+		Slice:           true,
+	})
+	if err != nil {
+		return model.CreateTradeResponse{}, fmt.Errorf("place entry order: %w", err)
+	}
+	entryOrderIDs = append(entryOrderIDs, entryResp.OrderIDs...)
+
+	if req.SLTrigger != nil && *req.SLTrigger > 0 {
+		slLimit := *req.SLTrigger
+		if req.SLLimit != nil && *req.SLLimit > 0 {
+			slLimit = *req.SLLimit
 		}
 
-		entryResp, err := s.upstox.PlaceOrder(ctx, upstox.PlaceOrderRequest{
+		slTxnType := oppositeSide(side)
+		slResp, err := s.upstox.PlaceOrder(ctx, upstox.PlaceOrderRequest{
 			Quantity:        req.Qty,
 			Product:         product,
 			Validity:        validity,
-			Price:           0,
-			Tag:             req.TagEntry,
+			Price:           slLimit,
+			Tag:             req.TagSL,
 			InstrumentToken: req.InstrumentToken,
-			OrderType:       "MARKET",
-			TransactionType: side,
+			OrderType:       "SL",
+			TransactionType: slTxnType,
 			DisclosedQty:    0,
-			TriggerPrice:    0,
-			IsAMO:           false,
-			Slice:           true,
+			TriggerPrice:    *req.SLTrigger,
+			IsAMO:           req.IsAMO,
+			Slice:           slice,
 		})
 		if err != nil {
-			return model.CreateTradeResponse{}, fmt.Errorf("place entry order: %w", err)
+			return model.CreateTradeResponse{}, fmt.Errorf("place stoploss order: %w", err)
 		}
-		entryOrderIDs = append(entryOrderIDs, entryResp.OrderIDs...)
-
-		if req.SLTrigger != nil && *req.SLTrigger > 0 {
-			slLimit := *req.SLTrigger
-			if req.SLLimit != nil && *req.SLLimit > 0 {
-				slLimit = *req.SLLimit
-			}
-
-			slTxnType := oppositeSide(side)
-			slResp, err := s.upstox.PlaceOrder(ctx, upstox.PlaceOrderRequest{
-				Quantity:        req.Qty,
-				Product:         product,
-				Validity:        validity,
-				Price:           slLimit,
-				Tag:             req.TagSL,
-				InstrumentToken: req.InstrumentToken,
-				OrderType:       "SL",
-				TransactionType: slTxnType,
-				DisclosedQty:    0,
-				TriggerPrice:    *req.SLTrigger,
-				IsAMO:           req.IsAMO,
-				Slice:           slice,
-			})
-			if err != nil {
-				return model.CreateTradeResponse{}, fmt.Errorf("place stoploss order: %w", err)
-			}
-			slOrderIDs = append(slOrderIDs, slResp.OrderIDs...)
-		}
+		slOrderIDs = append(slOrderIDs, slResp.OrderIDs...)
 	}
 
 	accountID, err := s.store.GetAccountIDForBotDate(ctx, req.BotName, req.CurrDate)
@@ -247,10 +248,7 @@ func (s *Service) CreateTrade(ctx context.Context, req model.CreateTradeRequest)
 		return model.CreateTradeResponse{}, err
 	}
 
-	message := "trade created"
-	if isProduction {
-		message = "trade created and orders placed on upstox"
-	}
+	message := fmt.Sprintf("trade created and orders placed on upstox (%s)", mode)
 
 	return model.CreateTradeResponse{
 		TradeID:       tradeID,
@@ -296,16 +294,17 @@ func (s *Service) ModifyTrade(ctx context.Context, tradeID string, req model.Mod
 	if mode == "" {
 		mode = s.cfg.AppMode
 	}
-	isProduction := strings.EqualFold(mode, "production")
+	mode, err := normalizeRuntimeMode(mode)
+	if err != nil {
+		return model.ModifyTradeResponse{}, err
+	}
 
 	stoploss, slLimit, spotTrailAnchor := req.Stoploss, req.SLLimit, req.SpotTrailAnchor
 	if err := validateModifyTradeRequest(req, stoploss, slLimit, spotTrailAnchor, validity, orderType); err != nil {
 		return model.ModifyTradeResponse{}, err
 	}
-	if isProduction {
-		if err := validateProductionModifyTradeRequest(orderType, stoploss, slLimit); err != nil {
-			return model.ModifyTradeResponse{}, err
-		}
+	if err := validateProductionModifyTradeRequest(orderType, stoploss, slLimit); err != nil {
+		return model.ModifyTradeResponse{}, err
 	}
 
 	if s.store == nil {
@@ -320,19 +319,8 @@ func (s *Service) ModifyTrade(ctx context.Context, tradeID string, req model.Mod
 		return model.ModifyTradeResponse{}, err
 	}
 
-	if !isProduction {
-		if err := s.persistModifiedTradeState(ctx, tradeID, stoploss, slLimit, spotTrailAnchor); err != nil {
-			return model.ModifyTradeResponse{}, err
-		}
-		return model.ModifyTradeResponse{
-			TradeID:          tradeID,
-			ModifiedOrderIDs: append([]string(nil), trade.SLOrderIDs...),
-			Message:          "trade modification saved in db because app is not in production mode",
-		}, nil
-	}
-
 	if s.upstox == nil || !s.upstox.Enabled() {
-		return model.ModifyTradeResponse{}, fmt.Errorf("production mode is enabled but upstox client is not configured")
+		return model.ModifyTradeResponse{}, fmt.Errorf("%s mode is enabled but upstox client is not configured", mode)
 	}
 	if len(trade.SLOrderIDs) == 0 {
 		return model.ModifyTradeResponse{}, fmt.Errorf("trade has no stoploss orders to modify")
@@ -380,8 +368,154 @@ func (s *Service) ModifyTrade(ctx context.Context, tradeID string, req model.Mod
 	return model.ModifyTradeResponse{
 		TradeID:          tradeID,
 		ModifiedOrderIDs: modifiedOrderIDs,
-		Message:          "trade stoploss orders modified on upstox",
+		Message:          fmt.Sprintf("trade stoploss orders modified on upstox (%s)", mode),
 	}, nil
+}
+
+func (s *Service) SquareOffTrade(ctx context.Context, tradeID string, req model.SquareOffTradeRequest) (model.SquareOffTradeResponse, error) {
+	tradeID = strings.TrimSpace(tradeID)
+	if tradeID == "" {
+		return model.SquareOffTradeResponse{}, fmt.Errorf("trade id is required")
+	}
+	if req.ExitPrice <= 0 {
+		return model.SquareOffTradeResponse{}, fmt.Errorf("exit_price must be > 0")
+	}
+	if req.DisclosedQty < 0 {
+		return model.SquareOffTradeResponse{}, fmt.Errorf("disclosed_quantity must be >= 0")
+	}
+	validity := strings.ToUpper(strings.TrimSpace(req.Validity))
+	if validity == "" {
+		validity = "DAY"
+	}
+	if validity != "DAY" && validity != "IOC" {
+		return model.SquareOffTradeResponse{}, fmt.Errorf("validity must be DAY or IOC")
+	}
+
+	mode := strings.TrimSpace(req.Mode)
+	if mode == "" {
+		mode = s.cfg.AppMode
+	}
+	mode, err := normalizeRuntimeMode(mode)
+	if err != nil {
+		return model.SquareOffTradeResponse{}, err
+	}
+	exitStatus := strings.TrimSpace(req.Reason)
+	if exitStatus == "" {
+		exitStatus = "EOD_SQUARE_OFF"
+	}
+
+	if s.store == nil {
+		return model.SquareOffTradeResponse{}, fmt.Errorf("store is not configured")
+	}
+	trade, err := s.store.GetTradeByID(ctx, tradeID)
+	if err != nil {
+		return model.SquareOffTradeResponse{}, fmt.Errorf("load trade: %w", err)
+	}
+	if isClosedTradeStatus(trade.Status) {
+		return model.SquareOffTradeResponse{
+			TradeID:   tradeID,
+			Status:    trade.Status,
+			ExitPrice: trade.ExitPrice,
+			ExitTime:  trade.ExitTime,
+			Message:   "trade is already closed",
+		}, nil
+	}
+
+	exitOrderIDs := append([]string(nil), trade.SLOrderIDs...)
+	if s.upstox == nil || !s.upstox.Enabled() {
+		return model.SquareOffTradeResponse{}, fmt.Errorf("%s mode is enabled but upstox client is not configured", mode)
+	}
+	exitOrderIDs, err = s.squareOffBrokerOrders(ctx, trade, validity, req.DisclosedQty)
+	if err != nil {
+		return model.SquareOffTradeResponse{}, err
+	}
+
+	if err := s.store.SquareOffTrade(ctx, tradeID, exitOrderIDs, req.ExitPrice, trade.Qty, req.ExitTime, exitStatus); err != nil {
+		return model.SquareOffTradeResponse{}, err
+	}
+
+	closedTrade, err := s.store.GetTradeByID(ctx, tradeID)
+	if err != nil {
+		return model.SquareOffTradeResponse{}, fmt.Errorf("reload squared-off trade: %w", err)
+	}
+
+	return model.SquareOffTradeResponse{
+		TradeID:      tradeID,
+		Status:       closedTrade.Status,
+		ExitOrderIDs: exitOrderIDs,
+		ExitPrice:    closedTrade.ExitPrice,
+		ExitTime:     closedTrade.ExitTime,
+		Message:      fmt.Sprintf("trade squared off (%s)", mode),
+	}, nil
+}
+
+func (s *Service) squareOffBrokerOrders(ctx context.Context, trade model.Trade, validity string, disclosedQty int) ([]string, error) {
+	if len(trade.SLOrderIDs) == 0 {
+		if strings.TrimSpace(trade.InstrumentToken) == "" {
+			return nil, fmt.Errorf("trade instrument_token is required for square-off order")
+		}
+		if trade.Qty <= 0 {
+			return nil, fmt.Errorf("trade qty is required for square-off order")
+		}
+		product := strings.ToUpper(strings.TrimSpace(trade.Product))
+		if product == "" {
+			product = "D"
+		}
+
+		resp, err := s.upstox.PlaceOrder(ctx, upstox.PlaceOrderRequest{
+			Quantity:        trade.Qty,
+			Product:         product,
+			Validity:        validity,
+			Price:           0,
+			InstrumentToken: trade.InstrumentToken,
+			OrderType:       "MARKET",
+			TransactionType: oppositeSide(trade.Side),
+			DisclosedQty:    disclosedQty,
+			TriggerPrice:    0,
+			IsAMO:           false,
+			Slice:           true,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("place square-off order: %w", err)
+		}
+		return append([]string(nil), resp.OrderIDs...), nil
+	}
+
+	exitOrderIDs := make([]string, 0, len(trade.SLOrderIDs))
+	failedOrderMessages := make([]string, 0)
+	for _, slOrderID := range trade.SLOrderIDs {
+		orderID := strings.TrimSpace(slOrderID)
+		if orderID == "" {
+			continue
+		}
+		qty := squareOffBrokerOrderQuantity(trade, orderID)
+		if qty <= 0 {
+			failedOrderMessages = append(failedOrderMessages, fmt.Sprintf("%s: quantity missing", orderID))
+			continue
+		}
+		resp, err := s.upstox.ModifyOrder(ctx, upstox.ModifyOrderRequest{
+			Quantity:     qty,
+			Validity:     validity,
+			Price:        0,
+			OrderID:      orderID,
+			OrderType:    "MARKET",
+			DisclosedQty: disclosedQty,
+			TriggerPrice: 0,
+		})
+		if err != nil {
+			failedOrderMessages = append(failedOrderMessages, fmt.Sprintf("%s: %v", orderID, err))
+			continue
+		}
+		if strings.TrimSpace(resp.OrderID) != "" {
+			exitOrderIDs = append(exitOrderIDs, strings.TrimSpace(resp.OrderID))
+		} else {
+			exitOrderIDs = append(exitOrderIDs, orderID)
+		}
+	}
+	if len(failedOrderMessages) > 0 {
+		return nil, fmt.Errorf("square-off partially failed for trade_id=%s: %s", trade.ID, strings.Join(failedOrderMessages, "; "))
+	}
+	return exitOrderIDs, nil
 }
 
 func (s *Service) PollStopLossOrders(ctx context.Context) error {
@@ -630,10 +764,10 @@ func validateModifyTradeRequest(req model.ModifyTradeRequest, stoploss *float64,
 
 func validateProductionModifyTradeRequest(orderType string, stoploss *float64, slLimit *float64) error {
 	if stoploss == nil {
-		return fmt.Errorf("stoploss is required in production mode")
+		return fmt.Errorf("stoploss is required in sandbox/production mode")
 	}
 	if orderType == "SL" && slLimit == nil {
-		return fmt.Errorf("sl_limit is required for SL order modification in production mode")
+		return fmt.Errorf("sl_limit is required for SL order modification in sandbox/production mode")
 	}
 	return nil
 }
@@ -715,9 +849,52 @@ func slOrderQuantity(trade model.Trade, orderID string) int {
 	return 0
 }
 
+func squareOffBrokerOrderQuantity(trade model.Trade, orderID string) int {
+	orderID = strings.TrimSpace(orderID)
+	if orderID == "" {
+		return 0
+	}
+	for _, order := range trade.Orders {
+		if strings.TrimSpace(order.OrderID) == orderID && order.Qty > 0 {
+			return order.Qty
+		}
+	}
+	if trade.Qty <= 0 {
+		return 0
+	}
+	if len(trade.SLOrderIDs) <= 1 {
+		return trade.Qty
+	}
+	if trade.Qty%len(trade.SLOrderIDs) == 0 {
+		return trade.Qty / len(trade.SLOrderIDs)
+	}
+	return trade.Qty
+}
+
 func oppositeSide(side string) string {
 	if strings.EqualFold(strings.TrimSpace(side), "SELL") {
 		return "BUY"
 	}
 	return "SELL"
+}
+
+func normalizeRuntimeMode(mode string) (string, error) {
+	normalized := strings.ToLower(strings.TrimSpace(mode))
+	switch normalized {
+	case "", config.ModeSandbox:
+		return config.ModeSandbox, nil
+	case "prod", config.ModeProduction:
+		return config.ModeProduction, nil
+	default:
+		return "", fmt.Errorf("mode must be sandbox or production")
+	}
+}
+
+func isClosedTradeStatus(status string) bool {
+	switch strings.ToUpper(strings.TrimSpace(status)) {
+	case "TARGET HIT", "STOPLOSS HIT", "MANUAL EXIT", "EOD_SQUARE_OFF":
+		return true
+	default:
+		return false
+	}
 }

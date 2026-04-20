@@ -48,6 +48,10 @@ func (f *fakeService) ModifyTrade(context.Context, string, model.ModifyTradeRequ
 	return model.ModifyTradeResponse{}, nil
 }
 
+func (f *fakeService) SquareOffTrade(context.Context, string, model.SquareOffTradeRequest) (model.SquareOffTradeResponse, error) {
+	return model.SquareOffTradeResponse{}, nil
+}
+
 func TestCreateTradeEnsuresAccountFirst(t *testing.T) {
 	t.Parallel()
 

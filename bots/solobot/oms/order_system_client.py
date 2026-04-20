@@ -446,12 +446,27 @@ class OrderSystemClient:
         exit_price: Optional[float] = None,
         ts: Optional[datetime] = None,
         reason: Optional[str] = None,
-    ) -> None:
-        del exit_price, ts, reason
-        raise OrderSystemError(
-            "ordersystem HTTP API does not expose a square-off endpoint yet "
-            f"(trade_id={trade_id}). Add an OMS close/square-off endpoint before using this path."
-        )
+    ) -> Dict[str, Any]:
+        payload = _without_none({
+            "mode": self.mode,
+            "exit_price": _to_float(exit_price, None),
+            "exit_time": _normalize_timestamp(ts),
+            "reason": reason or constants.EOD_SQUARE_OFF,
+            "validity": self.validity,
+        })
+        response = self._request("POST", f"/v1/trades/{trade_id}/square-off", json=payload)
+        updates = {
+            "status": response.get("status") or payload.get("reason"),
+            "exit_price": response.get("exit_price") or payload.get("exit_price"),
+            "exit_time": _normalize_timestamp(response.get("exit_time") or payload.get("exit_time")),
+        }
+        self._patch_cached_trade(trade_id, updates)
+        self._patch_local_trade(trade_id, updates)
+
+        try:
+            return self.get_trade_by_id(trade_id)
+        except OrderSystemError:
+            return response
 
     def _init_local_ledger(self) -> None:
         path = Path(self.orders_csv)
