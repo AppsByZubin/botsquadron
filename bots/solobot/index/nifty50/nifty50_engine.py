@@ -332,11 +332,9 @@ async def nifty50_engine(strategy, mode, param_data):
             logger.error(f"Strategy {strategy} bot not initialized.")
             sys.exit(constants.FAIL_CODE)
 
-        # Extract instrument keys from selected contracts
-        instrument_keys = []
-        for strike_price, contracts in selected_contracts.items():
-            for contract in contracts:
-                instrument_keys.append(contract['instrument_key'])
+        # Reuse the validated instrument list built above and avoid treating the
+        # future contract dict like an iterable of option-contract dicts.
+        instrument_keys = list(dict.fromkeys(list_of_instruments))
 
         # Keep bot_id stable for the bot/mode/trading day so pod restarts update the same handler.
         bot_id = stable_bot_id(
