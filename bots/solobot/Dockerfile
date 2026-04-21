@@ -36,12 +36,13 @@ RUN groupadd --system app \
     && useradd --system --gid app --home-dir /app --create-home app
 
 COPY --chown=app:app bots/solobot ./bots/solobot
+COPY --chown=app:app files ./files
 
 RUN mkdir -p \
         logs \
-        bots/solobot/files/execution_results/mock \
-        bots/solobot/files/execution_results/sandbox \
-        bots/solobot/files/execution_results/prod \
+        files/execution_results/mock \
+        files/execution_results/sandbox \
+        files/execution_results/prod \
     && chown -R app:app /app
 
 USER app

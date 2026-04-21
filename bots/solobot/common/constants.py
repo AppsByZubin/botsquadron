@@ -13,7 +13,12 @@
 
 import os
 
-SOLOBOT_FILES_DIR = os.getenv("SOLOBOT_FILES_DIR", "bots/solobot/files").rstrip("/") or "bots/solobot/files"
+DEFAULT_SOLOBOT_FILES_DIR = "files"
+
+SOLOBOT_FILES_DIR = os.getenv("SOLOBOT_FILES_DIR", DEFAULT_SOLOBOT_FILES_DIR).rstrip("/") or DEFAULT_SOLOBOT_FILES_DIR
+if tuple(part for part in SOLOBOT_FILES_DIR.split("/") if part) == ("bots", "solobot", "files"):
+    SOLOBOT_FILES_DIR = DEFAULT_SOLOBOT_FILES_DIR
+
 SOLOBOT_EXECUTION_RESULTS_DIR = os.path.join(SOLOBOT_FILES_DIR, "execution_results")
 
 TREND_FILE = os.path.join(SOLOBOT_FILES_DIR, "trend.json")
