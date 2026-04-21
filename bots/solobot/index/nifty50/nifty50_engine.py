@@ -52,6 +52,100 @@ def _env_float(name, default):
     return value if value > 0 else default
 
 
+def _coerce_epoch_ms(value):
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return int(value)
+
+    raw = str(value).strip()
+    if not raw:
+        return None
+
+    try:
+        return int(float(raw))
+    except ValueError:
+        pass
+
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+    return int(dt.timestamp() * 1000)
+
+
+def _normalize_tick_payload(payload, instrument_keys_set, future_key):
+    if not isinstance(payload, dict):
+        return None
+
+    if "feeds" in payload:
+        return payload
+
+    instrument_key = str(payload.get("instrument_key") or "").strip()
+    if not instrument_key or instrument_key not in instrument_keys_set:
+        return None
+
+    ltp = payload.get("ltp", payload.get("price"))
+    ts_ms = _coerce_epoch_ms(
+        payload.get("ts_epoch_ms")
+        or payload.get("timestamp_ms")
+        or payload.get("ltt")
+        or payload.get("timestamp")
+    )
+    if ltp is None or ts_ms is None:
+        return None
+
+    try:
+        ltp = float(ltp)
+    except (TypeError, ValueError):
+        return None
+
+    if instrument_key == constants.NIFTY50_SYMBOL:
+        return {
+            "feeds": {
+                instrument_key: {
+                    "fullFeed": {
+                        "indexFF": {
+                            "ltpc": {"ltp": ltp, "ltt": ts_ms}
+                        }
+                    }
+                }
+            }
+        }
+
+    market_ff = {
+        "ltpc": {"ltp": ltp, "ltt": ts_ms},
+    }
+
+    # marketfeeder's flat schema documents "volume"; use it as the best
+    # available cumulative volume fallback for futures VWAP candle-building.
+    vtt = payload.get("vtt", payload.get("volume"))
+    if vtt is not None:
+        try:
+            market_ff["vtt"] = float(vtt)
+        except (TypeError, ValueError):
+            pass
+
+    gamma = payload.get("gamma")
+    if gamma is not None:
+        try:
+            gamma = float(gamma)
+        except (TypeError, ValueError):
+            pass
+        market_ff["optionGreeks"] = {"gamma": gamma}
+
+    return {
+        "feeds": {
+            instrument_key: {
+                "fullFeed": {
+                    "marketFF": market_ff
+                }
+            }
+        }
+    }
+
+
 async def _publish_marketfeeder_unsubscribe(nc, bot_id, instrument_keys=None):
     bot_id = str(bot_id or "").strip()
     if not bot_id:
@@ -264,6 +358,7 @@ async def nifty50_engine(strategy, mode, param_data):
                 list_of_instruments.append(contract["instrument_key"])
 
         list_of_instruments.append(constants.NIFTY50_SYMBOL)
+        
         # init bot
         strategy_key = str(strategy or "").strip().lower()
         pcr_vwap_ema_orb_key = str(constants.PCR_VWAP_EMA_ORB).strip().lower()
@@ -376,17 +471,25 @@ async def nifty50_engine(strategy, mode, param_data):
         )
 
         # Subscribe to tick data
+        tick_shape_state = {"flat_logged": False}
+
         async def tick_data_handler(msg):
             with last_msg_lock:
                 last_msg_epoch["t"] = t.time()
             try:
                 payload = json.loads(msg.data.decode())
-                if not isinstance(payload, dict):
-                    return
-
-                # Strategy expects the decoded full-feed envelope with "feeds".
-                if "feeds" in payload:
-                    bot.on_ws_message(payload)
+                normalized_message = _normalize_tick_payload(
+                    payload,
+                    instrument_keys_set,
+                    bot.nifty_future_key,
+                )
+                if normalized_message is not None:
+                    if "feeds" not in payload and not tick_shape_state["flat_logged"]:
+                        tick_shape_state["flat_logged"] = True
+                        logger.info(
+                            "Received flat marketfeeder ticks; normalizing to strategy feed envelope"
+                        )
+                    bot.on_ws_message(normalized_message)
                     return
 
                 # Heartbeat update already happened. Ignore non-feed payloads.
