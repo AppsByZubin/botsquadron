@@ -45,9 +45,9 @@ def premarket(upstox):
     """
     try:
 
-        last_trading_day = valid_market_date(Timestamp.now() - BDay(1))
+        last_trading_day = valid_market_date(Timestamp.now() - BDay(1), upstox=upstox)
         logger.debug(f"Last trading day determined as: {last_trading_day.strftime('%Y-%m-%d')}")
-        second_last_trading_day = valid_market_date(last_trading_day - BDay(1))
+        second_last_trading_day = valid_market_date(last_trading_day - BDay(1), upstox=upstox)
         logger.debug(f"Second last trading day determined as: {second_last_trading_day.strftime('%Y-%m-%d')}")
 
         nifty50_instrument_key = constants.NIFTY50_SYMBOL
@@ -100,7 +100,7 @@ def get_nifty_historical_data_previous_day(upstox, instrument_key):
     - fetch historical candles data for a given instrument key and date range.
     """
     try:
-        last_trading_day = valid_market_date(Timestamp.now() - BDay(1))
+        last_trading_day = valid_market_date(Timestamp.now() - BDay(1), upstox=upstox)
         to_date = last_trading_day.strftime('%Y-%m-%d')
 
         historical_data = upstox.get_historical_data(
@@ -206,6 +206,53 @@ def get_option_contracts(upstox, symbol):
         raise Exception(f"Failed to fetch option contracts: {e}")
 
 
+def _holiday_seed_file() -> Path:
+    return Path(constants.DEFAULT_SOLOBOT_FILES_DIR) / "holiday_list.json"
+
+
+def ensure_holiday_list_file(upstox=None) -> bool:
+    holiday_path = Path(constants.HOLIDAY_LIST_FILE)
+    if holiday_path.exists():
+        return True
+
+    holiday_path.parent.mkdir(parents=True, exist_ok=True)
+
+    seed_file = _holiday_seed_file()
+    if holiday_path != seed_file and seed_file.exists():
+        try:
+            with open(seed_file, "r", encoding="utf-8") as seed_handle:
+                holidays = json.load(seed_handle)
+            with open(holiday_path, "w", encoding="utf-8") as holiday_handle:
+                json.dump(holidays, holiday_handle, indent=4)
+            logger.info(f"Seeded holiday list from packaged file: {seed_file}")
+            return True
+        except Exception as exc:
+            logger.warning(f"Failed to seed holiday list from {seed_file}: {exc}")
+
+    if upstox is None:
+        logger.warning(f"Market holiday file not found and no upstox client available: {holiday_path}")
+        return False
+
+    result = upstox.get_holday_list()
+    logger.debug(f"Holiday status: {result.status}")
+    if result.status != constants.SUCCESS:
+        logger.error(f"Failed to fetch holiday list: {result.data}")
+        return False
+
+    holidays = []
+    for h in result.data:
+        body = {
+            "date": h._date.strftime("%Y-%m-%d"),
+            "description": h.description
+        }
+        holidays.append(body)
+
+    with open(holiday_path, "w", encoding="utf-8") as holiday_handle:
+        json.dump(holidays, holiday_handle, indent=4)
+    logger.info(f"Holiday list saved to file: {holiday_path}")
+    return True
+
+
 def is_market_holiday(upstox, date):
     """
     Args:
@@ -214,28 +261,8 @@ def is_market_holiday(upstox, date):
     Notes:
     - Check if the given date is a market holiday.
     """
-
-    # Check if the holiday file exists
-    if not os.path.exists(constants.HOLIDAY_LIST_FILE):
-        logger.warning(f"Market holiday file not found: {constants.HOLIDAY_LIST_FILE}")
-        result = upstox.get_holday_list()
-        logger.debug(f"Holiday status: {result.status}")
-        if result.status != constants.SUCCESS:
-            logger.error(f"Failed to fetch holiday list: {result.data}")
-            raise Exception("Holiday list fetch failed")
-        
-        holidays = []
-        for h in result.data:
-            body = {
-                "date": h._date.strftime("%Y-%m-%d"),
-                "description": h.description
-            }
-            holidays.append(body)
-
-        with open(constants.HOLIDAY_LIST_FILE, "w") as json_file:
-            json.dump(holidays, json_file, indent=4)
-        logger.debug(f"Saving holiday list to file. Total holidays: {len(holidays)}")
-
+    if not ensure_holiday_list_file(upstox=upstox):
+        return False
 
     if is_date_present_in_holiday_file(date):
         return True
@@ -243,7 +270,7 @@ def is_market_holiday(upstox, date):
     return False
 
 
-def is_date_present_in_holiday_file(date):
+def is_date_present_in_holiday_file(date, upstox=None):
     """
     Args:
     - date: Date to check (datetime object)
@@ -251,11 +278,18 @@ def is_date_present_in_holiday_file(date):
     Notes:
     - Check if the given date is present in the holiday file.
     """
+    if not ensure_holiday_list_file(upstox=upstox):
+        return False
 
-    # Check if the holiday file exists
-    # Load the holiday file
-    with open(constants.HOLIDAY_LIST_FILE, "r") as file:
-        holidays = json.load(file)
+    try:
+        with open(constants.HOLIDAY_LIST_FILE, "r", encoding="utf-8") as file:
+            holidays = json.load(file)
+    except FileNotFoundError:
+        logger.warning(f"Market holiday file still not available: {constants.HOLIDAY_LIST_FILE}")
+        return False
+    except Exception as exc:
+        logger.warning(f"Failed to read holiday list file {constants.HOLIDAY_LIST_FILE}: {exc}")
+        return False
 
     date_str = date.strftime('%Y-%m-%d')
     # Check if the given date is in the holiday list
@@ -267,7 +301,7 @@ def is_date_present_in_holiday_file(date):
     return False
 
 
-def valid_market_date(check_date):
+def valid_market_date(check_date, upstox=None):
     """
     Args:
     - date: Date to check
@@ -276,8 +310,7 @@ def valid_market_date(check_date):
     - Check if the given date is a valid market day (not a holiday).
     - User recursiopn to find the next valid market day.
     """
-
-    is_holiday = is_date_present_in_holiday_file(check_date)
+    is_holiday = is_date_present_in_holiday_file(check_date, upstox=upstox)
 
     # Normalize to date only
     if isinstance(check_date, datetime):
@@ -286,7 +319,7 @@ def valid_market_date(check_date):
     if is_holiday:
         logger.debug(f"The date {check_date.strftime('%Y-%m-%d')} is a market holiday.")
         new_date = check_date - BDay(1)
-        return valid_market_date(new_date)
+        return valid_market_date(new_date, upstox=upstox)
 
     return  check_date
 
