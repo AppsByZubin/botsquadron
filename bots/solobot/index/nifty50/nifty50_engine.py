@@ -478,7 +478,7 @@ async def nifty50_engine(strategy, mode, param_data):
                 last_msg_epoch["t"] = t.time()
             try:
                 payload = json.loads(msg.data.decode())
-                logger.debug(f"Received tick payload: {payload}")
+
                 normalized_message = _normalize_tick_payload(
                     payload,
                     instrument_keys_set,

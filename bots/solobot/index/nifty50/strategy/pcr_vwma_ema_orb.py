@@ -251,6 +251,37 @@ class PCRVwmaEmaOrbStrategy:
         return os.getenv("SOLOBOT_MODE") or os.getenv("APP_MODE")
 
     # ------------------------------------------------------------------
+    # Feed-shape helpers
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _extract_full_feed_node(data: Dict[str, Any]) -> Dict[str, Any]:
+        full_feed = data.get("fullFeed") or {}
+        if not isinstance(full_feed, dict):
+            return {}
+
+        # Upstox/NATS payloads may wrap the feed under FullFeedUnion with
+        # capitalized member names (MarketFF/IndexFF).
+        union = full_feed.get("FullFeedUnion")
+        if isinstance(union, dict):
+            return union
+        return full_feed
+
+    @classmethod
+    def _extract_index_ltpc(cls, data: Dict[str, Any]) -> Dict[str, Any]:
+        full_feed = cls._extract_full_feed_node(data)
+        index_ff = full_feed.get("indexFF") or full_feed.get("IndexFF") or {}
+        if not isinstance(index_ff, dict):
+            return {}
+        ltpc = index_ff.get("ltpc") or {}
+        return ltpc if isinstance(ltpc, dict) else {}
+
+    @classmethod
+    def _extract_market_ff(cls, data: Dict[str, Any]) -> Dict[str, Any]:
+        full_feed = cls._extract_full_feed_node(data)
+        market_ff = full_feed.get("marketFF") or full_feed.get("MarketFF") or {}
+        return market_ff if isinstance(market_ff, dict) else {}
+
+    # ------------------------------------------------------------------
     # ORB helpers
     # ------------------------------------------------------------------
     def _setup_orb_state(self) -> None:
@@ -496,7 +527,7 @@ class PCRVwmaEmaOrbStrategy:
             try:
                 # Index tick
                 if ik == constants.NIFTY50_SYMBOL:
-                    ltpc = data.get("fullFeed", {}).get("indexFF", {}).get("ltpc", {})
+                    ltpc = self._extract_index_ltpc(data)
                     if not ltpc:
                         continue
                     ltp = ltpc.get("ltp")
@@ -513,7 +544,7 @@ class PCRVwmaEmaOrbStrategy:
                     self._handle_index_tick(minute_key, ltp)
                 elif self.nifty_future_key and ik == self.nifty_future_key:
                     # Futures tick
-                    marketFF = data.get("fullFeed", {}).get("marketFF", {})
+                    marketFF = self._extract_market_ff(data)
                     ltpc = marketFF.get("ltpc", {})
                     if not ltpc:
                         continue
@@ -540,7 +571,7 @@ class PCRVwmaEmaOrbStrategy:
                     self._handle_fut_tick(minute_key, ltp)
                 else:
                     # Option tick -> update ATR stream for dynamic risk sizing.
-                    marketFF = data.get("fullFeed", {}).get("marketFF", {})
+                    marketFF = self._extract_market_ff(data)
                     ltpc = marketFF.get("ltpc", {})
                     if not ltpc:
                         continue
@@ -1317,12 +1348,12 @@ class PCRVwmaEmaOrbStrategy:
             ltp = None
             gamma = None
 
-            idx_ltpc = data.get("fullFeed", {}).get("indexFF", {}).get("ltpc", {})
+            idx_ltpc = self._extract_index_ltpc(data)
             if idx_ltpc:
                 ltp = idx_ltpc.get("ltp")
                 ts_ms = idx_ltpc.get("ltt")
 
-            mff = data.get("fullFeed", {}).get("marketFF", {})
+            mff = self._extract_market_ff(data)
             if mff:
                 ltpc = mff.get("ltpc", {})
                 if ltpc:
