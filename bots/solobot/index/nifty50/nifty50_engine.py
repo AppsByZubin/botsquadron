@@ -383,9 +383,9 @@ async def nifty50_engine(strategy, mode, param_data):
                 if not isinstance(payload, dict):
                     return
 
-                # Strategy expects full-feed envelope with "feeds".
+                # Strategy expects the decoded full-feed envelope with "feeds".
                 if "feeds" in payload:
-                    bot.on_ws_message(msg)
+                    bot.on_ws_message(payload)
                     return
 
                 # Heartbeat update already happened. Ignore non-feed payloads.
