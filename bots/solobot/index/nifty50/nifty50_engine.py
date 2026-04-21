@@ -263,6 +263,7 @@ async def nifty50_engine(strategy, mode, param_data):
             for contract in value:
                 list_of_instruments.append(contract["instrument_key"])
 
+        list_of_instruments.append(constants.NIFTY50_SYMBOL)
         # init bot
         strategy_key = str(strategy or "").strip().lower()
         pcr_vwap_ema_orb_key = str(constants.PCR_VWAP_EMA_ORB).strip().lower()
