@@ -385,11 +385,18 @@ def get_nifty_option_instruments(atm_price, trade_next_expiry=False):
     with open(constants.NIFTY50_OPTION_CONTRACTS_FILE, "r") as file:
         options = json.load(file)
 
-    dt = datetime.now(IST)
+    configured_expiry = str(trade_next_expiry or "").strip()
+    if not configured_expiry:
+        raise ValueError("strategy-parameters.trade_expiry is required")
 
-    # upcoming expiry (as per your existing logic)
-    nominal_expiry = trade_next_expiry
-    contracts = options[nominal_expiry]
+    if configured_expiry not in options:
+        available_expiries = sorted(str(key) for key in options.keys())
+        raise ValueError(
+            f"Configured trade_expiry {configured_expiry!r} not found in "
+            f"{constants.NIFTY50_OPTION_CONTRACTS_FILE}. Available expiries: {available_expiries}"
+        )
+
+    contracts = options[configured_expiry]
     
     selected_contracts = {}
 

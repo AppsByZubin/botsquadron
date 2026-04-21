@@ -116,6 +116,11 @@ async def nifty50_engine(strategy, mode, param_data):
             sp = (param_data or {}).get("strategy-parameters", {}) if isinstance(param_data, dict) else {}
         except Exception:
             sp = {}
+        logger.info(
+            "Loaded strategy expiries trade_expiry=%s pcr_expiry=%s",
+            sp.get("trade_expiry"),
+            sp.get("pcr_expiry"),
+        )
 
         def _safe_int(value, default):
             try:
