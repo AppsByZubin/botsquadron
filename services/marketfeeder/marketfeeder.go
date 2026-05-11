@@ -56,6 +56,8 @@ type BotHandler struct {
 	cancel         context.CancelFunc
 	natsConn       *nats.Conn
 	mu             sync.RWMutex
+	writeMu        sync.Mutex
+	wsRunning      bool
 }
 
 func NewBotManager(natsConn *nats.Conn) *BotManager {
@@ -89,13 +91,13 @@ func (bm *BotManager) handleInstrumentSubscription(msg *nats.Msg) {
 		bm.addOrUpdateBot(sub.BotID, sub.InstrumentKeys)
 	case "add":
 		if bot, exists := bm.bots[sub.BotID]; exists {
-			bot.addInstruments(sub.InstrumentKeys)
+			bot.addInstruments(sub.InstrumentKeys, bm.upstoxToken)
 		} else {
 			bm.addOrUpdateBot(sub.BotID, sub.InstrumentKeys)
 		}
 	case "remove":
 		if bot, exists := bm.bots[sub.BotID]; exists {
-			bot.removeInstruments(sub.InstrumentKeys)
+			bot.removeInstruments(sub.InstrumentKeys, bm.upstoxToken)
 		}
 	case "unsubscribe":
 		bm.removeBot(sub.BotID)
@@ -104,7 +106,7 @@ func (bm *BotManager) handleInstrumentSubscription(msg *nats.Msg) {
 
 func (bm *BotManager) addOrUpdateBot(botID string, instrumentKeys []string) {
 	if bot, exists := bm.bots[botID]; exists {
-		bot.updateInstruments(instrumentKeys)
+		bot.updateInstruments(instrumentKeys, bm.upstoxToken)
 	} else {
 		ctx, cancel := context.WithCancel(context.Background())
 		bot := &BotHandler{
@@ -120,7 +122,7 @@ func (bm *BotManager) addOrUpdateBot(botID string, instrumentKeys []string) {
 		}
 
 		bm.bots[botID] = bot
-		go bot.startWebSocket(bm.upstoxToken)
+		bot.ensureWebSocket(bm.upstoxToken)
 		log.Printf("Started new bot handler for %s with %d instruments", botID, len(instrumentKeys))
 	}
 }
@@ -139,8 +141,12 @@ func (bm *BotManager) removeBot(botID string) {
 	}
 
 	bot.cancel()
-	if bot.conn != nil {
-		if err := bot.conn.Close(); err != nil {
+	bot.mu.Lock()
+	conn := bot.conn
+	bot.conn = nil
+	bot.mu.Unlock()
+	if conn != nil {
+		if err := conn.Close(); err != nil {
 			log.Printf("Error closing websocket for bot %s: %v", botID, err)
 		}
 	}
@@ -155,23 +161,27 @@ func (bm *BotManager) shutdown() {
 	for botID, bot := range bm.bots {
 		log.Printf("Shutting down bot %s", botID)
 		bot.cancel()
-		if bot.conn != nil {
-			bot.conn.Close()
+		bot.mu.Lock()
+		conn := bot.conn
+		bot.conn = nil
+		bot.mu.Unlock()
+		if conn != nil {
+			conn.Close()
 		}
 	}
 }
 
-func (bh *BotHandler) updateInstruments(instrumentKeys []string) {
+func (bh *BotHandler) updateInstruments(instrumentKeys []string, token string) {
 	bh.mu.Lock()
-	defer bh.mu.Unlock()
-
 	bh.instrumentKeys = make(map[string]bool)
 	for _, key := range instrumentKeys {
 		bh.instrumentKeys[key] = true
 	}
+	conn := bh.conn
+	bh.mu.Unlock()
 
-	// Send updated subscription to websocket
-	if bh.conn != nil {
+	bh.ensureWebSocket(token)
+	if conn != nil {
 		if err := bh.sendSubscription(); err != nil {
 			log.Printf("Error sending updated subscription for bot %s: %v", bh.botID, err)
 		}
@@ -180,16 +190,16 @@ func (bh *BotHandler) updateInstruments(instrumentKeys []string) {
 	log.Printf("Updated instruments for bot %s: %d instruments", bh.botID, len(instrumentKeys))
 }
 
-func (bh *BotHandler) addInstruments(instrumentKeys []string) {
+func (bh *BotHandler) addInstruments(instrumentKeys []string, token string) {
 	bh.mu.Lock()
-	defer bh.mu.Unlock()
-
 	for _, key := range instrumentKeys {
 		bh.instrumentKeys[key] = true
 	}
+	conn := bh.conn
+	bh.mu.Unlock()
 
-	// Send updated subscription to websocket
-	if bh.conn != nil {
+	bh.ensureWebSocket(token)
+	if conn != nil {
 		if err := bh.sendSubscription(); err != nil {
 			log.Printf("Error sending updated subscription for bot %s: %v", bh.botID, err)
 		}
@@ -198,16 +208,16 @@ func (bh *BotHandler) addInstruments(instrumentKeys []string) {
 	log.Printf("Added instruments to bot %s: %d instruments", bh.botID, len(instrumentKeys))
 }
 
-func (bh *BotHandler) removeInstruments(instrumentKeys []string) {
+func (bh *BotHandler) removeInstruments(instrumentKeys []string, token string) {
 	bh.mu.Lock()
-	defer bh.mu.Unlock()
-
 	for _, key := range instrumentKeys {
 		delete(bh.instrumentKeys, key)
 	}
+	conn := bh.conn
+	bh.mu.Unlock()
 
-	// Send updated subscription to websocket
-	if bh.conn != nil {
+	bh.ensureWebSocket(token)
+	if conn != nil {
 		if err := bh.sendSubscription(); err != nil {
 			log.Printf("Error sending updated subscription for bot %s: %v", bh.botID, err)
 		}
@@ -216,7 +226,44 @@ func (bh *BotHandler) removeInstruments(instrumentKeys []string) {
 	log.Printf("Removed instruments from bot %s: %d instruments", bh.botID, len(instrumentKeys))
 }
 
+func (bh *BotHandler) ensureWebSocket(token string) {
+	bh.mu.Lock()
+	if bh.wsRunning {
+		bh.mu.Unlock()
+		return
+	}
+	if bh.ctx.Err() != nil {
+		bh.mu.Unlock()
+		return
+	}
+	bh.wsRunning = true
+	bh.mu.Unlock()
+
+	go bh.startWebSocket(token)
+}
+
 func (bh *BotHandler) startWebSocket(token string) {
+	log.Printf("Starting Upstox websocket for bot %s", bh.botID)
+
+	var conn *websocket.Conn
+	defer func() {
+		bh.mu.Lock()
+		if conn != nil && bh.conn == conn {
+			bh.conn = nil
+		}
+		shouldReconnect := bh.ctx.Err() == nil && len(bh.instrumentKeys) > 0
+		bh.wsRunning = false
+		bh.mu.Unlock()
+
+		if shouldReconnect {
+			retryWait := getenvSeconds("UPSTOX_WS_RECONNECT_WAIT_SEC", 5*time.Second)
+			log.Printf("Upstox websocket stopped for bot %s; reconnecting in %s", bh.botID, retryWait)
+			time.AfterFunc(retryWait, func() {
+				bh.ensureWebSocket(token)
+			})
+		}
+	}()
+
 	authorizedWSURL, err := getAuthorizedWSURL(token)
 	if err != nil {
 		log.Printf("Failed to get authorized websocket URL for bot %s: %v", bh.botID, err)
@@ -239,7 +286,10 @@ func (bh *BotHandler) startWebSocket(token string) {
 		return
 	}
 
+	log.Printf("Connected Upstox websocket for bot %s", bh.botID)
+	bh.mu.Lock()
 	bh.conn = conn
+	bh.mu.Unlock()
 	defer conn.Close()
 
 	if err := bh.sendSubscription(); err != nil {
@@ -247,20 +297,27 @@ func (bh *BotHandler) startWebSocket(token string) {
 		return
 	}
 
-	go bh.pingHandler()
+	go bh.pingHandler(conn)
 
 	for {
 		select {
 		case <-bh.ctx.Done():
 			return
 		default:
-			_, message, err := conn.ReadMessage()
+			messageType, message, err := conn.ReadMessage()
 			if err != nil {
 				log.Printf("WebSocket read error for bot %s: %v", bh.botID, err)
 				return
 			}
 
-			bh.handleTickData(message)
+			switch messageType {
+			case websocket.BinaryMessage:
+				bh.handleTickData(message)
+			case websocket.TextMessage:
+				log.Printf("Text websocket message for bot %s: %s", bh.botID, string(message))
+			default:
+				log.Printf("Unhandled websocket message type for bot %s: type=%d bytes=%d", bh.botID, messageType, len(message))
+			}
 		}
 	}
 }
@@ -271,6 +328,7 @@ func (bh *BotHandler) sendSubscription() error {
 	for key := range bh.instrumentKeys {
 		instrumentKeys = append(instrumentKeys, key)
 	}
+	conn := bh.conn
 	bh.mu.RUnlock()
 
 	req := subscriptionRequest{
@@ -285,11 +343,13 @@ func (bh *BotHandler) sendSubscription() error {
 		return err
 	}
 
-	if bh.conn == nil {
+	if conn == nil {
 		return fmt.Errorf("websocket connection is not established")
 	}
 
-	if err := bh.conn.WriteMessage(websocket.BinaryMessage, payload); err != nil {
+	bh.writeMu.Lock()
+	defer bh.writeMu.Unlock()
+	if err := conn.WriteMessage(websocket.BinaryMessage, payload); err != nil {
 		return err
 	}
 
@@ -297,7 +357,7 @@ func (bh *BotHandler) sendSubscription() error {
 	return nil
 }
 
-func (bh *BotHandler) pingHandler() {
+func (bh *BotHandler) pingHandler(conn *websocket.Conn) {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 
@@ -306,12 +366,12 @@ func (bh *BotHandler) pingHandler() {
 		case <-bh.ctx.Done():
 			return
 		case <-ticker.C:
-			if bh.conn != nil {
-				err := bh.conn.WriteMessage(websocket.PingMessage, []byte{})
-				if err != nil {
-					log.Printf("Ping failed for bot %s: %v", bh.botID, err)
-					return
-				}
+			bh.writeMu.Lock()
+			err := conn.WriteMessage(websocket.PingMessage, []byte{})
+			bh.writeMu.Unlock()
+			if err != nil {
+				log.Printf("Ping failed for bot %s: %v", bh.botID, err)
+				return
 			}
 		}
 	}
