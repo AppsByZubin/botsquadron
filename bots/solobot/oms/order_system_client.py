@@ -599,20 +599,9 @@ class OrderSystemClient:
             return response
 
     def _init_local_ledger(self) -> None:
-        path = Path(self.orders_csv)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        if not path.exists():
-            self._write_local_rows([])
-
-        daily_path = Path(self.daily_csv)
-        daily_path.parent.mkdir(parents=True, exist_ok=True)
-        if not daily_path.exists():
-            self._write_daily_rows([])
-
-        events_path = Path(self.events_json_path)
-        events_path.parent.mkdir(parents=True, exist_ok=True)
-        if not events_path.exists():
-            self._write_events_payload({"events": []})
+        _ensure_csv_file(self.orders_csv, ORDER_COLUMNS)
+        _ensure_csv_file(self.daily_csv, DAILY_PNL_COLUMNS)
+        _ensure_json_file(self.events_json_path, {"events": []})
 
     def _sync_account_trades(self, account: Mapping[str, Any]) -> None:
         trades = account.get("trades")
@@ -1248,6 +1237,78 @@ def _default_events_json(mode: str) -> str:
     if mode_key in events_by_mode:
         return events_by_mode[mode_key]
     return str(Path(constants.SOLOBOT_EXECUTION_RESULTS_DIR) / (mode_key or constants.MOCK) / "order_event_log.json")
+
+
+def initialize_local_ledgers_for_modes(modes: Optional[List[str]] = None) -> Dict[str, Dict[str, str]]:
+    initialized: Dict[str, Dict[str, str]] = {}
+    for raw_mode in modes or list(constants.EXECUTION_MODES):
+        mode = constants.normalize_execution_mode(raw_mode)
+        if mode not in constants.EXECUTION_MODES:
+            raise ValueError(f"unsupported execution mode for ledger initialization: {raw_mode}")
+
+        paths = {
+            "orders_csv": _default_orders_csv(mode),
+            "daily_csv": _default_daily_csv(mode),
+            "events_json": _default_events_json(mode),
+        }
+        _ensure_csv_file(paths["orders_csv"], ORDER_COLUMNS)
+        _ensure_csv_file(paths["daily_csv"], DAILY_PNL_COLUMNS)
+        _ensure_json_file(paths["events_json"], {"events": []})
+        initialized[mode] = paths
+    return initialized
+
+
+def _ensure_csv_file(path_value: str, fieldnames: List[str]) -> None:
+    path = Path(path_value)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        return
+
+    tmp_path = ""
+    try:
+        fd, tmp_path = tempfile.mkstemp(
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            dir=str(path.parent),
+        )
+        os.close(fd)
+        with open(tmp_path, "w", encoding="utf-8", newline="") as file:
+            writer = csv.DictWriter(file, fieldnames=fieldnames)
+            writer.writeheader()
+        os.replace(tmp_path, path)
+    except Exception as exc:
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
+        log.warning("Failed initializing local CSV ledger %s: %s", path, exc)
+
+
+def _ensure_json_file(path_value: str, payload: Mapping[str, Any]) -> None:
+    path = Path(path_value)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        return
+
+    tmp_path = ""
+    try:
+        fd, tmp_path = tempfile.mkstemp(
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            dir=str(path.parent),
+        )
+        os.close(fd)
+        with open(tmp_path, "w", encoding="utf-8") as file:
+            jsonlib.dump(payload, file, indent=2)
+        os.replace(tmp_path, path)
+    except Exception as exc:
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
+        log.warning("Failed initializing local JSON ledger %s: %s", path, exc)
 
 
 def _json_list(value: Any) -> List[str]:

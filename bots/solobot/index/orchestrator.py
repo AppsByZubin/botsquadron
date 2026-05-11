@@ -14,11 +14,11 @@
 """
 
 import asyncio
-from pathlib import Path
 import sys
 from common import constants
 from logger import create_logger
 from index.nifty50.nifty50_engine import nifty50_engine
+from oms.order_system_client import initialize_local_ledgers_for_modes
 from utils.bot_utils import load_param_data
 
 logger = create_logger("OrchestratorLogger")
@@ -42,16 +42,12 @@ def orchestrator(instruments, strategy, mode=None):
 
     logger.info(f"Starting orchestrator for instruments: {instruments} with strategy: {strategy}, mode: {mode}")
 
-    if mode == constants.MOCK:
-        path = Path(constants.MOCK_FOLDER_PATH)
-        path.mkdir(parents=True, exist_ok=True)
-    elif mode == constants.SANDBOX:
-        path = Path(constants.SANDBOX_FOLDER_PATH)
-        path.mkdir(parents=True, exist_ok=True)
-    elif mode == constants.PRODUCTION:
-        path = Path(constants.PROD_FOLDER_PATH)
-        path.mkdir(parents=True, exist_ok=True)
-    
+    ledger_paths = initialize_local_ledgers_for_modes(list(constants.EXECUTION_MODES))
+    logger.info(
+        f"Initialized local OMS ledgers under {constants.SOLOBOT_EXECUTION_RESULTS_DIR} "
+        f"for modes: {', '.join(ledger_paths.keys())}"
+    )
+
     param_data = load_param_data(mode)
     if param_data is None:
         logger.error("Param data not found in Helm-provided environment config.")
