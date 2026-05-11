@@ -1,4 +1,4 @@
-.PHONY: build build-ordersystem docker-build docker-build-ordersystem docker-build-solobot docker-build-all deploy-nats deploy-marketfeeder deploy-all clean test-nats install-python-deps
+.PHONY: build build-ordersystem docker-build docker-build-ordersystem docker-build-solobot docker-build-trendobot docker-build-all deploy-nats deploy-marketfeeder deploy-all clean test-nats install-python-deps install-trendobot-deps
 
 # Build the Go binary
 build:
@@ -20,12 +20,20 @@ docker-build-ordersystem: build-ordersystem
 docker-build-solobot:
 	docker build -f bots/solobot/Dockerfile -t solobot:latest .
 
+# Build the trendobot Docker image from the repo root so its runtime paths stay stable
+docker-build-trendobot:
+	docker build -f bots/trendobot/Dockerfile -t trendobot:latest .
+
 # Build every runtime image
-docker-build-all: docker-build docker-build-ordersystem docker-build-solobot
+docker-build-all: docker-build docker-build-ordersystem docker-build-solobot docker-build-trendobot
 
 # Install Python dependencies
 install-python-deps:
 	cd bots/solobot && pip3 install -r requirements.txt
+
+# Install trendobot Python dependencies
+install-trendobot-deps:
+	cd bots/trendobot && pip3 install -r requirements.txt
 
 # Test NATS communication
 test-nats: install-python-deps
@@ -51,3 +59,4 @@ clean:
 	docker rmi marketfeeder:latest --force
 	docker rmi ordersystem:latest --force
 	docker rmi solobot:latest --force
+	docker rmi trendobot:latest --force

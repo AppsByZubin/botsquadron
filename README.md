@@ -1,28 +1,29 @@
 # BotSquadron - Trading Bot Platform
 
-BotSquadron is a distributed trading bot platform that uses NATS for communication between trading bots (solobot) and market data feeders (marketfeeder).
+BotSquadron is a distributed trading bot platform that uses NATS for communication between trading bots (solobot, trendobot) and market data feeders (marketfeeder).
 
 ## Architecture
 
 ### Components
 
-1. **solobot** (Python): Trading bot that implements trading strategies
-2. **ordersystem** (Go): HTTP OMS that stores trades in PostgreSQL, places Upstox orders in sandbox/production, and polls SL status in production
-3. **marketfeeder** (Go): Market data feeder that connects to Upstox **v3** websockets
-4. **NATS**: Message broker for communication between components
+1. **solobot** (Python): Trading bot that implements PCR/VWAP/EMA/ORB strategies
+2. **trendobot** (Python): Trading bot that implements the production VWMA/EMA/Supertrend strategy
+3. **ordersystem** (Go): HTTP OMS that stores trades in PostgreSQL, places Upstox orders in sandbox/production, and polls SL status in production
+4. **marketfeeder** (Go): Market data feeder that connects to Upstox **v3** websockets
+5. **NATS**: Message broker for communication between components
 
 ### Communication Flow
 
 ```
-solobot → ordersystem → PostgreSQL
-solobot → NATS → marketfeeder → Upstox WebSocket → NATS → solobot
+solobot/trendobot → ordersystem → PostgreSQL
+solobot/trendobot → NATS → marketfeeder → Upstox WebSocket → NATS → solobot/trendobot
 ordersystem (sandbox/production mode) → Upstox Orders API
 ```
 
-1. solobot sends instrument keys to subscribe to marketfeeder via NATS
+1. A bot sends instrument keys to subscribe to marketfeeder via NATS
 2. marketfeeder creates Upstox websocket connections for those instruments
 3. marketfeeder receives tick data from Upstox and publishes it back to NATS
-4. solobot receives tick data from NATS and processes it for trading decisions
+4. The bot receives tick data from NATS and processes it for trading decisions
 
 ## Setup
 
@@ -122,6 +123,13 @@ cd bots/solobot
 python -m index.orchestrator nifty50 sma production
 ```
 
+### Running trendobot
+
+```bash
+cd bots/trendobot
+python main.py --instruments nifty50 --strategy vwma_ema_st --level mock
+```
+
 ### Testing NATS Communication
 
 ```bash
@@ -191,7 +199,7 @@ helm upgrade --install botsquadron ../botyard/helm/botsquadron \
   --create-namespace
 ```
 
-Set production credentials through the chart's `secretEnv` values, including `DATABASE_URL`, `UPSTOX_API_ACCESS_TOKEN`, and `upstox_api_access_token`. The chart deploys NATS, ordersystem, marketfeeder, and the solobot workload together.
+Set production credentials through the chart's `secretEnv` values, including `DATABASE_URL`, `UPSTOX_API_ACCESS_TOKEN`, and `upstox_api_access_token`. The chart deploys NATS, ordersystem, marketfeeder, and bot workloads together.
 
 Persistent runtime storage and stop/start operations are managed in the `botyard` Helm chart.
 
@@ -199,7 +207,7 @@ Persistent runtime storage and stop/start operations are managed in the `botyard
 
 ### Adding New Bots
 
-1. Create a new engine in `bots/solobot/index/`
+1. Create or update an engine under the relevant bot package, such as `bots/solobot/index/` or `bots/trendobot/index/`
 2. Implement the NATS communication pattern
 3. Update the orchestrator to route to your new engine
 
@@ -214,7 +222,7 @@ The marketfeeder can be extended to support multiple brokers by:
 ## Monitoring
 
 - NATS server provides built-in monitoring at `http://localhost:8222`
-- Logs are available in `bots/solobot/logs/` for solobot
+- Bot logs are written under each bot's configured log directory
 - marketfeeder logs to stdout/stderr
 
 ## Troubleshooting

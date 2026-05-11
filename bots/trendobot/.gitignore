@@ -1,0 +1,11 @@
+logs/
+.codex
+.agents
+
+__pycache__
+utils/__pycache__/
+index/__pycache__/
+broker/__pycache__/
+common/__pycache__/
+
+files/execution_results
