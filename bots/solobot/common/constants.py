@@ -74,6 +74,15 @@ UPSTOX_API_ACCESS_TOKEN = "upstox_api_access_token"
 UPSTOX_SANDBOX_API_ACCESS_TOKEN = "upstox_sandbox_api_access_token"
 UPSTOX_NSE_INSTRUMENT_FQDN = "https://assets.upstox.com/market-quote/instruments/exchange/NSE.json.gz"
 
+DO_S3_ENDPOINT_URL = "DO_S3_ENDPOINT_URL"
+DO_S3_REGION = "DO_S3_REGION"
+DO_S3_ACCESS_KEY_ID = "DO_S3_ACCESS_KEY_ID"
+DO_S3_SECRET_ACCESS_KEY = "DO_S3_SECRET_ACCESS_KEY"
+DO_S3_BUCKET_NAME = "DO_S3_BUCKET_NAME"
+DO_S3_SPACES_PREFIX = "DO_S3_SPACES_PREFIX"
+DO_S3_REQUIRED_BUCKET_NAME = "index-bucket"
+DO_S3_DEFAULT_PREFIX = "index-bucket-holder/trades"
+
 #Execution mode
 SANDBOX = "sandbox"
 MOCK="mock"

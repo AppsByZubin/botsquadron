@@ -22,6 +22,7 @@ sys.path.insert(0, str(SOLOBOT_DIR))
 from logger import create_logger
 from index.orchestrator import orchestrator
 from common import constants
+from utils.s3_upload_utils import upload_trade_artifacts_to_s3
 
 logger = create_logger("SoloBotMain")
 
@@ -48,3 +49,4 @@ if __name__ == "__main__":
     logger.info(f"Mode: {mode}")
 
     orchestrator(instruments, strategy, mode=mode)
+    upload_trade_artifacts_to_s3(bot_name="solobot", execution_mode=mode)
