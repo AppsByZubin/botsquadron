@@ -982,6 +982,41 @@ class OrderSystemClient:
                     pass
             log.warning("Failed writing local event log %s: %s", self.events_json_path, exc)
 
+    def _remaining_cash_for_event(self, trade: Mapping[str, Any]) -> float:
+        initial_cash = _to_float(self.initial_cash, 0.0) or 0.0
+        active_month = _month_year_key(self.month_year) or _month_year_key(self.curr_date)
+        current_trade_id = str(trade.get("id") or trade.get("trade_id") or "").strip()
+        current_trade_counted = False
+        realized_pnl = 0.0
+
+        for row in self._read_local_rows():
+            status = str(row.get("status") or "").strip().upper()
+            if status not in self.CLOSED_STATUSES:
+                continue
+
+            row_trade_id = str(row.get("id") or row.get("trade_id") or "").strip()
+            row_month = _month_year_key(row.get("exit_time")) or _month_year_key(row.get("timestamp"))
+            if active_month and row_month and row_month != active_month:
+                continue
+            if active_month and not row_month and row_trade_id != current_trade_id:
+                continue
+
+            pnl = _to_float(row.get("pnl"), None)
+            if pnl is None:
+                continue
+
+            realized_pnl += float(pnl)
+            if current_trade_id and row_trade_id == current_trade_id:
+                current_trade_counted = True
+
+        trade_status = str(trade.get("status") or "").strip().upper()
+        if trade_status in self.CLOSED_STATUSES and not current_trade_counted:
+            pnl = _to_float(trade.get("pnl"), None)
+            if pnl is not None:
+                realized_pnl += float(pnl)
+
+        return float(initial_cash) + float(realized_pnl)
+
     def _log_local_event(
         self,
         event_type: str,
@@ -1010,6 +1045,7 @@ class OrderSystemClient:
             "stoploss": _to_float(trade.get("stoploss"), None),
             "exit_price": _to_float(trade.get("exit_price"), None),
             "pnl": _to_float(trade.get("pnl"), None),
+            "remaining_cash": self._remaining_cash_for_event(trade),
             "exit_time": trade.get("exit_time"),
         }
         if extra:
@@ -1458,6 +1494,27 @@ def _timestamp_day_iso(value: Any) -> Optional[str]:
         except ValueError:
             pass
     return None
+
+
+def _month_year_key(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+
+    if text.isdigit() and len(text) == 6:
+        if 1 <= int(text[:2]) <= 12:
+            return text
+        if text.startswith(("19", "20")) and 1 <= int(text[4:]) <= 12:
+            return f"{text[4:]}{text[:4]}"
+
+    day = _timestamp_day_iso(text)
+    if day:
+        try:
+            return datetime.strptime(day, "%Y-%m-%d").strftime("%m%Y")
+        except ValueError:
+            pass
+
+    return ""
 
 
 def _decode_json(response: Response) -> Any:

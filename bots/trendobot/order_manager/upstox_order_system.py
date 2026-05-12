@@ -518,6 +518,7 @@ class UpstoxOrderManager:
             "trade_id": trade.get("id"),
             "symbol": trade.get("symbol"),
             "status": trade.get("status"),
+            "remaining_cash": float(self.cash),
             "extra": extra or {},
         }
         try:

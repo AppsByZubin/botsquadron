@@ -365,6 +365,7 @@ class MockOrderManager:
             "entry_order_id": trade.get("entry_order_id"),
             "sl_order_id": trade.get("sl_order_id"),
             "target_order_id": trade.get("target_order_id"),
+            "remaining_cash": float(self.cash),
         }
         if extra:
             evt.update(extra)
