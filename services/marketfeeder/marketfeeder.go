@@ -38,7 +38,7 @@ type LiveFeedPayload struct {
 }
 
 type FeedEntry struct {
-	FullFeed *FullFeed `json:"fullFeed,omitempty"`
+	FullFeed map[string]interface{} `json:"fullFeed,omitempty"`
 }
 
 type BotManager struct {
@@ -377,6 +377,67 @@ func (bh *BotHandler) pingHandler(conn *websocket.Conn) {
 	}
 }
 
+func ltpcJSON(ltpc *LTPC) map[string]interface{} {
+	if ltpc == nil {
+		return nil
+	}
+
+	return map[string]interface{}{
+		"ltp": ltpc.GetLtp(),
+		"ltt": ltpc.GetLtt(),
+		"ltq": ltpc.GetLtq(),
+		"cp":  ltpc.GetCp(),
+	}
+}
+
+func optionGreeksJSON(greeks *OptionGreeks) map[string]interface{} {
+	if greeks == nil {
+		return nil
+	}
+
+	return map[string]interface{}{
+		"delta": greeks.GetDelta(),
+		"theta": greeks.GetTheta(),
+		"gamma": greeks.GetGamma(),
+		"vega":  greeks.GetVega(),
+		"rho":   greeks.GetRho(),
+	}
+}
+
+func marketFullFeedJSON(feed *MarketFullFeed) map[string]interface{} {
+	if feed == nil {
+		return nil
+	}
+
+	out := map[string]interface{}{
+		"vtt": feed.GetVtt(),
+		"oi":  feed.GetOi(),
+		"iv":  feed.GetIv(),
+	}
+
+	if ltpc := ltpcJSON(feed.Ltpc); ltpc != nil {
+		out["ltpc"] = ltpc
+	}
+	if greeks := optionGreeksJSON(feed.OptionGreeks); greeks != nil {
+		out["optionGreeks"] = greeks
+	}
+
+	return out
+}
+
+func indexFullFeedJSON(feed *IndexFullFeed) map[string]interface{} {
+	if feed == nil {
+		return nil
+	}
+
+	out := map[string]interface{}{}
+	if ltpc := ltpcJSON(feed.Ltpc); ltpc != nil {
+		out["ltpc"] = ltpc
+	}
+
+	return out
+}
+
 func (bh *BotHandler) handleTickData(message []byte) {
 	// Parse the Protobuf-encoded tick data from Upstox v3 websocket
 	var feedResponse FeedResponse
@@ -411,18 +472,26 @@ func (bh *BotHandler) handleTickData(message []byte) {
 			}
 		case *Feed_FullFeed:
 			if feedUnion.FullFeed != nil {
+				fullFeed := make(map[string]interface{})
 				if marketFF := feedUnion.FullFeed.GetMarketFF(); marketFF != nil {
 					tick.Price = marketFF.Ltpc.GetLtp()
 					tick.Volume = marketFF.GetVtt()
+					fullFeed["marketFF"] = marketFullFeedJSON(marketFF)
 				} else if indexFF := feedUnion.FullFeed.GetIndexFF(); indexFF != nil {
 					tick.Price = indexFF.Ltpc.GetLtp()
 					tick.Volume = 0 // Index feeds may not have volume
+					fullFeed["indexFF"] = indexFullFeedJSON(indexFF)
+				}
+
+				if len(fullFeed) == 0 {
+					log.Printf("Full feed for bot %s had no marketFF/indexFF for instrument %s", bh.botID, instrumentKey)
+					continue
 				}
 
 				payload := LiveFeedPayload{
 					Type: "live_feed",
 					Feeds: map[string]FeedEntry{
-						instrumentKey: {FullFeed: feedUnion.FullFeed},
+						instrumentKey: {FullFeed: fullFeed},
 					},
 					CurrentTs: fmt.Sprintf("%d", feedResponse.CurrentTs),
 				}
@@ -432,8 +501,6 @@ func (bh *BotHandler) handleTickData(message []byte) {
 					log.Printf("Error marshaling full feed payload for bot %s: %v", bh.botID, err)
 					continue
 				}
-
-				log.Printf("Full feed payload for bot %s: %s", bh.botID, string(payloadJSON))
 
 				err = bh.natsConn.Publish("marketfeeder.tick_data", payloadJSON)
 				if err != nil {
@@ -634,6 +701,10 @@ func Run() {
 	_, err = nc.Subscribe("marketfeeder.remove_instruments", bm.handleInstrumentSubscription)
 	if err != nil {
 		log.Fatal(err)
+	}
+
+	if err := nc.Flush(); err != nil {
+		log.Fatalf("failed to flush NATS subscriptions: %v", err)
 	}
 
 	log.Println("Marketfeeder started. Listening for instrument subscriptions...")

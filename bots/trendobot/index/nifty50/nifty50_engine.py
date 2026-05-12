@@ -152,6 +152,18 @@ def _normalize_tick_payload(payload, instrument_keys_set, future_key):
     }
 
 
+async def _flush_nats(nc, timeout=2):
+    try:
+        await nc.flush(timeout=timeout)
+    except TypeError:
+        await nc.flush()
+
+
+async def _publish_marketfeeder_subscription(nc, payload):
+    await nc.publish(constants.NATS_SUBJECT_INSTRUMENT_KEYS, json.dumps(payload).encode())
+    await _flush_nats(nc)
+
+
 async def _publish_marketfeeder_unsubscribe(nc, bot_id, instrument_keys=None):
     bot_id = str(bot_id or "").strip()
     if not bot_id:
@@ -163,11 +175,7 @@ async def _publish_marketfeeder_unsubscribe(nc, bot_id, instrument_keys=None):
         "instrument_keys": list(instrument_keys or []),
         "action": "unsubscribe",
     }
-    await nc.publish(constants.NATS_SUBJECT_INSTRUMENT_KEYS, json.dumps(payload).encode())
-    try:
-        await nc.flush(timeout=2)
-    except TypeError:
-        await nc.flush()
+    await _publish_marketfeeder_subscription(nc, payload)
     logger.info(f"Published marketfeeder unsubscribe for bot_id={bot_id}")
 
 
@@ -480,9 +488,6 @@ async def nifty50_engine(strategy, mode, param_data):
             'action': 'subscribe'
             }
             
-        await nc.publish(constants.NATS_SUBJECT_INSTRUMENT_KEYS, json.dumps(instrument_data).encode())
-        logger.info(f"Published instrument keys to marketfeeder for bot {bot_id}: {len(instrument_keys)} instruments: {instrument_keys}")
-
         # NATS tick heartbeat/watchdog (equivalent intent to old WS last-msg tracking).
         instrument_keys_set = set(instrument_keys)
         last_msg_lock = threading.Lock()
@@ -507,7 +512,7 @@ async def nifty50_engine(strategy, mode, param_data):
         )
 
         # Subscribe to tick data
-        tick_shape_state = {"flat_logged": False}
+        tick_shape_state = {"flat_logged": False, "first_tick_logged": False}
 
         async def tick_data_handler(msg):
             with last_msg_lock:
@@ -521,6 +526,9 @@ async def nifty50_engine(strategy, mode, param_data):
                     getattr(bot, "index_fur_key", None),
                 )
                 if normalized_message is not None:
+                    if not tick_shape_state["first_tick_logged"]:
+                        tick_shape_state["first_tick_logged"] = True
+                        logger.info("Received first NATS tick payload from marketfeeder")
                     if "feeds" not in payload and not tick_shape_state["flat_logged"]:
                         tick_shape_state["flat_logged"] = True
                         logger.info(
@@ -556,16 +564,23 @@ async def nifty50_engine(strategy, mode, param_data):
                     f"Re-publishing subscribe for bot_id={bot_id}."
                 )
                 try:
-                    await nc.publish(constants.NATS_SUBJECT_INSTRUMENT_KEYS, json.dumps(instrument_data).encode())
+                    await _publish_marketfeeder_subscription(nc, instrument_data)
                 except Exception as pub_exc:
                     logger.warning(f"[NATS Watchdog] Failed to republish instrument subscription: {pub_exc}")
 
         sub = await nc.subscribe(constants.NATS_SUBJECT_TICK_DATA, cb=tick_data_handler)
+        await _flush_nats(nc)
         logger.info("Subscribed to tick data from marketfeeder")
         logger.info(
             f"NATS tick watchdog enabled={tick_watchdog_enabled}, "
             f"idle_timeout_sec={tick_idle_timeout_sec}, check_sec={tick_watchdog_check_sec}, "
             f"resubscribe_cooldown_sec={tick_resubscribe_cooldown_sec}"
+        )
+
+        await _publish_marketfeeder_subscription(nc, instrument_data)
+        logger.info(
+            f"Published instrument keys to marketfeeder for bot {bot_id}: "
+            f"{len(instrument_keys)} instruments: {instrument_keys}"
         )
 
         watchdog_task = None
