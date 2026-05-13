@@ -14,6 +14,7 @@ import json as jsonlib
 import math
 import os
 import tempfile
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional
@@ -77,10 +78,17 @@ DAILY_PNL_COLUMNS = [
 
 
 class OrderSystemError(RuntimeError):
-    def __init__(self, message: str, status_code: Optional[int] = None, payload: Any = None):
+    def __init__(
+        self,
+        message: str,
+        status_code: Optional[int] = None,
+        payload: Any = None,
+        retry_after: Optional[float] = None,
+    ):
         super().__init__(message)
         self.status_code = status_code
         self.payload = payload
+        self.retry_after = retry_after
 
 
 class OrderSystemClient:
@@ -163,9 +171,43 @@ class OrderSystemClient:
             or _default_events_json(self.mode)
         )
         self.session = session or requests.Session()
+        self.modify_min_interval_sec = max(
+            0.0,
+            float(_to_float(_first_env(
+                "ORDERSYSTEM_MODIFY_MIN_INTERVAL_SEC",
+                "ORDER_SYSTEM_MODIFY_MIN_INTERVAL_SEC",
+                "OMS_MODIFY_MIN_INTERVAL_SEC",
+            ), 1.0) or 0.0),
+        )
+        self.rate_limit_max_retries = max(
+            0,
+            int(_to_float(_first_env(
+                "ORDERSYSTEM_RATE_LIMIT_MAX_RETRIES",
+                "ORDER_SYSTEM_RATE_LIMIT_MAX_RETRIES",
+                "OMS_RATE_LIMIT_MAX_RETRIES",
+            ), 2) or 0),
+        )
+        self.rate_limit_base_sleep_sec = max(
+            0.1,
+            float(_to_float(_first_env(
+                "ORDERSYSTEM_RATE_LIMIT_BASE_SLEEP_SEC",
+                "ORDER_SYSTEM_RATE_LIMIT_BASE_SLEEP_SEC",
+                "OMS_RATE_LIMIT_BASE_SLEEP_SEC",
+            ), max(self.modify_min_interval_sec, 1.0)) or 1.0),
+        )
+        self.rate_limit_max_sleep_sec = max(
+            self.rate_limit_base_sleep_sec,
+            float(_to_float(_first_env(
+                "ORDERSYSTEM_RATE_LIMIT_MAX_SLEEP_SEC",
+                "ORDER_SYSTEM_RATE_LIMIT_MAX_SLEEP_SEC",
+                "OMS_RATE_LIMIT_MAX_SLEEP_SEC",
+            ), 15.0) or 15.0),
+        )
         self._last_trade_id: Optional[str] = None
         self._active_trade_by_symbol: Dict[str, str] = {}
         self._trade_cache: Dict[str, Dict[str, Any]] = {}
+        self._request_next_ok: Dict[str, float] = {}
+        self._request_backoff: Dict[str, float] = {}
         if self.local_copy_enabled:
             self._init_local_ledger()
 
@@ -595,12 +637,18 @@ class OrderSystemClient:
             update["stoploss"],
             update.get("sl_limit", 0.0),
         )
-        self.modify_trade(
-            resolved_trade_id,
-            stoploss=update["stoploss"],
-            sl_limit=update.get("sl_limit"),
-            spot_trail_anchor=price,
-        )
+        try:
+            self.modify_trade(
+                resolved_trade_id,
+                stoploss=update["stoploss"],
+                sl_limit=update.get("sl_limit"),
+                spot_trail_anchor=price,
+            )
+        except OrderSystemError as exc:
+            if _is_rate_limit_error(exc):
+                log.warning("Trailing SL modify deferred by rate limit trade_id=%s: %s", resolved_trade_id, exc)
+                return trade
+            raise
         trade.update({
             "stoploss": update["stoploss"],
             "sl_limit": update.get("sl_limit"),
@@ -1221,6 +1269,29 @@ class OrderSystemClient:
             return round(math.floor(n) * tick, 2)
         return round(round(n) * tick, 2)
 
+    def _wait_for_request_slot(self, request_key: str) -> None:
+        next_ok = self._request_next_ok.get(request_key, 0.0)
+        wait = next_ok - time.monotonic()
+        if wait > 0:
+            log.debug("Waiting %.2fs before %s", wait, request_key)
+            time.sleep(wait)
+
+    def _remember_successful_request(self, request_key: str) -> None:
+        self._request_backoff.pop(request_key, None)
+        if request_key == _MODIFY_REQUEST_KEY and self.modify_min_interval_sec > 0:
+            self._request_next_ok[request_key] = time.monotonic() + self.modify_min_interval_sec
+            return
+        self._request_next_ok.pop(request_key, None)
+
+    def _remember_rate_limited_request(self, request_key: str, response: Response) -> float:
+        retry_after = _retry_after_seconds(response)
+        if retry_after is None:
+            previous = self._request_backoff.get(request_key, 0.0)
+            retry_after = self.rate_limit_base_sleep_sec if previous <= 0 else min(previous * 2.0, self.rate_limit_max_sleep_sec)
+        self._request_backoff[request_key] = retry_after
+        self._request_next_ok[request_key] = time.monotonic() + retry_after
+        return retry_after
+
     def _request(
         self,
         method: str,
@@ -1229,28 +1300,50 @@ class OrderSystemClient:
         params: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         url = urljoin(self.base_url + "/", path.lstrip("/"))
-        try:
-            response = self.session.request(
-                method,
-                url,
-                json=json,
-                params=_without_none(params or {}),
-                timeout=self.timeout,
-            )
-        except requests.RequestException as exc:
-            raise OrderSystemError(f"{method} {url} failed: {exc}") from exc
+        request_key = _request_rate_limit_key(method, path)
+        max_attempts = self.rate_limit_max_retries + 1
 
-        payload = _decode_json(response)
-        if not 200 <= response.status_code < 300:
-            message = _response_error_message(response, payload)
-            raise OrderSystemError(
-                f"{method} {url} failed with status {response.status_code}: {message}",
-                status_code=response.status_code,
-                payload=payload,
-            )
-        if isinstance(payload, dict):
-            return payload
-        return {"data": payload}
+        for attempt in range(max_attempts):
+            self._wait_for_request_slot(request_key)
+            try:
+                response = self.session.request(
+                    method,
+                    url,
+                    json=json,
+                    params=_without_none(params or {}),
+                    timeout=self.timeout,
+                )
+            except requests.RequestException as exc:
+                raise OrderSystemError(f"{method} {url} failed: {exc}") from exc
+
+            payload = _decode_json(response)
+            if _is_rate_limited_response(response, payload):
+                wait = self._remember_rate_limited_request(request_key, response)
+                if attempt < self.rate_limit_max_retries:
+                    log.warning(
+                        "%s %s rate-limited with status %s; retrying in %.2fs",
+                        method,
+                        path,
+                        response.status_code,
+                        wait,
+                    )
+                    continue
+
+            if not 200 <= response.status_code < 300:
+                message = _response_error_message(response, payload)
+                raise OrderSystemError(
+                    f"{method} {url} failed with status {response.status_code}: {message}",
+                    status_code=response.status_code,
+                    payload=payload,
+                    retry_after=_retry_after_seconds(response),
+                )
+
+            self._remember_successful_request(request_key)
+            if isinstance(payload, dict):
+                return payload
+            return {"data": payload}
+
+        raise OrderSystemError(f"{method} {url} failed after rate-limit retries")
 
     def _sync_account_state(self, payload: Mapping[str, Any]) -> None:
         account_id = str(
@@ -1515,6 +1608,47 @@ def _month_year_key(value: Any) -> str:
             pass
 
     return ""
+
+
+_MODIFY_REQUEST_KEY = "POST /v1/trades/*/modify"
+
+
+def _request_rate_limit_key(method: str, path: str) -> str:
+    method_key = str(method or "").strip().upper()
+    clean_path = "/" + str(path or "").strip().lstrip("/")
+    if method_key == "POST" and clean_path.startswith("/v1/trades/") and clean_path.endswith("/modify"):
+        return _MODIFY_REQUEST_KEY
+    return f"{method_key} {clean_path}"
+
+
+def _retry_after_seconds(response: Response) -> Optional[float]:
+    value = response.headers.get("Retry-After") if response is not None else None
+    if value is None or str(value).strip() == "":
+        return None
+    try:
+        seconds = float(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    return seconds if seconds > 0 else None
+
+
+def _is_rate_limited_response(response: Response, payload: Any) -> bool:
+    if response.status_code == 429:
+        return True
+    if response.status_code not in {500, 502, 503, 504}:
+        return False
+    return _message_looks_rate_limited(_response_error_message(response, payload))
+
+
+def _is_rate_limit_error(exc: Exception) -> bool:
+    if isinstance(exc, OrderSystemError) and exc.status_code == 429:
+        return True
+    return _message_looks_rate_limited(str(exc))
+
+
+def _message_looks_rate_limited(message: str) -> bool:
+    lower = str(message or "").lower()
+    return any(token in lower for token in ("rate limit", "rate-limited", "rate limited", "too many requests", "(429)", "status 429"))
 
 
 def _decode_json(response: Response) -> Any:

@@ -47,7 +47,7 @@ type PlaceOrderRequest struct {
 	OrderType       string  `json:"order_type"`
 	TransactionType string  `json:"transaction_type"`
 	DisclosedQty    int     `json:"disclosed_quantity,omitempty"`
-	TriggerPrice    float64 `json:"trigger_price,omitempty"`
+	TriggerPrice    float64 `json:"trigger_price"`
 	IsAMO           bool    `json:"is_amo,omitempty"`
 	Slice           bool    `json:"slice"`
 }
@@ -65,7 +65,7 @@ type ModifyOrderRequest struct {
 	OrderID      string  `json:"order_id"`
 	OrderType    string  `json:"order_type"`
 	DisclosedQty int     `json:"disclosed_quantity,omitempty"`
-	TriggerPrice float64 `json:"trigger_price,omitempty"`
+	TriggerPrice float64 `json:"trigger_price"`
 }
 
 type ModifyOrderResult struct {
@@ -233,6 +233,11 @@ func (c *Client) ModifyOrder(ctx context.Context, req ModifyOrderRequest) (Modif
 		return ModifyOrderResult{}, fmt.Errorf("quantity must be > 0")
 	}
 
+	rateLimitKey := "modify-order"
+	if err := c.activeBrokerRateLimit(rateLimitKey, "modify order", req.OrderID); err != nil {
+		return ModifyOrderResult{}, err
+	}
+
 	body, err := json.Marshal(req)
 	if err != nil {
 		return ModifyOrderResult{}, fmt.Errorf("marshal modify order request: %w", err)
@@ -264,6 +269,9 @@ func (c *Client) ModifyOrder(ctx context.Context, req ModifyOrderRequest) (Modif
 	}
 
 	if httpResp.StatusCode >= 300 {
+		if httpResp.StatusCode == http.StatusTooManyRequests {
+			return ModifyOrderResult{}, c.rememberBrokerWriteRateLimit(rateLimitKey, "modify order", req.OrderID, httpResp.Header.Get("Retry-After"))
+		}
 		return ModifyOrderResult{}, fmt.Errorf("upstox modify order failed (%d): %s", httpResp.StatusCode, strings.TrimSpace(string(payload)))
 	}
 
@@ -280,6 +288,7 @@ func (c *Client) ModifyOrder(ctx context.Context, req ModifyOrderRequest) (Modif
 		orderID = strings.TrimSpace(req.OrderID)
 	}
 
+	c.rememberBrokerWriteSuccess(rateLimitKey)
 	return ModifyOrderResult{OrderID: orderID, RawData: data}, nil
 }
 
@@ -472,6 +481,44 @@ func (g *requestGate) Wait(ctx context.Context) error {
 	case <-timer.C:
 		return nil
 	}
+}
+
+func (c *Client) activeBrokerRateLimit(cacheKey string, operation string, orderID string) error {
+	c.brokerCacheMu.Lock()
+	defer c.brokerCacheMu.Unlock()
+
+	now := time.Now()
+	if retryAt, ok := c.brokerNextOK[cacheKey]; ok {
+		if now.Before(retryAt) {
+			return RateLimitedError{Operation: operation, OrderID: strings.TrimSpace(orderID), RetryAt: retryAt}
+		}
+		delete(c.brokerNextOK, cacheKey)
+	}
+	return nil
+}
+
+func (c *Client) rememberBrokerWriteSuccess(cacheKey string) {
+	c.brokerCacheMu.Lock()
+	defer c.brokerCacheMu.Unlock()
+
+	delete(c.brokerBackoff, cacheKey)
+	delete(c.brokerNextOK, cacheKey)
+}
+
+func (c *Client) rememberBrokerWriteRateLimit(cacheKey string, operation string, orderID string, retryAfterHeader string) error {
+	c.brokerCacheMu.Lock()
+	defer c.brokerCacheMu.Unlock()
+
+	now := time.Now()
+	backoff := nextBackoff(c.brokerBackoff[cacheKey])
+	if retryAfter := parseRetryAfter(retryAfterHeader, now); retryAfter > backoff {
+		backoff = retryAfter
+	}
+
+	retryAt := now.Add(backoff)
+	c.brokerBackoff[cacheKey] = backoff
+	c.brokerNextOK[cacheKey] = retryAt
+	return RateLimitedError{Operation: operation, OrderID: strings.TrimSpace(orderID), RetryAt: retryAt}
 }
 
 func (c *Client) getBrokerData(ctx context.Context, req brokerGETRequest) (json.RawMessage, error) {

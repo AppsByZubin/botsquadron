@@ -3,10 +3,12 @@ package upstox
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/AppsByZubin/botsquadron/services/ordersystem/internal/config"
 )
@@ -101,9 +103,59 @@ func TestClientModifyOrderSendsExpectedPayload(t *testing.T) {
 	}
 }
 
+func TestClientModifyOrderBacksOffOn429(t *testing.T) {
+	t.Parallel()
+
+	calls := 0
+	client := NewClient(config.Config{
+		UpstoxBaseURL:         "https://api.example.com",
+		UpstoxAccessToken:     "test-token",
+		UpstoxOrderModifyPath: "/v3/order/modify",
+	})
+	client.httpClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		calls++
+		header := make(http.Header)
+		header.Set("Retry-After", "3")
+		return &http.Response{
+			StatusCode: http.StatusTooManyRequests,
+			Header:     header,
+			Body:       io.NopCloser(strings.NewReader(`{"errors":[{"message":"Too Many Requests"}]}`)),
+		}, nil
+	})}
+
+	req := ModifyOrderRequest{
+		OrderID:      "order-123",
+		Quantity:     75,
+		Validity:     "DAY",
+		OrderType:    "SL",
+		TriggerPrice: 91,
+		Price:        90.5,
+	}
+	_, err := client.ModifyOrder(context.Background(), req)
+	var rateErr RateLimitedError
+	if !errors.As(err, &rateErr) {
+		t.Fatalf("first ModifyOrder error = %v, want RateLimitedError", err)
+	}
+	if rateErr.Operation != "modify order" || rateErr.OrderID != "order-123" {
+		t.Fatalf("rate error = %#v, want modify order/order-123", rateErr)
+	}
+	if time.Until(rateErr.RetryAt) <= 0 {
+		t.Fatalf("retry_at = %v, want future timestamp", rateErr.RetryAt)
+	}
+
+	_, err = client.ModifyOrder(context.Background(), req)
+	if !errors.As(err, &rateErr) {
+		t.Fatalf("second ModifyOrder error = %v, want RateLimitedError", err)
+	}
+	if calls != 1 {
+		t.Fatalf("broker calls = %d, want 1 because second call should be blocked locally", calls)
+	}
+}
+
 func TestClientPlaceOrderCapturesSlicedOrderIDs(t *testing.T) {
 	t.Parallel()
 
+	var rawBody string
 	client := NewClient(config.Config{
 		UpstoxBaseURL:        "https://api.example.com",
 		UpstoxAccessToken:    "test-token",
@@ -111,6 +163,12 @@ func TestClientPlaceOrderCapturesSlicedOrderIDs(t *testing.T) {
 		UpstoxAPIVersion:     "2.0",
 	})
 	client.httpClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read request body: %v", err)
+		}
+		rawBody = string(body)
+
 		return &http.Response{
 			StatusCode: http.StatusOK,
 			Header:     make(http.Header),
@@ -134,6 +192,9 @@ func TestClientPlaceOrderCapturesSlicedOrderIDs(t *testing.T) {
 	}
 	if len(resp.OrderIDs) != 2 || resp.OrderIDs[0] != "order-1" || resp.OrderIDs[1] != "order-2" {
 		t.Fatalf("order ids = %#v, want [order-1 order-2]", resp.OrderIDs)
+	}
+	if !strings.Contains(rawBody, `"trigger_price":0`) {
+		t.Fatalf("raw request body = %s, want trigger_price field preserved for zero values", rawBody)
 	}
 }
 

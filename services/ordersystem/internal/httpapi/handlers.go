@@ -3,12 +3,15 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/AppsByZubin/botsquadron/services/ordersystem/internal/model"
+	"github.com/AppsByZubin/botsquadron/services/ordersystem/internal/upstox"
 )
 
 type Handler struct {
@@ -154,10 +157,17 @@ func (h *Handler) handleModifyTrade(w http.ResponseWriter, r *http.Request) {
 	resp, err := h.business.ModifyTrade(ctx, tradeID, req)
 	if err != nil {
 		statusCode := http.StatusInternalServerError
-		if strings.Contains(strings.ToLower(err.Error()), "required") || strings.Contains(strings.ToLower(err.Error()), "must be") {
+		lowerErr := strings.ToLower(err.Error())
+		if upstox.IsRateLimited(err) || strings.Contains(lowerErr, "rate limited") || strings.Contains(lowerErr, "too many requests") || strings.Contains(lowerErr, "(429)") {
+			statusCode = http.StatusTooManyRequests
+			if retryAfter := retryAfterHeader(err); retryAfter != "" {
+				w.Header().Set("Retry-After", retryAfter)
+			}
+		}
+		if strings.Contains(lowerErr, "required") || strings.Contains(lowerErr, "must be") {
 			statusCode = http.StatusBadRequest
 		}
-		if strings.Contains(strings.ToLower(err.Error()), "no rows") {
+		if strings.Contains(lowerErr, "no rows") {
 			statusCode = http.StatusNotFound
 		}
 		writeJSON(w, statusCode, errorResponse{Error: err.Error()})
@@ -233,4 +243,16 @@ func writeJSON(w http.ResponseWriter, statusCode int, payload any) {
 	if err := json.NewEncoder(w).Encode(payload); err != nil {
 		log.Printf("write json response failed: %v", err)
 	}
+}
+
+func retryAfterHeader(err error) string {
+	var rateErr upstox.RateLimitedError
+	if !errors.As(err, &rateErr) || rateErr.RetryAt.IsZero() {
+		return ""
+	}
+	wait := time.Until(rateErr.RetryAt)
+	if wait < time.Second {
+		wait = time.Second
+	}
+	return strconv.Itoa(int(wait.Round(time.Second) / time.Second))
 }

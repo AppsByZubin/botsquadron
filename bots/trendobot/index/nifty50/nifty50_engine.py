@@ -312,10 +312,10 @@ async def nifty50_engine(strategy, mode, param_data):
         current_time = now_ist.time()
 
         market_start_time = time(9, 15)
-        market_end_time = time(15, 30)
+        market_end_time = time(15, 31)
 
-        if current_time > market_end_time:
-            logger.info("Market already closed for the day. Exiting.")
+        if current_time >= market_end_time:
+            logger.info("Market stop time reached at/after 15:31 IST. Breaking marketfeeder websocket and exiting.")
             cleanup_order_manager = OrderSystemClient.from_params(
                 strategy_name=strategy,
                 mode=mode,
@@ -328,7 +328,7 @@ async def nifty50_engine(strategy, mode, param_data):
                 cleanup_order_manager.curr_date,
             )
             await _publish_marketfeeder_unsubscribe(nc, bot_id)
-            sys.exit(constants.SUCCESS_CODE)
+            return
         
         elif current_time < market_start_time:
 																		  
@@ -595,7 +595,7 @@ async def nifty50_engine(strategy, mode, param_data):
                 if datetime.now(ist).time() >= market_end_time:
                     await _publish_marketfeeder_unsubscribe(nc, bot_id, instrument_keys)
                     marketfeeder_unsubscribed = True
-                    logger.info("Market closed at/after 15:30 IST. Stopping NATS subscriptions.")
+                    logger.info("Market stop time reached at/after 15:31 IST. Breaking marketfeeder websocket and stopping NATS subscriptions.")
                     break
                 await asyncio.sleep(1)
         finally:

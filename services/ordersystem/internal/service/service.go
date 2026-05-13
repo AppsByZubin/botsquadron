@@ -350,6 +350,9 @@ func (s *Service) ModifyTrade(ctx context.Context, tradeID string, req model.Mod
 			DisclosedQty: req.DisclosedQty,
 			TriggerPrice: float64Value(stoploss),
 		}); err != nil {
+			if upstox.IsRateLimited(err) {
+				return model.ModifyTradeResponse{}, fmt.Errorf("modify trade rate limited for trade_id=%s order_id=%s: %w", tradeID, orderID, err)
+			}
 			failedOrderMessages = append(failedOrderMessages, fmt.Sprintf("%s: %v", orderID, err))
 			continue
 		}
