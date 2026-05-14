@@ -13,7 +13,8 @@ import (
 )
 
 type fakeBusiness struct {
-	modifyErr error
+	modifyErr  error
+	createResp model.CreateTradeResponse
 }
 
 func (f fakeBusiness) CreateAccount(context.Context, model.CreateAccountRequest) (model.AccountResponse, error) {
@@ -21,7 +22,7 @@ func (f fakeBusiness) CreateAccount(context.Context, model.CreateAccountRequest)
 }
 
 func (f fakeBusiness) CreateTrade(context.Context, model.CreateTradeRequest) (model.CreateTradeResponse, error) {
-	return model.CreateTradeResponse{}, nil
+	return f.createResp, nil
 }
 
 func (f fakeBusiness) GetAccountDetails(context.Context, model.GetAccountDetailsRequest) (model.AccountDetailsResponse, error) {
@@ -30,6 +31,18 @@ func (f fakeBusiness) GetAccountDetails(context.Context, model.GetAccountDetails
 
 func (f fakeBusiness) GetTradeByID(context.Context, string) (model.Trade, error) {
 	return model.Trade{}, nil
+}
+
+func (f fakeBusiness) KillBot(context.Context, string, model.KillBotRequest) (model.BotKillSwitchResponse, error) {
+	return model.BotKillSwitchResponse{}, nil
+}
+
+func (f fakeBusiness) ResumeBot(context.Context, string, model.ResumeBotRequest) (model.BotKillSwitchResponse, error) {
+	return model.BotKillSwitchResponse{}, nil
+}
+
+func (f fakeBusiness) GetBotKillSwitch(context.Context, string) (model.BotKillSwitchResponse, error) {
+	return model.BotKillSwitchResponse{}, nil
 }
 
 func (f fakeBusiness) ModifyTrade(context.Context, string, model.ModifyTradeRequest) (model.ModifyTradeResponse, error) {
@@ -68,5 +81,32 @@ func TestHandleModifyTradeReturns429ForRateLimit(t *testing.T) {
 	}
 	if got := rec.Header().Get("Retry-After"); got == "" {
 		t.Fatalf("Retry-After header is empty, want retry guidance")
+	}
+}
+
+func TestHandleCreateTradeReturnsOKForKillMode(t *testing.T) {
+	t.Parallel()
+
+	handler := New(fakeBusiness{
+		createResp: model.CreateTradeResponse{
+			Status:  model.KillModeStatus,
+			Message: model.KillModeMessage,
+		},
+	}, 5*time.Second)
+
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/trades",
+		strings.NewReader(`{"bot_name":"bot-a","symbol":"NIFTY","instrument_token":"NSE_FO|1","qty":75}`),
+	)
+	rec := httptest.NewRecorder()
+
+	handler.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), model.KillModeMessage) {
+		t.Fatalf("body = %s, want kill-mode message", rec.Body.String())
 	}
 }

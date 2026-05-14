@@ -102,6 +102,9 @@ func (s *Store) EnsureSchema(ctx context.Context) error {
 	if err := s.ensureAccountsSchema(ctx); err != nil {
 		return err
 	}
+	if err := s.ensureBotRuntimeControlSchema(ctx); err != nil {
+		return err
+	}
 	if err := s.detectTradesTable(ctx); err != nil {
 		return err
 	}
@@ -115,6 +118,23 @@ func (s *Store) EnsureSchema(ctx context.Context) error {
 		return err
 	}
 
+	return nil
+}
+
+func (s *Store) ensureBotRuntimeControlSchema(ctx context.Context) error {
+	if _, err := s.pool.Exec(ctx, `
+CREATE TABLE IF NOT EXISTS bot_runtime_controls (
+    botname TEXT PRIMARY KEY,
+    kill_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+    reason TEXT,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+ALTER TABLE bot_runtime_controls ADD COLUMN IF NOT EXISTS kill_enabled BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE bot_runtime_controls ADD COLUMN IF NOT EXISTS reason TEXT;
+ALTER TABLE bot_runtime_controls ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+`); err != nil {
+		return fmt.Errorf("ensure bot runtime controls table: %w", err)
+	}
 	return nil
 }
 
@@ -618,6 +638,176 @@ LIMIT 1`, botName, monthYear).Scan(&account.ID, &account.BotName, &account.CurrD
 		return model.Account{}, fmt.Errorf("load account for bot/month_year: %w", err)
 	}
 	return account, nil
+}
+
+func (s *Store) GetBotKillSwitch(ctx context.Context, botName string) (model.BotKillSwitch, error) {
+	botName = normalizeBotName(botName)
+	if botName == "" {
+		return model.BotKillSwitch{}, fmt.Errorf("bot_name is required")
+	}
+
+	var state model.BotKillSwitch
+	if err := s.pool.QueryRow(ctx, `
+SELECT COALESCE(botname, ''), COALESCE(kill_enabled, false), COALESCE(reason, ''), COALESCE(updated_at, NOW())
+FROM bot_runtime_controls
+WHERE botname = $1`, botName).Scan(&state.BotName, &state.KillEnabled, &state.Reason, &state.UpdatedAt); err != nil {
+		if err == pgx.ErrNoRows {
+			return model.BotKillSwitch{BotName: botName, KillEnabled: false, UpdatedAt: time.Now().In(s.loc)}, nil
+		}
+		return model.BotKillSwitch{}, fmt.Errorf("load bot kill switch: %w", err)
+	}
+	return state, nil
+}
+
+func (s *Store) SetBotKillSwitch(ctx context.Context, botName string, enabled bool, reason string) (model.BotKillSwitch, error) {
+	botName = normalizeBotName(botName)
+	if botName == "" {
+		return model.BotKillSwitch{}, fmt.Errorf("bot_name is required")
+	}
+
+	var state model.BotKillSwitch
+	if err := s.pool.QueryRow(ctx, `
+INSERT INTO bot_runtime_controls (botname, kill_enabled, reason, updated_at)
+VALUES ($1, $2, NULLIF(BTRIM($3), ''), NOW())
+ON CONFLICT (botname)
+DO UPDATE SET
+    kill_enabled = EXCLUDED.kill_enabled,
+    reason = EXCLUDED.reason,
+    updated_at = NOW()
+RETURNING COALESCE(botname, ''), COALESCE(kill_enabled, false), COALESCE(reason, ''), COALESCE(updated_at, NOW())`,
+		botName, enabled, strings.TrimSpace(reason),
+	).Scan(&state.BotName, &state.KillEnabled, &state.Reason, &state.UpdatedAt); err != nil {
+		return model.BotKillSwitch{}, fmt.Errorf("set bot kill switch: %w", err)
+	}
+	return state, nil
+}
+
+func (s *Store) ListOpenTradesByBotDate(ctx context.Context, botName string, currDate string) ([]model.Trade, error) {
+	return s.listTradesByBotDateStatus(ctx, botName, currDate, true)
+}
+
+func (s *Store) ListClosedTradesByBotDate(ctx context.Context, botName string, currDate string) ([]model.Trade, error) {
+	return s.listTradesByBotDateStatus(ctx, botName, currDate, false)
+}
+
+func (s *Store) listTradesByBotDateStatus(ctx context.Context, botName string, currDate string, wantOpen bool) ([]model.Trade, error) {
+	account, err := s.GetAccountByBotDate(ctx, botName, currDate)
+	if err != nil {
+		if errors.Is(err, ErrAccountNotFound) {
+			return []model.Trade{}, nil
+		}
+		return nil, err
+	}
+
+	trades, err := s.ListTradesByAccountID(ctx, account.ID)
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]model.Trade, 0, len(trades))
+	for _, trade := range trades {
+		isOpen := isOpenTradeStatus(trade.Status)
+		if wantOpen == isOpen {
+			out = append(out, trade)
+		}
+	}
+	return out, nil
+}
+
+func (s *Store) MarkOpenTradesKilled(ctx context.Context, botName string, currDate string, exitOrderIDs []string, exitTime time.Time, exitStatus string) ([]model.Trade, error) {
+	openTrades, err := s.ListOpenTradesByBotDate(ctx, botName, currDate)
+	if err != nil {
+		return nil, err
+	}
+	if len(openTrades) == 0 {
+		return []model.Trade{}, nil
+	}
+
+	if exitTime.IsZero() {
+		exitTime = time.Now()
+	}
+	if strings.TrimSpace(exitStatus) == "" {
+		exitStatus = model.KillSwitchExitStatus
+	}
+	exitOrderIDs = cleanOrderIDs(exitOrderIDs)
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin mark killed transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	accountIDs := make(map[string]struct{})
+	for idx, trade := range openTrades {
+		tradeID := strings.TrimSpace(trade.ID)
+		if tradeID == "" {
+			continue
+		}
+		if strings.TrimSpace(trade.AccountID) != "" {
+			accountIDs[trade.AccountID] = struct{}{}
+		}
+
+		if _, err := tx.Exec(ctx, fmt.Sprintf(`
+UPDATE %s
+SET status = $2
+WHERE id::text = $1`, s.tradesTable), tradeID, strings.TrimSpace(exitStatus)); err != nil {
+			return nil, fmt.Errorf("mark trade killed: %w", err)
+		}
+
+		slUpdateResult, err := tx.Exec(ctx, fmt.Sprintf(`
+UPDATE %s
+SET exit_time = COALESCE(exit_time, $2)
+WHERE trade_id::text = $1
+  AND lower(COALESCE(order_type, '')) = 'sl'
+  AND exit_time IS NULL`, ordersTableName), tradeID, exitTime)
+		if err != nil {
+			return nil, fmt.Errorf("mark sl orders killed: %w", err)
+		}
+
+		assignedExitOrderIDs := exitOrderIDsForTrade(exitOrderIDs, idx, len(openTrades))
+		qtyPerExitOrder := squareOffQtyPerOrder(trade.Qty, len(assignedExitOrderIDs))
+		if slUpdateResult.RowsAffected() == 0 && len(assignedExitOrderIDs) == 0 {
+			if err := insertOrderTx(ctx, tx, tradeID, CreateOrderParams{
+				InstrumentToken: trade.InstrumentToken,
+				OrderType:       "sl",
+				Qty:             intPtrIfPositive(trade.Qty),
+				ExitTime:        &exitTime,
+			}); err != nil {
+				return nil, err
+			}
+		}
+		for _, orderID := range assignedExitOrderIDs {
+			if err := insertOrderTx(ctx, tx, tradeID, CreateOrderParams{
+				OrderID:         orderID,
+				InstrumentToken: trade.InstrumentToken,
+				OrderType:       "sl",
+				Qty:             intPtrIfPositive(qtyPerExitOrder),
+				ExitTime:        &exitTime,
+			}); err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	for accountID := range accountIDs {
+		if err := s.refreshAccountNetProfitFromOrdersTx(ctx, tx, accountID); err != nil {
+			return nil, err
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit mark killed transaction: %w", err)
+	}
+
+	closed := make([]model.Trade, 0, len(openTrades))
+	for _, trade := range openTrades {
+		reloaded, err := s.GetTradeByID(ctx, trade.ID)
+		if err != nil {
+			return nil, fmt.Errorf("reload killed trade: %w", err)
+		}
+		closed = append(closed, reloaded)
+	}
+	return closed, nil
 }
 
 func (s *Store) refreshAccountNetProfitFromOrdersTx(ctx context.Context, tx pgx.Tx, accountID string) error {
@@ -1444,6 +1634,34 @@ func cleanOrderIDs(values []string) []string {
 		}
 	}
 	return out
+}
+
+func exitOrderIDsForTrade(orderIDs []string, tradeIndex int, tradeCount int) []string {
+	orderIDs = cleanOrderIDs(orderIDs)
+	if len(orderIDs) == 0 || tradeCount <= 0 || tradeIndex < 0 || tradeIndex >= tradeCount {
+		return nil
+	}
+	if tradeCount == 1 {
+		return orderIDs
+	}
+	if len(orderIDs) == tradeCount {
+		return []string{orderIDs[tradeIndex]}
+	}
+	if len(orderIDs)%tradeCount == 0 {
+		perTrade := len(orderIDs) / tradeCount
+		start := tradeIndex * perTrade
+		return orderIDs[start : start+perTrade]
+	}
+	return nil
+}
+
+func isOpenTradeStatus(status string) bool {
+	switch strings.ToUpper(strings.TrimSpace(status)) {
+	case "", "OPEN", "PLACED", "ENTRY_PLACED":
+		return true
+	default:
+		return false
+	}
 }
 
 func squareOffOrderWhere(tradeID string, orderIDs []string) (string, []any) {

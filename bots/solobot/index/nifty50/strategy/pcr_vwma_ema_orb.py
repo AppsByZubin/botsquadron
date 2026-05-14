@@ -1105,6 +1105,7 @@ class PCRVwmaEmaOrbStrategy:
             constants.STOPLOSS_HIT.upper(),
             constants.MANUAL_EXIT.upper(),
             constants.EOD_SQUARE_OFF.upper(),
+            constants.KILL_SWITCH.upper(),
         }
 
     def _clear_order_container(self) -> None:
@@ -1177,6 +1178,7 @@ class PCRVwmaEmaOrbStrategy:
             constants.STOPLOSS_HIT.upper(),
             constants.MANUAL_EXIT.upper(),
             constants.EOD_SQUARE_OFF.upper(),
+            constants.KILL_SWITCH.upper(),
         }
 
         status_s = df["status"].astype(str).str.upper().str.strip()
@@ -1231,6 +1233,7 @@ class PCRVwmaEmaOrbStrategy:
             constants.STOPLOSS_HIT.upper(),
             constants.MANUAL_EXIT.upper(),
             constants.EOD_SQUARE_OFF.upper(),
+            constants.KILL_SWITCH.upper(),
         }
         if status not in closed_statuses:
             return

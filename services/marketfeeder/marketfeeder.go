@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -25,6 +26,7 @@ type InstrumentSubscription struct {
 }
 
 type TickData struct {
+	BotID         string    `json:"bot_id,omitempty"`
 	InstrumentKey string    `json:"instrument_key"`
 	Price         float64   `json:"price"`
 	Volume        int64     `json:"volume"`
@@ -32,6 +34,7 @@ type TickData struct {
 }
 
 type LiveFeedPayload struct {
+	BotID     string               `json:"bot_id,omitempty"`
 	Type      string               `json:"type"`
 	Feeds     map[string]FeedEntry `json:"feeds"`
 	CurrentTs string               `json:"currentTs"`
@@ -49,15 +52,17 @@ type BotManager struct {
 }
 
 type BotHandler struct {
-	botID          string
-	instrumentKeys map[string]bool
-	conn           *websocket.Conn
-	ctx            context.Context
-	cancel         context.CancelFunc
-	natsConn       *nats.Conn
-	mu             sync.RWMutex
-	writeMu        sync.Mutex
-	wsRunning      bool
+	botID           string
+	instrumentKeys  map[string]bool
+	conn            *websocket.Conn
+	ctx             context.Context
+	cancel          context.CancelFunc
+	natsConn        *nats.Conn
+	mu              sync.RWMutex
+	writeMu         sync.Mutex
+	wsRunning       bool
+	lastWSReadNano  int64
+	lastPublishNano int64
 }
 
 func NewBotManager(natsConn *nats.Conn) *BotManager {
@@ -242,6 +247,88 @@ func (bh *BotHandler) ensureWebSocket(token string) {
 	go bh.startWebSocket(token)
 }
 
+func (bh *BotHandler) markWSRead() {
+	atomic.StoreInt64(&bh.lastWSReadNano, time.Now().UnixNano())
+}
+
+func (bh *BotHandler) markPublished() {
+	now := time.Now().UnixNano()
+	atomic.StoreInt64(&bh.lastWSReadNano, now)
+	atomic.StoreInt64(&bh.lastPublishNano, now)
+}
+
+func idleForSince(nano int64, now time.Time) time.Duration {
+	if nano <= 0 {
+		return 0
+	}
+	return now.Sub(time.Unix(0, nano))
+}
+
+func watchdogCheckInterval(timeout time.Duration) time.Duration {
+	interval := timeout / 3
+	if interval < 5*time.Second {
+		return 5 * time.Second
+	}
+	if interval > 30*time.Second {
+		return 30 * time.Second
+	}
+	return interval
+}
+
+func (bh *BotHandler) closeWebSocket(conn *websocket.Conn, reason string) {
+	if conn == nil {
+		return
+	}
+	log.Printf("Closing Upstox websocket for bot %s: %s", bh.botID, reason)
+	bh.writeMu.Lock()
+	_ = conn.WriteControl(
+		websocket.CloseMessage,
+		websocket.FormatCloseMessage(websocket.CloseNormalClosure, reason),
+		time.Now().Add(5*time.Second),
+	)
+	bh.writeMu.Unlock()
+	_ = conn.Close()
+}
+
+func (bh *BotHandler) watchPublishIdle(conn *websocket.Conn, idleTimeout time.Duration, done <-chan struct{}) {
+	if idleTimeout <= 0 {
+		return
+	}
+
+	ticker := time.NewTicker(watchdogCheckInterval(idleTimeout))
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-bh.ctx.Done():
+			return
+		case <-done:
+			return
+		case <-ticker.C:
+			bh.mu.RLock()
+			activeConn := bh.conn
+			instrumentCount := len(bh.instrumentKeys)
+			bh.mu.RUnlock()
+			if activeConn != conn || instrumentCount == 0 {
+				return
+			}
+
+			now := time.Now()
+			lastPublish := atomic.LoadInt64(&bh.lastPublishNano)
+			idleFor := idleForSince(lastPublish, now)
+			if idleFor < idleTimeout {
+				continue
+			}
+
+			bh.closeWebSocket(
+				conn,
+				fmt.Sprintf("no NATS tick publish for %s (threshold %s)", idleFor.Round(time.Second), idleTimeout),
+			)
+			return
+		}
+	}
+}
+
 func (bh *BotHandler) startWebSocket(token string) {
 	log.Printf("Starting Upstox websocket for bot %s", bh.botID)
 
@@ -287,17 +374,43 @@ func (bh *BotHandler) startWebSocket(token string) {
 	}
 
 	log.Printf("Connected Upstox websocket for bot %s", bh.botID)
+	nowNano := time.Now().UnixNano()
+	atomic.StoreInt64(&bh.lastWSReadNano, nowNano)
+	atomic.StoreInt64(&bh.lastPublishNano, nowNano)
 	bh.mu.Lock()
 	bh.conn = conn
 	bh.mu.Unlock()
 	defer conn.Close()
+
+	readTimeout := getenvSeconds("UPSTOX_WS_READ_TIMEOUT_SEC", 90*time.Second)
+	publishIdleTimeout := getenvSeconds("UPSTOX_WS_PUBLISH_IDLE_TIMEOUT_SEC", 45*time.Second)
+	conn.SetReadLimit(16 * 1024 * 1024)
+	if err := conn.SetReadDeadline(time.Now().Add(readTimeout)); err != nil {
+		log.Printf("Failed to set websocket read deadline for bot %s: %v", bh.botID, err)
+	}
+	conn.SetPongHandler(func(appData string) error {
+		bh.markWSRead()
+		return conn.SetReadDeadline(time.Now().Add(readTimeout))
+	})
+	conn.SetPingHandler(func(appData string) error {
+		bh.markWSRead()
+		if err := conn.SetReadDeadline(time.Now().Add(readTimeout)); err != nil {
+			return err
+		}
+		bh.writeMu.Lock()
+		defer bh.writeMu.Unlock()
+		return conn.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(5*time.Second))
+	})
 
 	if err := bh.sendSubscription(); err != nil {
 		log.Printf("Failed to send subscription for bot %s: %v", bh.botID, err)
 		return
 	}
 
-	go bh.pingHandler(conn)
+	watchdogDone := make(chan struct{})
+	defer close(watchdogDone)
+	go bh.pingHandler(conn, watchdogDone)
+	go bh.watchPublishIdle(conn, publishIdleTimeout, watchdogDone)
 
 	for {
 		select {
@@ -312,10 +425,16 @@ func (bh *BotHandler) startWebSocket(token string) {
 
 			switch messageType {
 			case websocket.BinaryMessage:
+				bh.markWSRead()
+				if err := conn.SetReadDeadline(time.Now().Add(readTimeout)); err != nil {
+					log.Printf("Failed to refresh websocket read deadline for bot %s: %v", bh.botID, err)
+				}
 				bh.handleTickData(message)
 			case websocket.TextMessage:
+				bh.markWSRead()
 				log.Printf("Text websocket message for bot %s: %s", bh.botID, string(message))
 			default:
+				bh.markWSRead()
 				log.Printf("Unhandled websocket message type for bot %s: type=%d bytes=%d", bh.botID, messageType, len(message))
 			}
 		}
@@ -357,7 +476,7 @@ func (bh *BotHandler) sendSubscription() error {
 	return nil
 }
 
-func (bh *BotHandler) pingHandler(conn *websocket.Conn) {
+func (bh *BotHandler) pingHandler(conn *websocket.Conn, done <-chan struct{}) {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 
@@ -365,12 +484,15 @@ func (bh *BotHandler) pingHandler(conn *websocket.Conn) {
 		select {
 		case <-bh.ctx.Done():
 			return
+		case <-done:
+			return
 		case <-ticker.C:
 			bh.writeMu.Lock()
 			err := conn.WriteMessage(websocket.PingMessage, []byte{})
 			bh.writeMu.Unlock()
 			if err != nil {
 				log.Printf("Ping failed for bot %s: %v", bh.botID, err)
+				bh.closeWebSocket(conn, "ping failed")
 				return
 			}
 		}
@@ -460,6 +582,7 @@ func (bh *BotHandler) handleTickData(message []byte) {
 
 		// Extract tick data based on feed type
 		var tick TickData
+		tick.BotID = bh.botID
 		tick.InstrumentKey = instrumentKey
 		tick.Timestamp = time.Unix(feedResponse.CurrentTs/1000, (feedResponse.CurrentTs%1000)*1000000)
 
@@ -489,7 +612,8 @@ func (bh *BotHandler) handleTickData(message []byte) {
 				}
 
 				payload := LiveFeedPayload{
-					Type: "live_feed",
+					BotID: bh.botID,
+					Type:  "live_feed",
 					Feeds: map[string]FeedEntry{
 						instrumentKey: {FullFeed: fullFeed},
 					},
@@ -506,6 +630,7 @@ func (bh *BotHandler) handleTickData(message []byte) {
 				if err != nil {
 					log.Printf("Error publishing full feed payload for bot %s: %v", bh.botID, err)
 				} else {
+					bh.markPublished()
 					log.Printf("Published full feed payload for bot %s: %s", bh.botID, instrumentKey)
 				}
 				continue
@@ -533,6 +658,7 @@ func (bh *BotHandler) handleTickData(message []byte) {
 		if err != nil {
 			log.Printf("Error publishing tick data for bot %s: %v", bh.botID, err)
 		} else {
+			bh.markPublished()
 			log.Printf("Published tick data for bot %s: %s @ %.2f (vol: %d)", bh.botID, tick.InstrumentKey, tick.Price, tick.Volume)
 		}
 	}

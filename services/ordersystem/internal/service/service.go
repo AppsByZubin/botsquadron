@@ -99,6 +99,25 @@ func (s *Service) CreateTrade(ctx context.Context, req model.CreateTradeRequest)
 	if strings.TrimSpace(req.BotName) == "" {
 		return model.CreateTradeResponse{}, fmt.Errorf("bot_name is required")
 	}
+	if s.store == nil {
+		return model.CreateTradeResponse{}, fmt.Errorf("store is not configured")
+	}
+	killState, err := s.store.GetBotKillSwitch(ctx, req.BotName)
+	if err != nil {
+		return model.CreateTradeResponse{}, err
+	}
+	if killState.KillEnabled {
+		closedTrades, err := s.store.ListClosedTradesByBotDate(ctx, req.BotName, req.CurrDate)
+		if err != nil {
+			return model.CreateTradeResponse{}, err
+		}
+		return model.CreateTradeResponse{
+			Status:       model.KillModeStatus,
+			Message:      model.KillModeMessage,
+			ClosedTrades: closedTrades,
+			ClosedOrders: closedTrades,
+		}, nil
+	}
 	if strings.TrimSpace(req.Symbol) == "" {
 		return model.CreateTradeResponse{}, fmt.Errorf("symbol is required")
 	}
@@ -113,7 +132,7 @@ func (s *Service) CreateTrade(ctx context.Context, req model.CreateTradeRequest)
 	if mode == "" {
 		mode = s.cfg.AppMode
 	}
-	mode, err := normalizeRuntimeMode(mode)
+	mode, err = normalizeRuntimeMode(mode)
 	if err != nil {
 		return model.CreateTradeResponse{}, err
 	}
@@ -273,6 +292,130 @@ func accountResponse(account model.Account, message string) model.AccountRespons
 
 func (s *Service) GetTradeByID(ctx context.Context, tradeID string) (model.Trade, error) {
 	return s.store.GetTradeByID(ctx, tradeID)
+}
+
+func (s *Service) KillBot(ctx context.Context, botName string, req model.KillBotRequest) (model.BotKillSwitchResponse, error) {
+	botName = strings.TrimSpace(botName)
+	if botName == "" {
+		return model.BotKillSwitchResponse{}, fmt.Errorf("bot_name is required")
+	}
+	if s.store == nil {
+		return model.BotKillSwitchResponse{}, fmt.Errorf("store is not configured")
+	}
+	if strings.TrimSpace(req.Mode) != "" {
+		if _, err := normalizeRuntimeMode(req.Mode); err != nil {
+			return model.BotKillSwitchResponse{}, err
+		}
+	}
+
+	reason := strings.TrimSpace(req.Reason)
+	if reason == "" {
+		reason = model.KillSwitchExitStatus
+	}
+	state, err := s.store.SetBotKillSwitch(ctx, botName, true, reason)
+	if err != nil {
+		return model.BotKillSwitchResponse{}, err
+	}
+
+	openTrades, err := s.store.ListOpenTradesByBotDate(ctx, botName, req.CurrDate)
+	if err != nil {
+		return model.BotKillSwitchResponse{}, err
+	}
+
+	response := model.BotKillSwitchResponse{
+		BotName:     state.BotName,
+		CurrDate:    strings.TrimSpace(req.CurrDate),
+		KillEnabled: state.KillEnabled,
+		Status:      model.KillModeStatus,
+		Message:     "kill switch enabled",
+		Reason:      state.Reason,
+		Segment:     strings.TrimSpace(req.Segment),
+		UpdatedAt:   state.UpdatedAt,
+	}
+
+	if len(openTrades) == 0 {
+		response.Message = "kill switch enabled; no open trades found"
+		return response, nil
+	}
+
+	tags := killPositionTags(botName, req.Tag, openTrades)
+	response.Tags = tags
+
+	if s.upstox == nil || !s.upstox.Enabled() {
+		response.Errors = append(response.Errors, "upstox client is not configured; kill mode is enabled but broker orders were not changed")
+	} else {
+		cancelledSLOrderIDs, cancelErrors := s.cancelBotStopLossOrders(ctx, openTrades)
+		response.CancelledSLOrderIDs = cancelledSLOrderIDs
+		response.Errors = append(response.Errors, cancelErrors...)
+
+		exitOrderIDs, exitErrors := s.exitBotPositionsByTag(ctx, req.Segment, tags)
+		response.ExitOrderIDs = exitOrderIDs
+		response.Errors = append(response.Errors, exitErrors...)
+	}
+
+	closedTrades, err := s.store.MarkOpenTradesKilled(ctx, botName, req.CurrDate, response.ExitOrderIDs, time.Now(), model.KillSwitchExitStatus)
+	if err != nil {
+		return model.BotKillSwitchResponse{}, err
+	}
+	response.ClosedTrades = closedTrades
+	response.ClosedOrders = closedTrades
+	response.Message = "kill switch enabled; stoploss orders cancelled and positions exit requested"
+	if len(response.Errors) > 0 {
+		response.Message = "kill switch enabled with broker errors"
+	}
+	return response, nil
+}
+
+func (s *Service) ResumeBot(ctx context.Context, botName string, req model.ResumeBotRequest) (model.BotKillSwitchResponse, error) {
+	botName = strings.TrimSpace(botName)
+	if botName == "" {
+		return model.BotKillSwitchResponse{}, fmt.Errorf("bot_name is required")
+	}
+	if s.store == nil {
+		return model.BotKillSwitchResponse{}, fmt.Errorf("store is not configured")
+	}
+
+	state, err := s.store.SetBotKillSwitch(ctx, botName, false, req.Reason)
+	if err != nil {
+		return model.BotKillSwitchResponse{}, err
+	}
+	return model.BotKillSwitchResponse{
+		BotName:     state.BotName,
+		KillEnabled: state.KillEnabled,
+		Status:      "RESUMED",
+		Message:     "kill switch disabled; orders can be accepted",
+		Reason:      state.Reason,
+		UpdatedAt:   state.UpdatedAt,
+	}, nil
+}
+
+func (s *Service) GetBotKillSwitch(ctx context.Context, botName string) (model.BotKillSwitchResponse, error) {
+	botName = strings.TrimSpace(botName)
+	if botName == "" {
+		return model.BotKillSwitchResponse{}, fmt.Errorf("bot_name is required")
+	}
+	if s.store == nil {
+		return model.BotKillSwitchResponse{}, fmt.Errorf("store is not configured")
+	}
+
+	state, err := s.store.GetBotKillSwitch(ctx, botName)
+	if err != nil {
+		return model.BotKillSwitchResponse{}, err
+	}
+	status := "RESUMED"
+	message := "kill switch disabled; orders can be accepted"
+	if state.KillEnabled {
+		status = model.KillModeStatus
+		message = model.KillModeMessage
+	}
+	return model.BotKillSwitchResponse{
+		BotName:     state.BotName,
+		KillEnabled: state.KillEnabled,
+		Status:      status,
+		Message:     message,
+		Reason:      state.Reason,
+		UpdatedAt:   state.UpdatedAt,
+	}, nil
 }
 
 func (s *Service) ModifyTrade(ctx context.Context, tradeID string, req model.ModifyTradeRequest) (model.ModifyTradeResponse, error) {
@@ -519,6 +662,40 @@ func (s *Service) squareOffBrokerOrders(ctx context.Context, trade model.Trade, 
 		return nil, fmt.Errorf("square-off partially failed for trade_id=%s: %s", trade.ID, strings.Join(failedOrderMessages, "; "))
 	}
 	return exitOrderIDs, nil
+}
+
+func (s *Service) cancelBotStopLossOrders(ctx context.Context, trades []model.Trade) ([]string, []string) {
+	slOrderIDs := cleanStringSet(collectTradeSLOrderIDs(trades))
+	cancelled := make([]string, 0, len(slOrderIDs))
+	errs := make([]string, 0)
+
+	for _, orderID := range slOrderIDs {
+		resp, err := s.upstox.CancelOrder(ctx, orderID)
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("cancel sl order %s: %v", orderID, err))
+			continue
+		}
+		cancelled = append(cancelled, firstNonEmpty(resp.OrderID, orderID))
+	}
+
+	return cleanStringSet(cancelled), errs
+}
+
+func (s *Service) exitBotPositionsByTag(ctx context.Context, segment string, tags []string) ([]string, []string) {
+	exitOrderIDs := make([]string, 0)
+	errs := make([]string, 0)
+	for _, tag := range cleanStringSet(tags) {
+		resp, err := s.upstox.ExitPositions(ctx, upstox.ExitPositionsRequest{
+			Segment: strings.TrimSpace(segment),
+			Tag:     strings.TrimSpace(tag),
+		})
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("exit positions tag=%s: %v", tag, err))
+			continue
+		}
+		exitOrderIDs = append(exitOrderIDs, resp.OrderIDs...)
+	}
+	return cleanStringSet(exitOrderIDs), errs
 }
 
 func (s *Service) PollStopLossOrders(ctx context.Context) error {
@@ -874,6 +1051,70 @@ func squareOffBrokerOrderQuantity(trade model.Trade, orderID string) int {
 	return trade.Qty
 }
 
+func collectTradeSLOrderIDs(trades []model.Trade) []string {
+	out := make([]string, 0)
+	for _, trade := range trades {
+		out = append(out, trade.SLOrderIDs...)
+		for _, order := range trade.Orders {
+			if strings.EqualFold(strings.TrimSpace(order.OrderType), "sl") {
+				out = append(out, order.OrderID)
+			}
+		}
+	}
+	return out
+}
+
+func killPositionTags(botName string, requestedTag string, trades []model.Trade) []string {
+	if tag := strings.TrimSpace(requestedTag); tag != "" {
+		return []string{tag}
+	}
+	tags := make([]string, 0, len(trades))
+	for _, trade := range trades {
+		if tag := strings.TrimSpace(trade.TagEntry); tag != "" {
+			tags = append(tags, tag)
+		}
+	}
+	tags = cleanStringSet(tags)
+	if len(tags) > 0 {
+		return tags
+	}
+	botName = strings.TrimSpace(botName)
+	if botName == "" {
+		return nil
+	}
+	return []string{botName + "-entry"}
+}
+
+func cleanStringSet(values []string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		seen := false
+		for _, existing := range out {
+			if existing == value {
+				seen = true
+				break
+			}
+		}
+		if !seen {
+			out = append(out, value)
+		}
+	}
+	return out
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
 func oppositeSide(side string) string {
 	if strings.EqualFold(strings.TrimSpace(side), "SELL") {
 		return "BUY"
@@ -895,7 +1136,7 @@ func normalizeRuntimeMode(mode string) (string, error) {
 
 func isClosedTradeStatus(status string) bool {
 	switch strings.ToUpper(strings.TrimSpace(status)) {
-	case "TARGET HIT", "STOPLOSS HIT", "MANUAL EXIT", "EOD_SQUARE_OFF":
+	case "TARGET HIT", "STOPLOSS HIT", "MANUAL EXIT", "EOD_SQUARE_OFF", model.KillSwitchExitStatus:
 		return true
 	default:
 		return false

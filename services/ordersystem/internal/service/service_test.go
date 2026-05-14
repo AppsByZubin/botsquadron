@@ -352,6 +352,36 @@ func TestSquareOffBrokerOrderQuantitySplitsTradeQty(t *testing.T) {
 	}
 }
 
+func TestKillPositionTagsUsesEntryTags(t *testing.T) {
+	t.Parallel()
+
+	trades := []model.Trade{
+		{TagEntry: "bot-entry", TagSL: "bot-sl"},
+		{TagEntry: "bot-entry"},
+		{TagEntry: "custom-entry"},
+	}
+
+	got := killPositionTags("bot", "", trades)
+	want := []string{"bot-entry", "custom-entry"}
+	if len(got) != len(want) {
+		t.Fatalf("tags = %#v, want %#v", got, want)
+	}
+	for idx := range want {
+		if got[idx] != want[idx] {
+			t.Fatalf("tags = %#v, want %#v", got, want)
+		}
+	}
+}
+
+func TestKillPositionTagsDefaultsToBotEntryTag(t *testing.T) {
+	t.Parallel()
+
+	got := killPositionTags("bot-a", "", []model.Trade{{TagSL: "bot-a-sl"}})
+	if len(got) != 1 || got[0] != "bot-a-entry" {
+		t.Fatalf("tags = %#v, want bot-a-entry", got)
+	}
+}
+
 func requireFloatPtr(t *testing.T, name string, got *float64, want float64) {
 	t.Helper()
 	if got == nil {

@@ -198,6 +198,100 @@ func TestClientPlaceOrderCapturesSlicedOrderIDs(t *testing.T) {
 	}
 }
 
+func TestClientCancelOrderSendsDeleteWithOrderID(t *testing.T) {
+	t.Parallel()
+
+	var gotMethod string
+	var gotPath string
+	var gotOrderID string
+	client := NewClient(config.Config{
+		UpstoxBaseURL:         "https://api.example.com",
+		UpstoxAccessToken:     "test-token",
+		UpstoxOrderCancelPath: "/v3/order/cancel",
+	})
+	client.httpClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		gotOrderID = r.URL.Query().Get("order_id")
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{"status":"success","data":{"order_id":"sl-123"}}`)),
+		}, nil
+	})}
+
+	resp, err := client.CancelOrder(context.Background(), "sl-123")
+	if err != nil {
+		t.Fatalf("CancelOrder returned error: %v", err)
+	}
+	if gotMethod != http.MethodDelete {
+		t.Fatalf("method = %s, want DELETE", gotMethod)
+	}
+	if gotPath != "/v3/order/cancel" {
+		t.Fatalf("path = %s, want /v3/order/cancel", gotPath)
+	}
+	if gotOrderID != "sl-123" {
+		t.Fatalf("order_id = %s, want sl-123", gotOrderID)
+	}
+	if resp.OrderID != "sl-123" {
+		t.Fatalf("response order_id = %s, want sl-123", resp.OrderID)
+	}
+}
+
+func TestClientExitPositionsSendsTagQuery(t *testing.T) {
+	t.Parallel()
+
+	var gotMethod string
+	var gotPath string
+	var gotTag string
+	var gotSegment string
+	var gotBody string
+	client := NewClient(config.Config{
+		UpstoxBaseURL:           "https://api.example.com",
+		UpstoxAccessToken:       "test-token",
+		UpstoxExitPositionsPath: "/v2/order/positions/exit",
+	})
+	client.httpClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read request body: %v", err)
+		}
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		gotTag = r.URL.Query().Get("tag")
+		gotSegment = r.URL.Query().Get("segment")
+		gotBody = string(body)
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{"status":"success","data":{"order_ids":["exit-1","exit-2"]}}`)),
+		}, nil
+	})}
+
+	resp, err := client.ExitPositions(context.Background(), ExitPositionsRequest{
+		Tag:     "bot-entry",
+		Segment: "NSE_FO",
+	})
+	if err != nil {
+		t.Fatalf("ExitPositions returned error: %v", err)
+	}
+	if gotMethod != http.MethodPost {
+		t.Fatalf("method = %s, want POST", gotMethod)
+	}
+	if gotPath != "/v2/order/positions/exit" {
+		t.Fatalf("path = %s, want /v2/order/positions/exit", gotPath)
+	}
+	if gotTag != "bot-entry" || gotSegment != "NSE_FO" {
+		t.Fatalf("query tag=%s segment=%s, want bot-entry/NSE_FO", gotTag, gotSegment)
+	}
+	if gotBody != "{}" {
+		t.Fatalf("body = %q, want empty json object", gotBody)
+	}
+	if len(resp.OrderIDs) != 2 || resp.OrderIDs[0] != "exit-1" || resp.OrderIDs[1] != "exit-2" {
+		t.Fatalf("order ids = %#v, want [exit-1 exit-2]", resp.OrderIDs)
+	}
+}
+
 func TestClientGetOrderTradesComputesAveragePrice(t *testing.T) {
 	t.Parallel()
 

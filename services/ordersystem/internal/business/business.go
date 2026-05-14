@@ -13,6 +13,9 @@ type Service interface {
 	CreateTrade(context.Context, model.CreateTradeRequest) (model.CreateTradeResponse, error)
 	GetAccountDetails(context.Context, model.GetAccountDetailsRequest) (model.AccountDetailsResponse, error)
 	GetTradeByID(context.Context, string) (model.Trade, error)
+	KillBot(context.Context, string, model.KillBotRequest) (model.BotKillSwitchResponse, error)
+	ResumeBot(context.Context, string, model.ResumeBotRequest) (model.BotKillSwitchResponse, error)
+	GetBotKillSwitch(context.Context, string) (model.BotKillSwitchResponse, error)
 	ModifyTrade(context.Context, string, model.ModifyTradeRequest) (model.ModifyTradeResponse, error)
 	SquareOffTrade(context.Context, string, model.SquareOffTradeRequest) (model.SquareOffTradeResponse, error)
 }
@@ -51,6 +54,18 @@ func (b *Business) GetAccountDetails(ctx context.Context, req model.GetAccountDe
 
 func (b *Business) GetTradeByID(ctx context.Context, tradeID string) (model.Trade, error) {
 	return b.svc.GetTradeByID(ctx, tradeID)
+}
+
+func (b *Business) KillBot(ctx context.Context, botName string, req model.KillBotRequest) (model.BotKillSwitchResponse, error) {
+	return b.svc.KillBot(ctx, botName, req)
+}
+
+func (b *Business) ResumeBot(ctx context.Context, botName string, req model.ResumeBotRequest) (model.BotKillSwitchResponse, error) {
+	return b.svc.ResumeBot(ctx, botName, req)
+}
+
+func (b *Business) GetBotKillSwitch(ctx context.Context, botName string) (model.BotKillSwitchResponse, error) {
+	return b.svc.GetBotKillSwitch(ctx, botName)
 }
 
 func (b *Business) ModifyTrade(ctx context.Context, tradeID string, req model.ModifyTradeRequest) (model.ModifyTradeResponse, error) {

@@ -2,6 +2,12 @@ package model
 
 import "time"
 
+const (
+	KillModeStatus       = "KILL_MODE"
+	KillModeMessage      = "KILL mode enabled no orders to be accepted."
+	KillSwitchExitStatus = "KILL_SWITCH"
+)
+
 type CreateTradeRequest struct {
 	BotName         string   `json:"bot_name"`
 	InitCash        *float64 `json:"init_cash,omitempty"`
@@ -38,6 +44,8 @@ type CreateTradeResponse struct {
 	EntryOrderIDs []string `json:"entry_order_ids,omitempty"`
 	SLOrderIDs    []string `json:"sl_order_ids,omitempty"`
 	Message       string   `json:"message,omitempty"`
+	ClosedTrades  []Trade  `json:"closed_trades,omitempty"`
+	ClosedOrders  []Trade  `json:"closed_orders,omitempty"`
 }
 
 type CreateAccountRequest struct {
@@ -50,6 +58,42 @@ type CreateAccountRequest struct {
 type GetAccountDetailsRequest struct {
 	BotName  string `json:"bot_name"`
 	CurrDate string `json:"curr_date"`
+}
+
+type KillBotRequest struct {
+	Mode     string `json:"mode,omitempty"`
+	CurrDate string `json:"curr_date,omitempty"`
+	Reason   string `json:"reason,omitempty"`
+	Segment  string `json:"segment,omitempty"`
+	Tag      string `json:"tag,omitempty"`
+}
+
+type ResumeBotRequest struct {
+	Reason string `json:"reason,omitempty"`
+}
+
+type BotKillSwitch struct {
+	BotName     string    `json:"bot_name"`
+	KillEnabled bool      `json:"kill_enabled"`
+	Reason      string    `json:"reason,omitempty"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+type BotKillSwitchResponse struct {
+	BotName             string    `json:"bot_name"`
+	CurrDate            string    `json:"curr_date,omitempty"`
+	KillEnabled         bool      `json:"kill_enabled"`
+	Status              string    `json:"status"`
+	Message             string    `json:"message,omitempty"`
+	Reason              string    `json:"reason,omitempty"`
+	Tags                []string  `json:"tags,omitempty"`
+	Segment             string    `json:"segment,omitempty"`
+	CancelledSLOrderIDs []string  `json:"cancelled_sl_order_ids,omitempty"`
+	ExitOrderIDs        []string  `json:"exit_order_ids,omitempty"`
+	ClosedTrades        []Trade   `json:"closed_trades,omitempty"`
+	ClosedOrders        []Trade   `json:"closed_orders,omitempty"`
+	Errors              []string  `json:"errors,omitempty"`
+	UpdatedAt           time.Time `json:"updated_at"`
 }
 
 type AccountResponse struct {

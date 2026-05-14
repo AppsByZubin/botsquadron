@@ -98,6 +98,7 @@ class OrderSystemClient:
         constants.STOPLOSS_HIT.upper(),
         constants.MANUAL_EXIT.upper(),
         constants.EOD_SQUARE_OFF.upper(),
+        constants.KILL_SWITCH.upper(),
     }
 
     def __init__(
@@ -288,6 +289,35 @@ class OrderSystemClient:
     def health(self) -> Dict[str, Any]:
         return self._request("GET", "/healthz")
 
+    def kill_bot(
+        self,
+        bot_name: Optional[str] = None,
+        curr_date: Optional[str] = None,
+        reason: Optional[str] = None,
+        segment: Optional[str] = None,
+        tag: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        resolved_bot_name = str(bot_name or self.bot_name).strip()
+        payload = _without_none({
+            "mode": self.mode,
+            "curr_date": curr_date or self.curr_date,
+            "reason": reason,
+            "segment": segment,
+            "tag": tag,
+        })
+        response = self._request("POST", f"/v1/bots/{resolved_bot_name}/kill", json=payload)
+        self._sync_closed_trades_from_kill_response(response)
+        return response
+
+    def resume_bot(self, bot_name: Optional[str] = None, reason: Optional[str] = None) -> Dict[str, Any]:
+        resolved_bot_name = str(bot_name or self.bot_name).strip()
+        response = self._request("POST", f"/v1/bots/{resolved_bot_name}/resume", json=_without_none({"reason": reason}))
+        return response
+
+    def get_kill_switch(self, bot_name: Optional[str] = None) -> Dict[str, Any]:
+        resolved_bot_name = str(bot_name or self.bot_name).strip()
+        return self._request("GET", f"/v1/bots/{resolved_bot_name}/kill")
+
     def create_account(
         self,
         bot_name: Optional[str] = None,
@@ -373,7 +403,11 @@ class OrderSystemClient:
             slice=slice,
         )
         response = self._request("POST", "/v1/trades", json=payload)
+        self._sync_closed_trades_from_kill_response(response)
         trade_id = str(response.get("trade_id") or "").strip()
+        if not trade_id and str(response.get("status") or "").strip().upper() == "KILL_MODE":
+            log.warning(str(response.get("message") or "KILL mode enabled no orders to be accepted."))
+            return response
         if trade_id:
             local_row = self._local_row_from_create(payload, response, ts=ts)
             self._last_trade_id = trade_id
@@ -659,6 +693,24 @@ class OrderSystemClient:
             if isinstance(trade, Mapping):
                 self._remember_trade(trade)
                 self._upsert_local_trade(self._local_row_from_trade(trade))
+
+    def _sync_closed_trades_from_kill_response(self, response: Mapping[str, Any]) -> None:
+        closed_trades = response.get("closed_trades") if isinstance(response, Mapping) else None
+        if not isinstance(closed_trades, list) and isinstance(response, Mapping):
+            closed_trades = response.get("closed_orders")
+        if not isinstance(closed_trades, list):
+            return
+
+        for trade in closed_trades:
+            if not isinstance(trade, Mapping):
+                continue
+            remembered = self._remember_trade(trade)
+            self._upsert_local_trade(self._local_row_from_trade(remembered))
+            self._log_local_event(
+                "KILL_MODE_SYNC_CLOSED_TRADE",
+                remembered,
+                extra={"message": response.get("message"), "status": response.get("status")},
+            )
 
     def _local_row_from_create(
         self,

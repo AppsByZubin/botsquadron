@@ -44,6 +44,18 @@ func (f *fakeService) GetTradeByID(context.Context, string) (model.Trade, error)
 	return model.Trade{}, nil
 }
 
+func (f *fakeService) KillBot(context.Context, string, model.KillBotRequest) (model.BotKillSwitchResponse, error) {
+	return model.BotKillSwitchResponse{}, nil
+}
+
+func (f *fakeService) ResumeBot(context.Context, string, model.ResumeBotRequest) (model.BotKillSwitchResponse, error) {
+	return model.BotKillSwitchResponse{}, nil
+}
+
+func (f *fakeService) GetBotKillSwitch(context.Context, string) (model.BotKillSwitchResponse, error) {
+	return model.BotKillSwitchResponse{}, nil
+}
+
 func (f *fakeService) ModifyTrade(context.Context, string, model.ModifyTradeRequest) (model.ModifyTradeResponse, error) {
 	return model.ModifyTradeResponse{}, nil
 }

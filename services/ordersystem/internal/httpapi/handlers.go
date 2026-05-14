@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log"
 	"net/http"
 	"strconv"
@@ -24,6 +25,9 @@ type Business interface {
 	CreateTrade(context.Context, model.CreateTradeRequest) (model.CreateTradeResponse, error)
 	GetAccountDetails(context.Context, model.GetAccountDetailsRequest) (model.AccountDetailsResponse, error)
 	GetTradeByID(context.Context, string) (model.Trade, error)
+	KillBot(context.Context, string, model.KillBotRequest) (model.BotKillSwitchResponse, error)
+	ResumeBot(context.Context, string, model.ResumeBotRequest) (model.BotKillSwitchResponse, error)
+	GetBotKillSwitch(context.Context, string) (model.BotKillSwitchResponse, error)
 	ModifyTrade(context.Context, string, model.ModifyTradeRequest) (model.ModifyTradeResponse, error)
 	SquareOffTrade(context.Context, string, model.SquareOffTradeRequest) (model.SquareOffTradeResponse, error)
 }
@@ -45,6 +49,9 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("POST /v1/trades/{id}/modify", h.handleModifyTrade)
 	mux.HandleFunc("POST /v1/trades/{id}/square-off", h.handleSquareOffTrade)
 	mux.HandleFunc("GET /v1/trades/{id}", h.handleGetTradeByID)
+	mux.HandleFunc("POST /v1/bots/{bot_name}/kill", h.handleKillBot)
+	mux.HandleFunc("POST /v1/bots/{bot_name}/resume", h.handleResumeBot)
+	mux.HandleFunc("GET /v1/bots/{bot_name}/kill", h.handleGetBotKillSwitch)
 	return mux
 }
 
@@ -76,6 +83,99 @@ func (h *Handler) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusCreated, resp)
+}
+
+func (h *Handler) handleKillBot(w http.ResponseWriter, r *http.Request) {
+	botName := strings.TrimSpace(r.PathValue("bot_name"))
+	if botName == "" {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "bot_name is required"})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), h.requestTimeout)
+	defer cancel()
+
+	defer r.Body.Close()
+	var req model.KillBotRequest
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid request body: " + err.Error()})
+		return
+	}
+
+	resp, err := h.business.KillBot(ctx, botName, req)
+	if err != nil {
+		statusCode := http.StatusInternalServerError
+		lowerErr := strings.ToLower(err.Error())
+		if strings.Contains(lowerErr, "required") || strings.Contains(lowerErr, "must be") {
+			statusCode = http.StatusBadRequest
+		}
+		writeJSON(w, statusCode, errorResponse{Error: err.Error()})
+		return
+	}
+
+	statusCode := http.StatusOK
+	if len(resp.Errors) > 0 {
+		statusCode = http.StatusMultiStatus
+	}
+	writeJSON(w, statusCode, resp)
+}
+
+func (h *Handler) handleResumeBot(w http.ResponseWriter, r *http.Request) {
+	botName := strings.TrimSpace(r.PathValue("bot_name"))
+	if botName == "" {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "bot_name is required"})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), h.requestTimeout)
+	defer cancel()
+
+	defer r.Body.Close()
+	var req model.ResumeBotRequest
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid request body: " + err.Error()})
+		return
+	}
+
+	resp, err := h.business.ResumeBot(ctx, botName, req)
+	if err != nil {
+		statusCode := http.StatusInternalServerError
+		lowerErr := strings.ToLower(err.Error())
+		if strings.Contains(lowerErr, "required") || strings.Contains(lowerErr, "must be") {
+			statusCode = http.StatusBadRequest
+		}
+		writeJSON(w, statusCode, errorResponse{Error: err.Error()})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (h *Handler) handleGetBotKillSwitch(w http.ResponseWriter, r *http.Request) {
+	botName := strings.TrimSpace(r.PathValue("bot_name"))
+	if botName == "" {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "bot_name is required"})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), h.requestTimeout)
+	defer cancel()
+
+	resp, err := h.business.GetBotKillSwitch(ctx, botName)
+	if err != nil {
+		statusCode := http.StatusInternalServerError
+		if strings.Contains(strings.ToLower(err.Error()), "required") {
+			statusCode = http.StatusBadRequest
+		}
+		writeJSON(w, statusCode, errorResponse{Error: err.Error()})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (h *Handler) handleGetAccountDetails(w http.ResponseWriter, r *http.Request) {
@@ -132,7 +232,11 @@ func (h *Handler) handleCreateTrade(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusCreated, resp)
+	statusCode := http.StatusCreated
+	if resp.Status == model.KillModeStatus {
+		statusCode = http.StatusOK
+	}
+	writeJSON(w, statusCode, resp)
 }
 
 func (h *Handler) handleModifyTrade(w http.ResponseWriter, r *http.Request) {

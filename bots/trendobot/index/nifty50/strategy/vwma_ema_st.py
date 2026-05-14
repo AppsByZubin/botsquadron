@@ -1526,6 +1526,7 @@ class VwmaEmaStStrategy:
             constants.STOPLOSS_HIT.upper(),
             constants.MANUAL_EXIT.upper(),
             constants.EOD_SQUARE_OFF.upper(),
+            constants.KILL_SWITCH.upper(),
         }
 
         status_s = df["status"].astype(str).str.upper().str.strip()
@@ -1579,6 +1580,7 @@ class VwmaEmaStStrategy:
             constants.STOPLOSS_HIT.upper(),
             constants.MANUAL_EXIT.upper(),
             constants.EOD_SQUARE_OFF.upper(),
+            constants.KILL_SWITCH.upper(),
         }
         if status not in closed_statuses:
             return
@@ -2040,7 +2042,7 @@ class VwmaEmaStStrategy:
                 try:
                     if hasattr(self.order_maneger, "refresh_trade_status") and self._order_container.get("trade_id"):
                         closed_status = self.order_maneger.refresh_trade_status(self._order_container.get("trade_id"), ts=ts)
-                        if closed_status in [constants.STOPLOSS_HIT, constants.TARGET_HIT, constants.MANUAL_EXIT, constants.EOD_SQUARE_OFF]:
+                        if closed_status in [constants.STOPLOSS_HIT, constants.TARGET_HIT, constants.MANUAL_EXIT, constants.EOD_SQUARE_OFF, constants.KILL_SWITCH]:
                             self._set_post_exit_cooldown(closed_status, ts=ts)
                             trade_info = self.order_maneger.get_trade_by_id(self._order_container.get("trade_id"))
                             self._update_today_realized_pnl_on_trade_close(trade_info, ts=ts)
@@ -2062,6 +2064,7 @@ class VwmaEmaStStrategy:
                     constants.STOPLOSS_HIT,
                     constants.MANUAL_EXIT,
                     constants.EOD_SQUARE_OFF,
+                    constants.KILL_SWITCH,
                 ]:
                     self._set_post_exit_cooldown(trade_info.get("status"), ts=ts)
                     self._update_today_realized_pnl_on_trade_close(trade_info, ts=ts)

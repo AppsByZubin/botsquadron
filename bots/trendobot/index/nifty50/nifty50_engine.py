@@ -86,7 +86,10 @@ def _normalize_tick_payload(payload, instrument_keys_set, future_key):
         return None
 
     if "feeds" in payload:
-        return payload
+        feeds = payload.get("feeds")
+        if isinstance(feeds, dict) and any(str(key) in instrument_keys_set for key in feeds.keys()):
+            return payload
+        return None
 
     instrument_key = str(payload.get("instrument_key") or "").strip()
     if not instrument_key or instrument_key not in instrument_keys_set:
@@ -515,10 +518,11 @@ async def nifty50_engine(strategy, mode, param_data):
         tick_shape_state = {"flat_logged": False, "first_tick_logged": False}
 
         async def tick_data_handler(msg):
-            with last_msg_lock:
-                last_msg_epoch["t"] = t.time()
             try:
                 payload = json.loads(msg.data.decode())
+                payload_bot_id = str(payload.get("bot_id") or "").strip()
+                if payload_bot_id and payload_bot_id != bot_id:
+                    return
 
                 normalized_message = _normalize_tick_payload(
                     payload,
@@ -526,6 +530,8 @@ async def nifty50_engine(strategy, mode, param_data):
                     getattr(bot, "index_fur_key", None),
                 )
                 if normalized_message is not None:
+                    with last_msg_lock:
+                        last_msg_epoch["t"] = t.time()
                     if not tick_shape_state["first_tick_logged"]:
                         tick_shape_state["first_tick_logged"] = True
                         logger.info("Received first NATS tick payload from marketfeeder")
@@ -537,8 +543,10 @@ async def nifty50_engine(strategy, mode, param_data):
                     bot.on_ws_message(normalized_message)
                     return
 
-                # Heartbeat update already happened. Ignore non-feed payloads.
+                # Treat own flat non-feed payloads as heartbeat-only messages.
                 if payload.get("instrument_key") in instrument_keys_set:
+                    with last_msg_lock:
+                        last_msg_epoch["t"] = t.time()
                     return
             except json.JSONDecodeError as e:
                 logger.error(f"Failed to decode tick data: {e}")

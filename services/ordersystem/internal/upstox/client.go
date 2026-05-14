@@ -18,15 +18,17 @@ import (
 )
 
 type Client struct {
-	httpClient       *http.Client
-	baseURL          string
-	accessToken      string
-	orderPlacePath   string
-	orderModifyPath  string
-	orderDetailsPath string
-	orderTradesPath  string
-	brokeragePath    string
-	apiVersion       string
+	httpClient        *http.Client
+	baseURL           string
+	accessToken       string
+	orderPlacePath    string
+	orderModifyPath   string
+	orderCancelPath   string
+	exitPositionsPath string
+	orderDetailsPath  string
+	orderTradesPath   string
+	brokeragePath     string
+	apiVersion        string
 
 	orderLimiter   *requestGate
 	statusLimiter  *requestGate
@@ -71,6 +73,22 @@ type ModifyOrderRequest struct {
 type ModifyOrderResult struct {
 	OrderID string
 	RawData json.RawMessage
+}
+
+type CancelOrderResult struct {
+	OrderID string
+	RawData json.RawMessage
+}
+
+type ExitPositionsRequest struct {
+	Segment string
+	Tag     string
+}
+
+type ExitPositionsResult struct {
+	Status   string
+	OrderIDs []string
+	RawData  json.RawMessage
 }
 
 type OrderStatus struct {
@@ -145,21 +163,23 @@ func IsRateLimited(err error) bool {
 
 func NewClient(cfg config.Config) *Client {
 	return &Client{
-		httpClient:       &http.Client{Timeout: 20 * time.Second},
-		baseURL:          cfg.UpstoxBaseURL,
-		accessToken:      cfg.UpstoxAccessToken,
-		orderPlacePath:   cfg.UpstoxOrderPlacePath,
-		orderModifyPath:  cfg.UpstoxOrderModifyPath,
-		orderDetailsPath: cfg.UpstoxOrderDetailsPath,
-		orderTradesPath:  cfg.UpstoxOrderTradesPath,
-		brokeragePath:    cfg.UpstoxBrokeragePath,
-		apiVersion:       cfg.UpstoxAPIVersion,
-		orderLimiter:     newRequestGate(cfg.UpstoxOrderRequestGap),
-		statusLimiter:    newRequestGate(cfg.UpstoxStatusRequestGap),
-		statusCacheTTL:   cfg.UpstoxStatusCacheTTL,
-		brokerCache:      make(map[string]brokerCacheEntry),
-		brokerNextOK:     make(map[string]time.Time),
-		brokerBackoff:    make(map[string]time.Duration),
+		httpClient:        &http.Client{Timeout: 20 * time.Second},
+		baseURL:           cfg.UpstoxBaseURL,
+		accessToken:       cfg.UpstoxAccessToken,
+		orderPlacePath:    cfg.UpstoxOrderPlacePath,
+		orderModifyPath:   cfg.UpstoxOrderModifyPath,
+		orderCancelPath:   cfg.UpstoxOrderCancelPath,
+		exitPositionsPath: cfg.UpstoxExitPositionsPath,
+		orderDetailsPath:  cfg.UpstoxOrderDetailsPath,
+		orderTradesPath:   cfg.UpstoxOrderTradesPath,
+		brokeragePath:     cfg.UpstoxBrokeragePath,
+		apiVersion:        cfg.UpstoxAPIVersion,
+		orderLimiter:      newRequestGate(cfg.UpstoxOrderRequestGap),
+		statusLimiter:     newRequestGate(cfg.UpstoxStatusRequestGap),
+		statusCacheTTL:    cfg.UpstoxStatusCacheTTL,
+		brokerCache:       make(map[string]brokerCacheEntry),
+		brokerNextOK:      make(map[string]time.Time),
+		brokerBackoff:     make(map[string]time.Duration),
 	}
 }
 
@@ -290,6 +310,143 @@ func (c *Client) ModifyOrder(ctx context.Context, req ModifyOrderRequest) (Modif
 
 	c.rememberBrokerWriteSuccess(rateLimitKey)
 	return ModifyOrderResult{OrderID: orderID, RawData: data}, nil
+}
+
+func (c *Client) CancelOrder(ctx context.Context, orderID string) (CancelOrderResult, error) {
+	if !c.Enabled() {
+		return CancelOrderResult{}, fmt.Errorf("upstox client is not configured")
+	}
+	orderID = strings.TrimSpace(orderID)
+	if orderID == "" {
+		return CancelOrderResult{}, fmt.Errorf("order id is required")
+	}
+
+	rateLimitKey := "cancel-order"
+	if err := c.activeBrokerRateLimit(rateLimitKey, "cancel order", orderID); err != nil {
+		return CancelOrderResult{}, err
+	}
+
+	query := url.Values{}
+	query.Set("order_id", orderID)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.buildURLWithQuery(c.orderCancelPath, "", query), nil)
+	if err != nil {
+		return CancelOrderResult{}, fmt.Errorf("create cancel order request: %w", err)
+	}
+
+	c.setHeaders(httpReq)
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	if c.orderLimiter != nil {
+		if err := c.orderLimiter.Wait(ctx); err != nil {
+			return CancelOrderResult{}, fmt.Errorf("wait for upstox cancel order rate limiter: %w", err)
+		}
+	}
+
+	httpResp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return CancelOrderResult{}, fmt.Errorf("cancel order request failed: %w", err)
+	}
+	defer httpResp.Body.Close()
+
+	payload, err := io.ReadAll(io.LimitReader(httpResp.Body, 2<<20))
+	if err != nil {
+		return CancelOrderResult{}, fmt.Errorf("read cancel order response: %w", err)
+	}
+
+	if httpResp.StatusCode >= 300 {
+		if httpResp.StatusCode == http.StatusTooManyRequests {
+			return CancelOrderResult{}, c.rememberBrokerWriteRateLimit(rateLimitKey, "cancel order", orderID, httpResp.Header.Get("Retry-After"))
+		}
+		return CancelOrderResult{}, fmt.Errorf("upstox cancel order failed (%d): %s", httpResp.StatusCode, strings.TrimSpace(string(payload)))
+	}
+
+	status, data, err := decodeEnvelope(payload)
+	if err != nil {
+		return CancelOrderResult{}, fmt.Errorf("decode cancel order response: %w", err)
+	}
+	if status != "" && !strings.EqualFold(status, "success") {
+		return CancelOrderResult{}, fmt.Errorf("upstox cancel order non-success status: %s", status)
+	}
+
+	cancelledOrderID := extractOrderID(data)
+	if cancelledOrderID == "" {
+		cancelledOrderID = orderID
+	}
+
+	c.rememberBrokerWriteSuccess(rateLimitKey)
+	return CancelOrderResult{OrderID: cancelledOrderID, RawData: data}, nil
+}
+
+func (c *Client) ExitPositions(ctx context.Context, req ExitPositionsRequest) (ExitPositionsResult, error) {
+	if !c.Enabled() {
+		return ExitPositionsResult{}, fmt.Errorf("upstox client is not configured")
+	}
+
+	query := url.Values{}
+	if segment := strings.TrimSpace(req.Segment); segment != "" {
+		query.Set("segment", segment)
+	}
+	if tag := strings.TrimSpace(req.Tag); tag != "" {
+		query.Set("tag", tag)
+	}
+
+	rateLimitKey := "exit-positions"
+	if req.Tag != "" {
+		rateLimitKey += ":" + strings.TrimSpace(req.Tag)
+	}
+	if err := c.activeBrokerRateLimit(rateLimitKey, "exit positions", strings.TrimSpace(req.Tag)); err != nil {
+		return ExitPositionsResult{}, err
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.buildURLWithQuery(c.exitPositionsPath, "", query), bytes.NewReader([]byte("{}")))
+	if err != nil {
+		return ExitPositionsResult{}, fmt.Errorf("create exit positions request: %w", err)
+	}
+
+	c.setHeaders(httpReq)
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	if c.orderLimiter != nil {
+		if err := c.orderLimiter.Wait(ctx); err != nil {
+			return ExitPositionsResult{}, fmt.Errorf("wait for upstox exit positions rate limiter: %w", err)
+		}
+	}
+
+	httpResp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return ExitPositionsResult{}, fmt.Errorf("exit positions request failed: %w", err)
+	}
+	defer httpResp.Body.Close()
+
+	payload, err := io.ReadAll(io.LimitReader(httpResp.Body, 2<<20))
+	if err != nil {
+		return ExitPositionsResult{}, fmt.Errorf("read exit positions response: %w", err)
+	}
+
+	if httpResp.StatusCode >= 300 {
+		if httpResp.StatusCode == http.StatusTooManyRequests {
+			return ExitPositionsResult{}, c.rememberBrokerWriteRateLimit(rateLimitKey, "exit positions", strings.TrimSpace(req.Tag), httpResp.Header.Get("Retry-After"))
+		}
+		return ExitPositionsResult{}, fmt.Errorf("upstox exit positions failed (%d): %s", httpResp.StatusCode, strings.TrimSpace(string(payload)))
+	}
+
+	status, data, err := decodeEnvelope(payload)
+	if err != nil {
+		return ExitPositionsResult{}, fmt.Errorf("decode exit positions response: %w", err)
+	}
+
+	result := ExitPositionsResult{
+		Status:   strings.TrimSpace(status),
+		OrderIDs: extractOrderIDs(data),
+		RawData:  data,
+	}
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "", "success", "partial_success":
+		c.rememberBrokerWriteSuccess(rateLimitKey)
+		return result, nil
+	default:
+		return result, fmt.Errorf("upstox exit positions non-success status: %s", status)
+	}
 }
 
 func (c *Client) GetOrderStatus(ctx context.Context, orderID string) (OrderStatus, error) {
