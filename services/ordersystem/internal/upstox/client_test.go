@@ -65,8 +65,8 @@ func TestClientModifyOrderSendsExpectedPayload(t *testing.T) {
 		t.Fatalf("ModifyOrder returned error: %v", err)
 	}
 
-	if gotMethod != http.MethodPost {
-		t.Fatalf("method = %s, want %s", gotMethod, http.MethodPost)
+	if gotMethod != http.MethodPut {
+		t.Fatalf("method = %s, want %s", gotMethod, http.MethodPut)
 	}
 	if gotPath != "/v3/order/modify" {
 		t.Fatalf("path = %s, want /v3/order/modify", gotPath)

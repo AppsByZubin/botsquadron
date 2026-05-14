@@ -263,7 +263,7 @@ func (c *Client) ModifyOrder(ctx context.Context, req ModifyOrderRequest) (Modif
 		return ModifyOrderResult{}, fmt.Errorf("marshal modify order request: %w", err)
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.buildURL(c.orderModifyPath, ""), bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPut, c.buildURL(c.orderModifyPath, ""), bytes.NewReader(body))
 	if err != nil {
 		return ModifyOrderResult{}, fmt.Errorf("create modify order request: %w", err)
 	}
