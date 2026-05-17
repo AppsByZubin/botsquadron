@@ -38,6 +38,9 @@ jobs:
           - service: trendobot
             context: .
             dockerfile: bots/trendobot/Dockerfile
+          - service: haemabot
+            context: .
+            dockerfile: bots/haemabot/Dockerfile
 
     steps:
       - name: Checkout botsquadron
@@ -169,6 +172,10 @@ jobs:
           if "trendobot" in data:
               data["trendobot"]["image"]["repository"] = repo
               data["trendobot"]["image"]["tag"] = f"trendobot-{tag}"
+
+          if "haemabot" in data:
+              data["haemabot"]["image"]["repository"] = repo
+              data["haemabot"]["image"]["tag"] = f"haemabot-{tag}"
 
           with path.open("w") as f:
               yaml.dump(data, f)
