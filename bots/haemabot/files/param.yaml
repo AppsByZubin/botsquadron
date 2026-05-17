@@ -1,0 +1,70 @@
+strategy-parameters:
+  trade-per-day: 3
+  max-open-trades: 1
+
+  # PERCENT values as fractions
+  take-profit: 0.5     # +50%
+  stop-loss: 0.113       # -10%
+
+  max_daily_loss_pct_of_initial_cash: 0.04  # Stop new trades for the day after 2% realized loss
+
+  # on high volatile days, increase min_atr_14 and option_atr_period
+  min_atr_14: 8
+  option_atr_period: 5
+
+  adx_threshold: 21
+
+  trailing-stop: true
+  trailing-stop-distance: 10  # SL trails by 10 points once trailing starts
+  trail-start-after-points: 0.1 # start trailing only after +5 points move
+
+  break-even-point: 3
+
+  sl-limit-gap: 1.0
+
+  itm_strike_range: 400
+
+  trade_expiry: "2026-05-12"
+  pcr_expiry: "2026-05-12"
+  pcr_poll_interval_sec: 120
+
+  OIL_TRACK: True
+  OIL_QUERY: "Crudeoil"
+  OIL_EXPIRY: "current_month"
+  OIL_EXCHANGES: "MCX"
+  OIL_SEGMENTS: "FUT"
+
+  max_atr_for_contract: 20
+  min_atr_for_contract: 13
+
+  trade_within_day_open_limits: False
+  ltp_open_max_distance_points: 210
+
+  up_rsi_low: 52
+  up_rsi_high: 73
+  up_angle_ema: 60
+  up_angle_vwma: 30
+  up_angle_rsi_ma: 30
+  
+  dn_rsi_low: 27
+  dn_rsi_high: 48
+  dn_angle_ema: -60
+  dn_angle_vwma: -30
+  dn_angle_rsi_ma: -30
+
+  lot-size:
+    small: 6
+    medium: 8
+    large: 10
+
+  trade-window:
+    start: "10:30"
+    end: "15:00"
+
+historical-trends: &historical_trends
+  weekly: "super_bearish"
+  daily: "bullish"
+  trader-sentiment: "bullish"
+
+# Backward-compatible alias
+historical-trend: *historical_trends

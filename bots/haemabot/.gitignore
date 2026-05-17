@@ -1,0 +1,15 @@
+logs/
+.codex
+.agents
+
+__pycache__/
+utils/__pycache__/
+index/__pycache__/
+broker/__pycache__/
+common/__pycache__/
+oms/__pycache__/
+analysis/__pycache__/
+technicals/__pycache__/
+technicals/atr/__pycache__/
+
+files/execution_results/

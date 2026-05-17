@@ -1,0 +1,1 @@
+"""Haemabot trading bot package."""

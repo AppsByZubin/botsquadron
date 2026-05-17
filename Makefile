@@ -1,4 +1,4 @@
-.PHONY: build build-ordersystem docker-build docker-build-ordersystem docker-build-solobot docker-build-trendobot docker-build-all deploy-nats deploy-marketfeeder deploy-all clean test-nats install-python-deps install-trendobot-deps
+.PHONY: build build-ordersystem docker-build docker-build-ordersystem docker-build-solobot docker-build-trendobot docker-build-haemabot docker-build-all deploy-nats deploy-marketfeeder deploy-all clean test-nats install-python-deps install-trendobot-deps install-haemabot-deps
 
 # Build the Go binary
 build:
@@ -24,8 +24,12 @@ docker-build-solobot:
 docker-build-trendobot:
 	docker build -f bots/trendobot/Dockerfile -t trendobot:latest .
 
+# Build the haemabot Docker image from the repo root so its runtime paths stay stable
+docker-build-haemabot:
+	docker build -f bots/haemabot/Dockerfile -t haemabot:latest .
+
 # Build every runtime image
-docker-build-all: docker-build docker-build-ordersystem docker-build-solobot docker-build-trendobot
+docker-build-all: docker-build docker-build-ordersystem docker-build-solobot docker-build-trendobot docker-build-haemabot
 
 # Install Python dependencies
 install-python-deps:
@@ -34,6 +38,10 @@ install-python-deps:
 # Install trendobot Python dependencies
 install-trendobot-deps:
 	cd bots/trendobot && pip3 install -r requirements.txt
+
+# Install haemabot Python dependencies
+install-haemabot-deps:
+	cd bots/haemabot && pip3 install -r requirements.txt
 
 # Test NATS communication
 test-nats: install-python-deps
@@ -60,3 +68,4 @@ clean:
 	docker rmi ordersystem:latest --force
 	docker rmi solobot:latest --force
 	docker rmi trendobot:latest --force
+	docker rmi haemabot:latest --force

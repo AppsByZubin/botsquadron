@@ -1,6 +1,6 @@
 # BotSquadron - Trading Bot Platform
 
-BotSquadron is a distributed trading bot platform that uses NATS for communication between trading bots (solobot, trendobot) and market data feeders (marketfeeder).
+BotSquadron is a distributed trading bot platform that uses NATS for communication between trading bots (solobot, trendobot, haemabot) and market data feeders (marketfeeder).
 
 ## Architecture
 
@@ -8,15 +8,16 @@ BotSquadron is a distributed trading bot platform that uses NATS for communicati
 
 1. **solobot** (Python): Trading bot that implements PCR/VWAP/EMA/ORB strategies
 2. **trendobot** (Python): Trading bot that implements the production VWMA/EMA/Supertrend strategy
-3. **ordersystem** (Go): HTTP OMS that stores trades in PostgreSQL, places Upstox orders in sandbox/production, and polls SL status in production
-4. **marketfeeder** (Go): Market data feeder that connects to Upstox **v3** websockets
-5. **NATS**: Message broker for communication between components
+3. **haemabot** (Python): NIFTY 50 options bot that uses the `hm_ema_adx` strategy
+4. **ordersystem** (Go): HTTP OMS that stores trades in PostgreSQL, places Upstox orders in sandbox/production, and polls SL status in production
+5. **marketfeeder** (Go): Market data feeder that connects to Upstox **v3** websockets
+6. **NATS**: Message broker for communication between components
 
 ### Communication Flow
 
 ```
-solobot/trendobot → ordersystem → PostgreSQL
-solobot/trendobot → NATS → marketfeeder → Upstox WebSocket → NATS → solobot/trendobot
+solobot/trendobot/haemabot → ordersystem → PostgreSQL
+solobot/trendobot/haemabot → NATS → marketfeeder → Upstox WebSocket → NATS → solobot/trendobot/haemabot
 ordersystem (sandbox/production mode) → Upstox Orders API
 ```
 
@@ -130,6 +131,15 @@ cd bots/trendobot
 python main.py --instruments nifty50 --strategy vwma_ema_st --level mock
 ```
 
+### Running haemabot
+
+```bash
+cd bots/haemabot
+python main.py --instruments nifty50 --strategy hm_ema_adx --level mock
+```
+
+Haemabot loads params from `HAEMABOT_PARAM_YAML`, `HAEMABOT_PARAM_FILE`, or `files/param.yaml`, routes orders through the platform ordersystem client, and consumes market ticks through NATS/marketfeeder.
+
 ### Testing NATS Communication
 
 ```bash
@@ -207,7 +217,7 @@ Persistent runtime storage and stop/start operations are managed in the `botyard
 
 ### Adding New Bots
 
-1. Create or update an engine under the relevant bot package, such as `bots/solobot/index/` or `bots/trendobot/index/`
+1. Create or update an engine under the relevant bot package, such as `bots/solobot/index/`, `bots/trendobot/index/`, or `bots/haemabot/index/`
 2. Implement the NATS communication pattern
 3. Update the orchestrator to route to your new engine
 
