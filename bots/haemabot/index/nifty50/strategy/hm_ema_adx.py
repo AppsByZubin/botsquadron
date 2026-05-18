@@ -259,6 +259,7 @@ class HmEmaAdxStrategy:
                 intraday_future_candles,
                 intraday_oil_candles,
             )
+        self._restore_open_order_container_from_ordersystem()
 
     # ------------------------------------------------------------------
     # Gap helpers
@@ -308,6 +309,118 @@ class HmEmaAdxStrategy:
             if norm in {"0", "false", "no", "n", "off"}:
                 return False
         return default
+
+    def _restore_open_order_container_from_ordersystem(self) -> None:
+        if self.order_maneger is None or not hasattr(self.order_maneger, "get_account_details"):
+            return
+        if self._order_container.get("status") == constants.OPEN:
+            return
+
+        try:
+            account = self.order_maneger.get_account_details()
+        except Exception as exc:
+            logger.warning(f"Open trade restore skipped; ordersystem account lookup failed: {exc}")
+            return
+
+        trades = account.get("trades") if isinstance(account, dict) else None
+        if not isinstance(trades, list):
+            return
+
+        open_trades = [
+            trade
+            for trade in trades
+            if isinstance(trade, dict)
+            and str(trade.get("status") or "").strip().upper() == constants.OPEN
+        ]
+        if not open_trades:
+            return
+        if len(open_trades) > 1:
+            logger.warning("Multiple OPEN trades found during startup restore; using latest trade from ordersystem response.")
+
+        if self._restore_order_container_from_trade(open_trades[-1]):
+            self._order_counter = max(self._order_counter, 1)
+
+    def _restore_order_container_from_trade(self, trade: Dict[str, Any]) -> bool:
+        trade_id = str(trade.get("id") or trade.get("trade_id") or "").strip()
+        instrument_key = str(trade.get("instrument_token") or "").strip()
+        if not trade_id or not instrument_key:
+            logger.warning(f"Cannot restore OPEN trade with missing id/instrument_token: {trade}")
+            return False
+
+        contract = self._find_selected_contract(instrument_key, str(trade.get("symbol") or ""))
+        instrument_symbol = str(
+            trade.get("symbol")
+            or (contract or {}).get("trading_symbol")
+            or (contract or {}).get("symbol")
+            or ""
+        ).strip()
+        qty = safe_float(trade.get("qty"))
+        ltp = (
+            safe_float(trade.get("entry_price"))
+            or safe_float((contract or {}).get("ltp"))
+        )
+
+        self._order_container.update({
+            "trade_id": trade_id,
+            "side": self._strategy_side_from_trade(trade, contract),
+            "instrument_key": instrument_key,
+            "instrument_symbol": instrument_symbol,
+            "status": constants.OPEN,
+            "ltp": ltp,
+            "lot": int(qty) if qty is not None and qty > 0 else None,
+            "max_gamma": None,
+            "start_trail_after": safe_float(trade.get("start_trail_after")),
+            "oil_context": None,
+            "force_trail_lock": False,
+        })
+        logger.info(f"Restored OPEN trade from ordersystem into _order_container: {self._order_container}")
+        return True
+
+    def _find_selected_contract(self, instrument_key: str, symbol: str = "") -> Optional[Dict[str, Any]]:
+        target_key = str(instrument_key or "").strip()
+        target_symbol = str(symbol or "").strip().upper()
+
+        def visit(value: Any) -> Optional[Dict[str, Any]]:
+            if isinstance(value, dict):
+                value_key = str(value.get("instrument_key") or "").strip()
+                value_symbol = str(value.get("trading_symbol") or value.get("symbol") or "").strip().upper()
+                if (target_key and value_key == target_key) or (target_symbol and value_symbol == target_symbol):
+                    return value
+                for nested in value.values():
+                    if isinstance(nested, (dict, list, tuple)):
+                        found = visit(nested)
+                        if found is not None:
+                            return found
+            elif isinstance(value, (list, tuple)):
+                for item in value:
+                    found = visit(item)
+                    if found is not None:
+                        return found
+            return None
+
+        return visit(self.selected_contracts)
+
+    def _strategy_side_from_trade(self, trade: Dict[str, Any], contract: Optional[Dict[str, Any]]) -> Optional[str]:
+        values = [trade.get("symbol"), trade.get("description")]
+        if isinstance(contract, dict):
+            values.extend([
+                contract.get("trading_symbol"),
+                contract.get("symbol"),
+                contract.get("instrument_type"),
+                contract.get("option_type"),
+                contract.get("type"),
+            ])
+
+        for value in values:
+            text = str(value or "").strip().upper()
+            if not text:
+                continue
+            tokens = text.replace("_", " ").replace("-", " ").replace("|", " ").split()
+            if "CALL" in tokens or "CE" in tokens or text.endswith("CE"):
+                return constants.CALL
+            if "PUT" in tokens or "PE" in tokens or text.endswith("PE"):
+                return constants.PUT
+        return None
 
     def _update_gap_stats(self, candle: Dict[str, Any]) -> None:
         minute_key = str(candle.get("time") or "")
@@ -2305,8 +2418,13 @@ class HmEmaAdxStrategy:
                 if force_trail_applied:
                     self._order_container["force_trail_lock"] = True
 
-                trade_info = self.order_maneger.get_trade_by_id(self._order_container.get("trade_id"))
-                if trade_info and trade_info["status"] in [
+                trade_id = self._order_container.get("trade_id")
+                trade_info = tick_result if isinstance(tick_result, dict) else None
+                if trade_info is None and hasattr(self.order_maneger, "maybe_refresh_trade"):
+                    trade_info = self.order_maneger.maybe_refresh_trade(trade_id, ts=ts)
+                if trade_info is None:
+                    trade_info = self.order_maneger.get_trade_by_id(trade_id)
+                if trade_info and trade_info.get("status") in [
                     constants.TARGET_HIT,
                     constants.STOPLOSS_HIT,
                     constants.MANUAL_EXIT,

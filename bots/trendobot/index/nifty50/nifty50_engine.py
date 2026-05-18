@@ -475,6 +475,13 @@ async def nifty50_engine(strategy, mode, param_data):
             logger.error(f"Strategy {strategy} bot not initialized.")
             sys.exit(constants.FAIL_CODE)
 
+        restored_instrument_key = None
+        order_container = getattr(bot, "_order_container", None)
+        if isinstance(order_container, dict):
+            restored_instrument_key = order_container.get("instrument_key")
+        if restored_instrument_key:
+            list_of_instruments.append(restored_instrument_key)
+
         # Reuse the validated instrument list built above and avoid treating the
         # future contract dict like an iterable of option-contract dicts.
         instrument_keys = list(dict.fromkeys(list_of_instruments))

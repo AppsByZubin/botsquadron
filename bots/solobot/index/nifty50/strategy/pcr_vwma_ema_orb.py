@@ -124,9 +124,9 @@ class PCRVwmaEmaOrbStrategy:
         self._trade_status_refresh_interval_sec = float(
             sp.get(
                 "trade_status_refresh_interval_sec",
-                sp.get("trade-status-refresh-interval-sec", 10),
+                sp.get("trade-status-refresh-interval-sec", 60),
             )
-            or 10
+            or 60
         )
         self._last_trade_status_refresh_at: Optional[datetime] = None
         self._trade_end_time: Optional[dtime] = None
@@ -217,6 +217,8 @@ class PCRVwmaEmaOrbStrategy:
         if intraday_index_candles is not None and intraday_future_candles is not None:
             self._initialize_from_intraday_candles(intraday_index_candles, intraday_future_candles)
 
+        self._restore_open_order_container_from_ordersystem()
+
         # auto-start PCR poller
         if bool(sp.get("pcr_poller_enabled", True)):
             self.start()
@@ -249,6 +251,116 @@ class PCRVwmaEmaOrbStrategy:
                     return str(mode)
 
         return os.getenv("SOLOBOT_MODE") or os.getenv("APP_MODE")
+
+    def _restore_open_order_container_from_ordersystem(self) -> None:
+        if self.order_manager is None or not hasattr(self.order_manager, "get_account_details"):
+            return
+        if self._order_container.get("status") == constants.OPEN:
+            return
+
+        try:
+            account = self.order_manager.get_account_details()
+        except Exception as exc:
+            log.warning(f"Open trade restore skipped; ordersystem account lookup failed: {exc}")
+            return
+
+        trades = account.get("trades") if isinstance(account, dict) else None
+        if not isinstance(trades, list):
+            return
+
+        open_trades = [
+            trade
+            for trade in trades
+            if isinstance(trade, dict)
+            and str(trade.get("status") or "").strip().upper() == constants.OPEN
+        ]
+        if not open_trades:
+            return
+        if len(open_trades) > 1:
+            log.warning("Multiple OPEN trades found during startup restore; using latest trade from ordersystem response.")
+
+        if self._restore_order_container_from_trade(open_trades[-1]):
+            self._order_counter = max(self._order_counter, 1)
+
+    def _restore_order_container_from_trade(self, trade: Dict[str, Any]) -> bool:
+        trade_id = str(trade.get("id") or trade.get("trade_id") or "").strip()
+        instrument_key = str(trade.get("instrument_token") or "").strip()
+        if not trade_id or not instrument_key:
+            log.warning(f"Cannot restore OPEN trade with missing id/instrument_token: {trade}")
+            return False
+
+        contract = self._find_selected_contract(instrument_key, str(trade.get("symbol") or ""))
+        instrument_symbol = str(
+            trade.get("symbol")
+            or (contract or {}).get("trading_symbol")
+            or (contract or {}).get("symbol")
+            or ""
+        ).strip()
+        qty = safe_float(trade.get("qty"))
+        ltp = (
+            safe_float(trade.get("entry_price"))
+            or safe_float((contract or {}).get("ltp"))
+        )
+
+        self._order_container.update({
+            "trade_id": trade_id,
+            "side": self._strategy_side_from_trade(trade, contract),
+            "instrument_key": instrument_key,
+            "instrument_symbol": instrument_symbol,
+            "status": constants.OPEN,
+            "ltp": ltp,
+            "lot": int(qty) if qty is not None and qty > 0 else None,
+            "max_gamma": None,
+            "start_trail_after": safe_float(trade.get("start_trail_after")),
+        })
+        log.info(f"Restored OPEN trade from ordersystem into _order_container: {self._order_container}")
+        return True
+
+    def _find_selected_contract(self, instrument_key: str, symbol: str = "") -> Optional[Dict[str, Any]]:
+        target_key = str(instrument_key or "").strip()
+        target_symbol = str(symbol or "").strip().upper()
+
+        def visit(value: Any) -> Optional[Dict[str, Any]]:
+            if isinstance(value, dict):
+                value_key = str(value.get("instrument_key") or "").strip()
+                value_symbol = str(value.get("trading_symbol") or value.get("symbol") or "").strip().upper()
+                if (target_key and value_key == target_key) or (target_symbol and value_symbol == target_symbol):
+                    return value
+                for nested in value.values():
+                    if isinstance(nested, (dict, list, tuple)):
+                        found = visit(nested)
+                        if found is not None:
+                            return found
+            elif isinstance(value, (list, tuple)):
+                for item in value:
+                    found = visit(item)
+                    if found is not None:
+                        return found
+            return None
+
+        return visit(self.selected_contracts)
+
+    def _strategy_side_from_trade(self, trade: Dict[str, Any], contract: Optional[Dict[str, Any]]) -> Optional[str]:
+        values = [trade.get("symbol"), trade.get("description")]
+        if isinstance(contract, dict):
+            values.extend([
+                contract.get("trading_symbol"),
+                contract.get("symbol"),
+                contract.get("instrument_type"),
+                contract.get("option_type"),
+                contract.get("type"),
+            ])
+
+        for value in values:
+            text = str(value or "").strip().upper()
+            if not text:
+                continue
+            tokens = text.replace("_", " ").replace("-", " ").replace("|", " ").split()
+            if "CALL" in tokens or "CE" in tokens or text.endswith("CE"):
+                return constants.CALL
+            if "PUT" in tokens or "PE" in tokens or text.endswith("PE"):
+                return constants.PUT
+        return None
 
     # ------------------------------------------------------------------
     # Feed-shape helpers
@@ -1151,6 +1263,8 @@ class PCRVwmaEmaOrbStrategy:
             ref_ts = ref_ts.replace(tzinfo=IST)
         self._last_trade_status_refresh_at = ref_ts
 
+        if hasattr(self.order_manager, "maybe_refresh_trade"):
+            return self.order_manager.maybe_refresh_trade(trade_id, ts=ts)
         if hasattr(self.order_manager, "refresh_trade"):
             return self.order_manager.refresh_trade(trade_id, ts=ts)
         if hasattr(self.order_manager, "refresh_trade_status"):

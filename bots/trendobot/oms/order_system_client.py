@@ -204,9 +204,18 @@ class OrderSystemClient:
                 "OMS_RATE_LIMIT_MAX_SLEEP_SEC",
             ), 15.0) or 15.0),
         )
+        self.trade_refresh_interval_sec = max(
+            0.0,
+            float(_to_float(_first_env(
+                "ORDERSYSTEM_TRADE_REFRESH_INTERVAL_SEC",
+                "ORDER_SYSTEM_TRADE_REFRESH_INTERVAL_SEC",
+                "OMS_TRADE_REFRESH_INTERVAL_SEC",
+            ), 60.0) or 0.0),
+        )
         self._last_trade_id: Optional[str] = None
         self._active_trade_by_symbol: Dict[str, str] = {}
         self._trade_cache: Dict[str, Dict[str, Any]] = {}
+        self._trade_refresh_last: Dict[str, float] = {}
         self._request_next_ok: Dict[str, float] = {}
         self._request_backoff: Dict[str, float] = {}
         if self.local_copy_enabled:
@@ -595,6 +604,7 @@ class OrderSystemClient:
         if status in self.CLOSED_STATUSES:
             self._log_local_event("SYNC_CLOSED_TRADE", trade, ts=ts)
             self._forget_trade(trade)
+            self._trade_refresh_last.pop(str(trade_id), None)
         return trade
 
     def refresh_trade_status(self, trade_id: str, ts: Optional[datetime] = None) -> Optional[str]:
@@ -603,6 +613,31 @@ class OrderSystemClient:
             return None
         status = str(trade.get("status") or "").strip()
         return status or None
+
+    def maybe_refresh_trade(
+        self,
+        trade_id: str,
+        ts: Optional[datetime] = None,
+        force: bool = False,
+    ) -> Optional[Dict[str, Any]]:
+        trade_id = str(trade_id or "").strip()
+        if not trade_id:
+            return None
+        if self.mode != constants.PRODUCTION and not force:
+            return self._get_cached_trade(trade_id)
+
+        now = time.monotonic()
+        last = self._trade_refresh_last.get(trade_id)
+        if (
+            not force
+            and self.trade_refresh_interval_sec > 0
+            and last is not None
+            and now - last < self.trade_refresh_interval_sec
+        ):
+            return self._get_cached_trade(trade_id)
+
+        self._trade_refresh_last[trade_id] = now
+        return self.refresh_trade(trade_id, ts=ts)
 
     def on_tick(
         self,
@@ -639,6 +674,19 @@ class OrderSystemClient:
         if status and status != constants.OPEN:
             return trade
 
+        try:
+            refreshed_trade = self.maybe_refresh_trade(resolved_trade_id, ts=ts)
+        except Exception as exc:
+            log.warning("Periodic trade refresh failed trade_id=%s: %s", resolved_trade_id, exc)
+            refreshed_trade = None
+        if refreshed_trade is not None:
+            trade = refreshed_trade
+            status = str(trade.get("status") or "").strip().upper()
+            if status in self.CLOSED_STATUSES:
+                return trade
+            if status and status != constants.OPEN:
+                return trade
+
         if self.mode == constants.SANDBOX:
             exit_signal = self._local_exit_signal(trade, o=o, h=h, l=l, c=c, include_target=False)
             if exit_signal and exit_signal.get("reason") == constants.STOPLOSS_HIT:
@@ -672,7 +720,7 @@ class OrderSystemClient:
             update.get("sl_limit", 0.0),
         )
         try:
-            self.modify_trade(
+            modify_response = self.modify_trade(
                 resolved_trade_id,
                 stoploss=update["stoploss"],
                 sl_limit=update.get("sl_limit"),
@@ -682,7 +730,25 @@ class OrderSystemClient:
             if _is_rate_limit_error(exc):
                 log.warning("Trailing SL modify deferred by rate limit trade_id=%s: %s", resolved_trade_id, exc)
                 return trade
+            if _is_terminal_order_modify_error(exc):
+                log.warning(
+                    "Trailing SL modify skipped because broker order is already terminal; refreshing trade_id=%s: %s",
+                    resolved_trade_id,
+                    exc,
+                )
+                try:
+                    return self.refresh_trade(resolved_trade_id, ts=ts)
+                except Exception as refresh_exc:
+                    log.warning("Trade refresh after terminal modify response failed trade_id=%s: %s", resolved_trade_id, refresh_exc)
+                    return trade
             raise
+        modified_order_ids = modify_response.get("modified_order_ids") if isinstance(modify_response, Mapping) else None
+        if not modified_order_ids:
+            try:
+                return self.refresh_trade(resolved_trade_id, ts=ts)
+            except Exception as refresh_exc:
+                log.warning("Trade refresh after no-op modify response failed trade_id=%s: %s", resolved_trade_id, refresh_exc)
+                return trade
         trade.update({
             "stoploss": update["stoploss"],
             "sl_limit": update.get("sl_limit"),
@@ -706,7 +772,28 @@ class OrderSystemClient:
             "reason": reason or constants.EOD_SQUARE_OFF,
             "validity": self.validity,
         })
-        response = self._request("POST", f"/v1/trades/{trade_id}/square-off", json=payload)
+        try:
+            response = self._request("POST", f"/v1/trades/{trade_id}/square-off", json=payload)
+        except OrderSystemError as exc:
+            if _is_terminal_order_modify_error(exc):
+                log.warning(
+                    "Square-off hit terminal broker order response; refreshing trade_id=%s before failing: %s",
+                    trade_id,
+                    exc,
+                )
+                try:
+                    trade = self.refresh_trade(trade_id, ts=ts)
+                    status = str((trade or {}).get("status") or "").strip().upper()
+                    if status in self.CLOSED_STATUSES:
+                        self._log_local_event(
+                            "SQUARE_OFF_SYNC_CLOSED_TRADE",
+                            trade,
+                            extra={"request": payload, "error": str(exc)},
+                        )
+                        return trade
+                except Exception as refresh_exc:
+                    log.warning("Trade refresh after square-off terminal response failed trade_id=%s: %s", trade_id, refresh_exc)
+            raise
         updates = {
             "status": response.get("status") or payload.get("reason"),
             "exit_price": response.get("exit_price") or payload.get("exit_price"),
@@ -1696,6 +1783,18 @@ def _is_rate_limit_error(exc: Exception) -> bool:
     if isinstance(exc, OrderSystemError) and exc.status_code == 429:
         return True
     return _message_looks_rate_limited(str(exc))
+
+
+def _is_terminal_order_modify_error(exc: Exception) -> bool:
+    lower = str(exc or "").lower()
+    return (
+        "udapi100041" in lower
+        or "already cancelled" in lower
+        or "already canceled" in lower
+        or "already rejected" in lower
+        or "already completed" in lower
+        or ("modifications of already" in lower and "orders is not allowed" in lower)
+    )
 
 
 def _message_looks_rate_limited(message: str) -> bool:

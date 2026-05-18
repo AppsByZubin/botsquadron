@@ -597,6 +597,22 @@ func (s *Service) SquareOffTrade(ctx context.Context, tradeID string, req model.
 	if err != nil {
 		return model.SquareOffTradeResponse{}, err
 	}
+	if len(exitOrderIDs) == 0 {
+		closedTrade, err := s.store.GetTradeByID(ctx, tradeID)
+		if err != nil {
+			return model.SquareOffTradeResponse{}, fmt.Errorf("reload trade after square-off broker sync: %w", err)
+		}
+		if isClosedTradeStatus(closedTrade.Status) {
+			return model.SquareOffTradeResponse{
+				TradeID:   tradeID,
+				Status:    closedTrade.Status,
+				ExitPrice: closedTrade.ExitPrice,
+				ExitTime:  closedTrade.ExitTime,
+				Message:   "trade already closed after stoploss broker sync",
+			}, nil
+		}
+		return model.SquareOffTradeResponse{}, fmt.Errorf("square-off did not produce exit order ids for trade_id=%s; trade status is %s", tradeID, closedTrade.Status)
+	}
 
 	if err := s.store.SquareOffTrade(ctx, tradeID, exitOrderIDs, req.ExitPrice, trade.Qty, req.ExitTime, exitStatus); err != nil {
 		return model.SquareOffTradeResponse{}, err
@@ -656,6 +672,15 @@ func (s *Service) squareOffBrokerOrders(ctx context.Context, trade model.Trade, 
 		if orderID == "" {
 			continue
 		}
+		if message, outcome, _ := s.syncStopLossTerminalStateDetailed(ctx, trade, orderID, "pre-square-off"); outcome != stopLossNotTerminal {
+			if outcome == stopLossFilled {
+				log.Printf("square-off skipped already filled stoploss order trade_id=%s order_id=%s: %s", trade.ID, orderID, message)
+				continue
+			}
+			failedOrderMessages = append(failedOrderMessages, message)
+			continue
+		}
+
 		qty := squareOffBrokerOrderQuantity(trade, orderID)
 		if qty <= 0 {
 			failedOrderMessages = append(failedOrderMessages, fmt.Sprintf("%s: quantity missing", orderID))
@@ -671,6 +696,20 @@ func (s *Service) squareOffBrokerOrders(ctx context.Context, trade model.Trade, 
 			TriggerPrice: 0,
 		})
 		if err != nil {
+			if upstox.IsRateLimited(err) {
+				return nil, fmt.Errorf("square-off rate limited for trade_id=%s order_id=%s: %w", trade.ID, orderID, err)
+			}
+			if isTerminalModifyOrderError(err) {
+				message, outcome, _ := s.syncStopLossTerminalStateDetailed(ctx, trade, orderID, "square-off modify rejected")
+				if outcome == stopLossFilled {
+					log.Printf("square-off synced already filled stoploss order trade_id=%s order_id=%s: %s", trade.ID, orderID, message)
+					continue
+				}
+				if outcome == stopLossTerminalUnfilled {
+					failedOrderMessages = append(failedOrderMessages, message)
+					continue
+				}
+			}
 			failedOrderMessages = append(failedOrderMessages, fmt.Sprintf("%s: %v", orderID, err))
 			continue
 		}
@@ -856,7 +895,8 @@ func entryOrderAlreadySynced(order model.EntryOrderForPolling) bool {
 }
 
 func (s *Service) syncStopLossBeforeModify(ctx context.Context, trade model.Trade, orderID string) (string, bool) {
-	message, handled, _ := s.syncStopLossTerminalState(ctx, trade, orderID, "pre-modify")
+	message, outcome, _ := s.syncStopLossTerminalStateDetailed(ctx, trade, orderID, "pre-modify")
+	handled := outcome != stopLossNotTerminal
 	return message, handled
 }
 
@@ -864,11 +904,25 @@ func (s *Service) syncStopLossAfterTerminalModifyError(ctx context.Context, trad
 	if !isTerminalModifyOrderError(modifyErr) {
 		return "", false
 	}
-	message, handled, _ := s.syncStopLossTerminalState(ctx, trade, orderID, "modify rejected")
+	message, outcome, _ := s.syncStopLossTerminalStateDetailed(ctx, trade, orderID, "modify rejected")
+	handled := outcome != stopLossNotTerminal
 	return message, handled
 }
 
 func (s *Service) syncStopLossTerminalState(ctx context.Context, trade model.Trade, orderID string, reason string) (string, bool, bool) {
+	message, outcome, synced := s.syncStopLossTerminalStateDetailed(ctx, trade, orderID, reason)
+	return message, outcome != stopLossNotTerminal, synced
+}
+
+type stopLossTerminalOutcome int
+
+const (
+	stopLossNotTerminal stopLossTerminalOutcome = iota
+	stopLossFilled
+	stopLossTerminalUnfilled
+)
+
+func (s *Service) syncStopLossTerminalStateDetailed(ctx context.Context, trade model.Trade, orderID string, reason string) (string, stopLossTerminalOutcome, bool) {
 	pollingTrade := tradeForStopLossSync(trade)
 	slOrder := stopLossOrderForSync(pollingTrade, trade, orderID)
 
@@ -885,7 +939,7 @@ func (s *Service) syncStopLossTerminalState(ctx context.Context, trade model.Tra
 	}
 
 	if tradesErr != nil && statusErr != nil {
-		return "", false, false
+		return "", stopLossNotTerminal, false
 	}
 
 	if tradesResp.Filled || upstox.IsFilledOrderStatus(statusResp.Status) {
@@ -898,7 +952,7 @@ func (s *Service) syncStopLossTerminalState(ctx context.Context, trade model.Tra
 			filledQty = tradesResp.FilledQuantity
 		}
 		s.recordStopLossFill(ctx, pollingTrade, slOrder, statusResp, avgPrice, filledQty)
-		return fmt.Sprintf("%s: stoploss order already filled; synced trade status", orderID), true, true
+		return fmt.Sprintf("%s: stoploss order already filled; synced trade status", orderID), stopLossFilled, true
 	}
 
 	terminalStatus := strings.TrimSpace(statusResp.Status)
@@ -907,10 +961,10 @@ func (s *Service) syncStopLossTerminalState(ctx context.Context, trade model.Tra
 	}
 	if upstox.IsTerminalOrderStatus(terminalStatus) {
 		s.handleTerminalUnfilledStopLoss(ctx, trade.ID, orderID, terminalStatus)
-		return fmt.Sprintf("%s: stoploss order already terminal (%s); disabled trailing", orderID, terminalStatus), true, true
+		return fmt.Sprintf("%s: stoploss order already terminal (%s); disabled trailing", orderID, terminalStatus), stopLossTerminalUnfilled, true
 	}
 
-	return "", false, true
+	return "", stopLossNotTerminal, true
 }
 
 func tradeForStopLossSync(trade model.Trade) model.TradeForSLPolling {

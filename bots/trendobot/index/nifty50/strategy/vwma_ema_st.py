@@ -191,6 +191,7 @@ class VwmaEmaStStrategy:
         self._setup_gap_state()
         if intraday_index_candles is not None or intraday_future_candles is not None:
             self._initialize_from_intraday_candles(intraday_index_candles, intraday_future_candles)
+        self._restore_open_order_container_from_ordersystem()
 
     # ------------------------------------------------------------------
     # Gap helpers
@@ -234,6 +235,116 @@ class VwmaEmaStStrategy:
             if norm in {"0", "false", "no", "n", "off"}:
                 return False
         return default
+
+    def _restore_open_order_container_from_ordersystem(self) -> None:
+        if self.order_maneger is None or not hasattr(self.order_maneger, "get_account_details"):
+            return
+        if self._order_container.get("status") == constants.OPEN:
+            return
+
+        try:
+            account = self.order_maneger.get_account_details()
+        except Exception as exc:
+            logger.warning(f"Open trade restore skipped; ordersystem account lookup failed: {exc}")
+            return
+
+        trades = account.get("trades") if isinstance(account, dict) else None
+        if not isinstance(trades, list):
+            return
+
+        open_trades = [
+            trade
+            for trade in trades
+            if isinstance(trade, dict)
+            and str(trade.get("status") or "").strip().upper() == constants.OPEN
+        ]
+        if not open_trades:
+            return
+        if len(open_trades) > 1:
+            logger.warning("Multiple OPEN trades found during startup restore; using latest trade from ordersystem response.")
+
+        if self._restore_order_container_from_trade(open_trades[-1]):
+            self._order_counter = max(self._order_counter, 1)
+
+    def _restore_order_container_from_trade(self, trade: Dict[str, Any]) -> bool:
+        trade_id = str(trade.get("id") or trade.get("trade_id") or "").strip()
+        instrument_key = str(trade.get("instrument_token") or "").strip()
+        if not trade_id or not instrument_key:
+            logger.warning(f"Cannot restore OPEN trade with missing id/instrument_token: {trade}")
+            return False
+
+        contract = self._find_selected_contract(instrument_key, str(trade.get("symbol") or ""))
+        instrument_symbol = str(
+            trade.get("symbol")
+            or (contract or {}).get("trading_symbol")
+            or (contract or {}).get("symbol")
+            or ""
+        ).strip()
+        qty = safe_float(trade.get("qty"))
+        ltp = (
+            safe_float(trade.get("entry_price"))
+            or safe_float((contract or {}).get("ltp"))
+        )
+
+        self._order_container.update({
+            "trade_id": trade_id,
+            "side": self._strategy_side_from_trade(trade, contract),
+            "instrument_key": instrument_key,
+            "instrument_symbol": instrument_symbol,
+            "status": constants.OPEN,
+            "ltp": ltp,
+            "lot": int(qty) if qty is not None and qty > 0 else None,
+            "max_gamma": None,
+            "supertrend_flip_sl_modified_key": None,
+        })
+        logger.info(f"Restored OPEN trade from ordersystem into _order_container: {self._order_container}")
+        return True
+
+    def _find_selected_contract(self, instrument_key: str, symbol: str = "") -> Optional[Dict[str, Any]]:
+        target_key = str(instrument_key or "").strip()
+        target_symbol = str(symbol or "").strip().upper()
+
+        def visit(value: Any) -> Optional[Dict[str, Any]]:
+            if isinstance(value, dict):
+                value_key = str(value.get("instrument_key") or "").strip()
+                value_symbol = str(value.get("trading_symbol") or value.get("symbol") or "").strip().upper()
+                if (target_key and value_key == target_key) or (target_symbol and value_symbol == target_symbol):
+                    return value
+                for nested in value.values():
+                    if isinstance(nested, (dict, list, tuple)):
+                        found = visit(nested)
+                        if found is not None:
+                            return found
+            elif isinstance(value, (list, tuple)):
+                for item in value:
+                    found = visit(item)
+                    if found is not None:
+                        return found
+            return None
+
+        return visit(self.selected_contracts)
+
+    def _strategy_side_from_trade(self, trade: Dict[str, Any], contract: Optional[Dict[str, Any]]) -> Optional[str]:
+        values = [trade.get("symbol"), trade.get("description")]
+        if isinstance(contract, dict):
+            values.extend([
+                contract.get("trading_symbol"),
+                contract.get("symbol"),
+                contract.get("instrument_type"),
+                contract.get("option_type"),
+                contract.get("type"),
+            ])
+
+        for value in values:
+            text = str(value or "").strip().upper()
+            if not text:
+                continue
+            tokens = text.replace("_", " ").replace("-", " ").replace("|", " ").split()
+            if "CALL" in tokens or "CE" in tokens or text.endswith("CE"):
+                return constants.CALL
+            if "PUT" in tokens or "PE" in tokens or text.endswith("PE"):
+                return constants.PUT
+        return None
 
     @staticmethod
     def _indicator_flag_is_true(value: Any) -> bool:
@@ -2040,25 +2151,40 @@ class VwmaEmaStStrategy:
                 self._order_container["ltp"] = float(latest_ltp)
 
                 try:
-                    if hasattr(self.order_maneger, "refresh_trade_status") and self._order_container.get("trade_id"):
-                        closed_status = self.order_maneger.refresh_trade_status(self._order_container.get("trade_id"), ts=ts)
-                        if closed_status in [constants.STOPLOSS_HIT, constants.TARGET_HIT, constants.MANUAL_EXIT, constants.EOD_SQUARE_OFF, constants.KILL_SWITCH]:
-                            self._set_post_exit_cooldown(closed_status, ts=ts)
-                            trade_info = self.order_maneger.get_trade_by_id(self._order_container.get("trade_id"))
-                            self._update_today_realized_pnl_on_trade_close(trade_info, ts=ts)
-                            logger.info(f"Broker sync closed trade: {trade_info}")
-                            self._reset_order_container()
-                            return
+                    trade_id = self._order_container.get("trade_id")
+                    trade_info = None
+                    if hasattr(self.order_maneger, "maybe_refresh_trade") and trade_id:
+                        trade_info = self.order_maneger.maybe_refresh_trade(trade_id, ts=ts)
+                    elif hasattr(self.order_maneger, "refresh_trade") and trade_id:
+                        trade_info = self.order_maneger.refresh_trade(trade_id, ts=ts)
+                    elif hasattr(self.order_maneger, "refresh_trade_status") and trade_id:
+                        closed_status = self.order_maneger.refresh_trade_status(trade_id, ts=ts)
+                        if closed_status:
+                            trade_info = {"id": trade_id, "trade_id": trade_id, "status": closed_status}
+                    closed_status = str((trade_info or {}).get("status") or "").strip()
+                    if closed_status in [constants.STOPLOSS_HIT, constants.TARGET_HIT, constants.MANUAL_EXIT, constants.EOD_SQUARE_OFF, constants.KILL_SWITCH]:
+                        self._set_post_exit_cooldown(closed_status, ts=ts)
+                        if hasattr(self.order_maneger, "get_trade_by_id"):
+                            trade_info = self.order_maneger.get_trade_by_id(trade_id)
+                        self._update_today_realized_pnl_on_trade_close(trade_info, ts=ts)
+                        logger.info(f"Broker sync closed trade: {trade_info}")
+                        self._reset_order_container()
+                        return
                 except Exception as e:
                     logger.warning(f"refresh_trade_status failed: {e}")
 
-                _ = self.order_maneger.on_tick(
+                tick_result = self.order_maneger.on_tick(
                     symbol=self._order_container["instrument_symbol"],
                     o=latest_ltp, h=latest_ltp, l=latest_ltp, c=latest_ltp,
                     ts=ts,
                 )
 
-                trade_info = self.order_maneger.get_trade_by_id(self._order_container.get("trade_id"))
+                trade_id = self._order_container.get("trade_id")
+                trade_info = tick_result if isinstance(tick_result, dict) else None
+                if trade_info is None and hasattr(self.order_maneger, "maybe_refresh_trade"):
+                    trade_info = self.order_maneger.maybe_refresh_trade(trade_id, ts=ts)
+                if trade_info is None:
+                    trade_info = self.order_maneger.get_trade_by_id(trade_id)
                 if trade_info and trade_info.get("status") in [
                     constants.TARGET_HIT,
                     constants.STOPLOSS_HIT,
