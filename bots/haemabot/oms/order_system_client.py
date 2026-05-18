@@ -682,7 +682,7 @@ class OrderSystemClient:
             force_trail,
         )
         try:
-            self.modify_trade(
+            modify_response = self.modify_trade(
                 resolved_trade_id,
                 stoploss=update["stoploss"],
                 sl_limit=update.get("sl_limit"),
@@ -692,7 +692,25 @@ class OrderSystemClient:
             if _is_rate_limit_error(exc):
                 log.warning("Trailing SL modify deferred by rate limit trade_id=%s: %s", resolved_trade_id, exc)
                 return trade
+            if _is_terminal_order_modify_error(exc):
+                log.warning(
+                    "Trailing SL modify skipped because broker order is already terminal; refreshing trade_id=%s: %s",
+                    resolved_trade_id,
+                    exc,
+                )
+                try:
+                    return self.refresh_trade(resolved_trade_id, ts=ts)
+                except Exception as refresh_exc:
+                    log.warning("Trade refresh after terminal modify response failed trade_id=%s: %s", resolved_trade_id, refresh_exc)
+                    return trade
             raise
+        modified_order_ids = modify_response.get("modified_order_ids") if isinstance(modify_response, Mapping) else None
+        if not modified_order_ids:
+            try:
+                return self.refresh_trade(resolved_trade_id, ts=ts)
+            except Exception as refresh_exc:
+                log.warning("Trade refresh after no-op modify response failed trade_id=%s: %s", resolved_trade_id, refresh_exc)
+                return trade
         trade.update({
             "stoploss": update["stoploss"],
             "sl_limit": update.get("sl_limit"),
@@ -1714,6 +1732,18 @@ def _is_rate_limit_error(exc: Exception) -> bool:
     if isinstance(exc, OrderSystemError) and exc.status_code == 429:
         return True
     return _message_looks_rate_limited(str(exc))
+
+
+def _is_terminal_order_modify_error(exc: Exception) -> bool:
+    lower = str(exc or "").lower()
+    return (
+        "udapi100041" in lower
+        or "already cancelled" in lower
+        or "already canceled" in lower
+        or "already rejected" in lower
+        or "already completed" in lower
+        or ("modifications of already" in lower and "orders is not allowed" in lower)
+    )
 
 
 def _message_looks_rate_limited(message: str) -> bool:

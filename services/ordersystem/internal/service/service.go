@@ -471,6 +471,7 @@ func (s *Service) ModifyTrade(ctx context.Context, tradeID string, req model.Mod
 
 	modifiedOrderIDs := make([]string, 0, len(trade.SLOrderIDs))
 	failedOrderMessages := make([]string, 0)
+	terminalOrderMessages := make([]string, 0)
 
 	for _, slOrderID := range trade.SLOrderIDs {
 		orderID := strings.TrimSpace(slOrderID)
@@ -496,6 +497,10 @@ func (s *Service) ModifyTrade(ctx context.Context, tradeID string, req model.Mod
 			if upstox.IsRateLimited(err) {
 				return model.ModifyTradeResponse{}, fmt.Errorf("modify trade rate limited for trade_id=%s order_id=%s: %w", tradeID, orderID, err)
 			}
+			if message, handled := s.syncStopLossAfterTerminalModifyError(ctx, trade, orderID, err); handled {
+				terminalOrderMessages = append(terminalOrderMessages, message)
+				continue
+			}
 			failedOrderMessages = append(failedOrderMessages, fmt.Sprintf("%s: %v", orderID, err))
 			continue
 		}
@@ -507,14 +512,26 @@ func (s *Service) ModifyTrade(ctx context.Context, tradeID string, req model.Mod
 		return model.ModifyTradeResponse{}, fmt.Errorf("modify trade partially failed for trade_id=%s: %s", tradeID, strings.Join(failedOrderMessages, "; "))
 	}
 
+	if len(modifiedOrderIDs) == 0 && len(terminalOrderMessages) > 0 {
+		return model.ModifyTradeResponse{
+			TradeID: tradeID,
+			Message: strings.Join(terminalOrderMessages, "; "),
+		}, nil
+	}
+
 	if err := s.persistModifiedTradeState(ctx, tradeID, stoploss, slLimit, spotTrailAnchor); err != nil {
 		return model.ModifyTradeResponse{}, err
+	}
+
+	message := fmt.Sprintf("trade stoploss orders modified on upstox (%s)", mode)
+	if len(terminalOrderMessages) > 0 {
+		message = message + "; " + strings.Join(terminalOrderMessages, "; ")
 	}
 
 	return model.ModifyTradeResponse{
 		TradeID:          tradeID,
 		ModifiedOrderIDs: modifiedOrderIDs,
-		Message:          fmt.Sprintf("trade stoploss orders modified on upstox (%s)", mode),
+		Message:          message,
 	}, nil
 }
 
@@ -760,19 +777,16 @@ func (s *Service) refreshStopLossTrade(ctx context.Context, trade model.TradeFor
 			} else {
 				log.Printf("poll sl order trades failed for trade_id=%s order_id=%s: %v", trade.ID, orderID, err)
 			}
-		} else if upstox.IsTerminalOrderStatus(tradesResp.Status) {
-			s.handleTerminalUnfilledStopLoss(ctx, trade.ID, orderID, tradesResp.Status)
-			continue
 		}
 
 		statusResp, err := s.upstox.GetOrderStatus(ctx, orderID)
 		if err != nil {
 			if upstox.IsRateLimited(err) {
 				log.Printf("poll sl order status rate-limited for trade_id=%s order_id=%s: %v", trade.ID, orderID, err)
+				continue
 			} else {
 				log.Printf("poll sl order status failed for trade_id=%s order_id=%s: %v", trade.ID, orderID, err)
 			}
-			continue
 		}
 
 		if tradesResp.Filled || upstox.IsFilledOrderStatus(statusResp.Status) {
@@ -788,11 +802,15 @@ func (s *Service) refreshStopLossTrade(ctx context.Context, trade model.TradeFor
 			continue
 		}
 
-		if !upstox.IsTerminalOrderStatus(statusResp.Status) {
+		terminalStatus := strings.TrimSpace(statusResp.Status)
+		if terminalStatus == "" {
+			terminalStatus = strings.TrimSpace(tradesResp.Status)
+		}
+		if !upstox.IsTerminalOrderStatus(terminalStatus) {
 			continue
 		}
 
-		s.handleTerminalUnfilledStopLoss(ctx, trade.ID, orderID, statusResp.Status)
+		s.handleTerminalUnfilledStopLoss(ctx, trade.ID, orderID, terminalStatus)
 	}
 }
 
@@ -830,6 +848,135 @@ func (s *Service) syncEntryOrders(ctx context.Context, trade model.TradeForSLPol
 
 func entryOrderAlreadySynced(order model.EntryOrderForPolling) bool {
 	return order.EntryPrice > 0 && order.Qty > 0 && order.Brokerage > 0
+}
+
+func (s *Service) syncStopLossAfterTerminalModifyError(ctx context.Context, trade model.Trade, orderID string, modifyErr error) (string, bool) {
+	if !isTerminalModifyOrderError(modifyErr) {
+		return "", false
+	}
+
+	pollingTrade := tradeForStopLossSync(trade)
+	slOrder := stopLossOrderForSync(pollingTrade, trade, orderID)
+
+	var tradesResp upstox.OrderTrades
+	tradesResp, tradesErr := s.upstox.GetOrderTrades(ctx, orderID)
+	if tradesErr != nil {
+		log.Printf("modify rejected; order trades status sync failed for trade_id=%s order_id=%s: %v", trade.ID, orderID, tradesErr)
+	}
+
+	var statusResp upstox.OrderStatus
+	statusResp, statusErr := s.upstox.GetOrderStatus(ctx, orderID)
+	if statusErr != nil {
+		log.Printf("modify rejected; order status sync failed for trade_id=%s order_id=%s: %v", trade.ID, orderID, statusErr)
+	}
+
+	if tradesErr != nil && statusErr != nil {
+		return "", false
+	}
+
+	if tradesResp.Filled || upstox.IsFilledOrderStatus(statusResp.Status) {
+		avgPrice := statusResp.AveragePrice
+		if tradesResp.AveragePrice != nil && *tradesResp.AveragePrice > 0 {
+			avgPrice = tradesResp.AveragePrice
+		}
+		filledQty := statusResp.FilledQuantity
+		if tradesResp.FilledQuantity > 0 {
+			filledQty = tradesResp.FilledQuantity
+		}
+		s.recordStopLossFill(ctx, pollingTrade, slOrder, statusResp, avgPrice, filledQty)
+		return fmt.Sprintf("%s: stoploss order already filled; synced trade status", orderID), true
+	}
+
+	terminalStatus := strings.TrimSpace(statusResp.Status)
+	if terminalStatus == "" {
+		terminalStatus = strings.TrimSpace(tradesResp.Status)
+	}
+	if upstox.IsTerminalOrderStatus(terminalStatus) {
+		s.handleTerminalUnfilledStopLoss(ctx, trade.ID, orderID, terminalStatus)
+		return fmt.Sprintf("%s: stoploss order already terminal (%s); disabled trailing", orderID, terminalStatus), true
+	}
+
+	return "", false
+}
+
+func tradeForStopLossSync(trade model.Trade) model.TradeForSLPolling {
+	out := model.TradeForSLPolling{
+		ID:              trade.ID,
+		BotName:         trade.BotName,
+		InstrumentToken: trade.InstrumentToken,
+		Side:            trade.Side,
+		Qty:             trade.Qty,
+		Product:         trade.Product,
+		EntryPrice:      trade.EntryPrice,
+		TotalBrokerage:  trade.TotalBrokerage,
+	}
+
+	for _, order := range trade.Orders {
+		orderID := strings.TrimSpace(order.OrderID)
+		if orderID == "" {
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(order.OrderType)) {
+		case "entry":
+			out.EntryOrders = append(out.EntryOrders, model.EntryOrderForPolling{
+				OrderID:    orderID,
+				EntryPrice: order.EntryPrice,
+				Qty:        order.Qty,
+				Brokerage:  order.Brokerage,
+			})
+		case "sl":
+			out.SLOrders = append(out.SLOrders, model.StopLossOrderForPolling{
+				OrderID:   orderID,
+				Stoploss:  order.Stoploss,
+				Qty:       order.Qty,
+				Brokerage: order.Brokerage,
+			})
+		}
+	}
+
+	if len(out.EntryOrders) == 0 {
+		for _, orderID := range trade.EntryOrderIDs {
+			orderID = strings.TrimSpace(orderID)
+			if orderID == "" {
+				continue
+			}
+			out.EntryOrders = append(out.EntryOrders, model.EntryOrderForPolling{
+				OrderID:    orderID,
+				EntryPrice: trade.EntryPrice,
+				Qty:        trade.Qty,
+			})
+		}
+	}
+
+	if len(out.SLOrders) == 0 {
+		for _, orderID := range trade.SLOrderIDs {
+			orderID = strings.TrimSpace(orderID)
+			if orderID == "" {
+				continue
+			}
+			out.SLOrders = append(out.SLOrders, model.StopLossOrderForPolling{
+				OrderID:  orderID,
+				Stoploss: trade.Stoploss,
+				Qty:      slOrderQuantity(trade, orderID),
+			})
+		}
+	}
+
+	return out
+}
+
+func stopLossOrderForSync(pollingTrade model.TradeForSLPolling, trade model.Trade, orderID string) model.StopLossOrderForPolling {
+	orderID = strings.TrimSpace(orderID)
+	for _, slOrder := range pollingTrade.SLOrders {
+		if strings.TrimSpace(slOrder.OrderID) == orderID {
+			return slOrder
+		}
+	}
+	return model.StopLossOrderForPolling{
+		OrderID:  orderID,
+		Stoploss: trade.Stoploss,
+		Qty:      slOrderQuantity(trade, orderID),
+	}
 }
 
 func (s *Service) recordStopLossFill(ctx context.Context, trade model.TradeForSLPolling, slOrder model.StopLossOrderForPolling, statusResp upstox.OrderStatus, averagePrice *float64, filledQty int) {
@@ -1141,4 +1288,17 @@ func isClosedTradeStatus(status string) bool {
 	default:
 		return false
 	}
+}
+
+func isTerminalModifyOrderError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "udapi100041") ||
+		strings.Contains(msg, "already cancelled") ||
+		strings.Contains(msg, "already canceled") ||
+		strings.Contains(msg, "already rejected") ||
+		strings.Contains(msg, "already completed") ||
+		(strings.Contains(msg, "modifications of already") && strings.Contains(msg, "orders is not allowed"))
 }
