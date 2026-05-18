@@ -23,6 +23,7 @@ type InstrumentSubscription struct {
 	BotID          string   `json:"bot_id"`
 	InstrumentKeys []string `json:"instrument_keys"`
 	Action         string   `json:"action"`
+	ForceReconnect bool     `json:"force_reconnect,omitempty"`
 }
 
 type TickData struct {
@@ -93,12 +94,12 @@ func (bm *BotManager) handleInstrumentSubscription(msg *nats.Msg) {
 
 	switch sub.Action {
 	case "subscribe":
-		bm.addOrUpdateBot(sub.BotID, sub.InstrumentKeys)
+		bm.addOrUpdateBot(sub.BotID, sub.InstrumentKeys, sub.ForceReconnect)
 	case "add":
 		if bot, exists := bm.bots[sub.BotID]; exists {
 			bot.addInstruments(sub.InstrumentKeys, bm.upstoxToken)
 		} else {
-			bm.addOrUpdateBot(sub.BotID, sub.InstrumentKeys)
+			bm.addOrUpdateBot(sub.BotID, sub.InstrumentKeys, false)
 		}
 	case "remove":
 		if bot, exists := bm.bots[sub.BotID]; exists {
@@ -109,9 +110,9 @@ func (bm *BotManager) handleInstrumentSubscription(msg *nats.Msg) {
 	}
 }
 
-func (bm *BotManager) addOrUpdateBot(botID string, instrumentKeys []string) {
+func (bm *BotManager) addOrUpdateBot(botID string, instrumentKeys []string, forceReconnect bool) {
 	if bot, exists := bm.bots[botID]; exists {
-		bot.updateInstruments(instrumentKeys, bm.upstoxToken)
+		bot.updateInstruments(instrumentKeys, bm.upstoxToken, forceReconnect)
 	} else {
 		ctx, cancel := context.WithCancel(context.Background())
 		bot := &BotHandler{
@@ -176,7 +177,7 @@ func (bm *BotManager) shutdown() {
 	}
 }
 
-func (bh *BotHandler) updateInstruments(instrumentKeys []string, token string) {
+func (bh *BotHandler) updateInstruments(instrumentKeys []string, token string, forceReconnect bool) {
 	bh.mu.Lock()
 	bh.instrumentKeys = make(map[string]bool)
 	for _, key := range instrumentKeys {
@@ -184,6 +185,12 @@ func (bh *BotHandler) updateInstruments(instrumentKeys []string, token string) {
 	}
 	conn := bh.conn
 	bh.mu.Unlock()
+
+	if forceReconnect && conn != nil {
+		log.Printf("Force reconnect requested for bot %s; recycling Upstox websocket", bh.botID)
+		bh.closeWebSocket(conn, "force reconnect requested by subscriber")
+		return
+	}
 
 	bh.ensureWebSocket(token)
 	if conn != nil {

@@ -177,6 +177,7 @@ class MockOrderSystemClient(OrderSystemClient):
         c: Optional[float] = None,
         ts: Optional[datetime] = None,
         trade_id: Optional[str] = None,
+        force_trail: bool = False,
     ) -> Optional[Dict[str, Any]]:
         resolved_trade_id = str(
             trade_id
@@ -207,7 +208,16 @@ class MockOrderSystemClient(OrderSystemClient):
                 reason=exit_signal.get("reason"),
             )
 
-        return super().on_tick(symbol=symbol, o=o, h=h, l=l, c=c, ts=ts, trade_id=resolved_trade_id)
+        return super().on_tick(
+            symbol=symbol,
+            o=o,
+            h=h,
+            l=l,
+            c=c,
+            ts=ts,
+            trade_id=resolved_trade_id,
+            force_trail=force_trail,
+        )
 
     def square_off_trade(
         self,

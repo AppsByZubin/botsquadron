@@ -575,6 +575,10 @@ async def nifty50_engine(strategy, mode, param_data):
             'instrument_keys': instrument_keys,
             'action': 'subscribe'
             }
+        watchdog_instrument_data = {
+            **instrument_data,
+            "force_reconnect": True,
+        }
             
         # NATS tick heartbeat/watchdog (equivalent intent to old WS last-msg tracking).
         instrument_keys_set = set(instrument_keys)
@@ -654,10 +658,10 @@ async def nifty50_engine(strategy, mode, param_data):
                 watchdog_state["last_resubscribe_t"] = now_epoch
                 logger.warning(
                     f"[NATS Watchdog] No tick payload for {idle_for:.1f}s. "
-                    f"Re-publishing subscribe for bot_id={bot_id}."
+                    f"Re-publishing subscribe with websocket reconnect for bot_id={bot_id}."
                 )
                 try:
-                    await _publish_marketfeeder_subscription(nc, instrument_data)
+                    await _publish_marketfeeder_subscription(nc, watchdog_instrument_data)
                 except Exception as pub_exc:
                     logger.warning(f"[NATS Watchdog] Failed to republish instrument subscription: {pub_exc}")
 

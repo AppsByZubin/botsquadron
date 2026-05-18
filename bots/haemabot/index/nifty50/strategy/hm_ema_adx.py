@@ -2292,11 +2292,15 @@ class HmEmaAdxStrategy:
 
             if latest_ltp is not None and ts is not None:
                 force_trail = self._should_force_trail_open_order()
-                force_trail_applied = self.order_maneger.on_tick(
+                tick_result = self.order_maneger.on_tick(
                     symbol=self._order_container["instrument_symbol"],
                     o=latest_ltp, h=latest_ltp, l=latest_ltp, c=latest_ltp,
                     ts=ts,
                     force_trail=force_trail,
+                )
+                force_trail_applied = (
+                    isinstance(tick_result, dict)
+                    and self._coerce_bool(tick_result.get("force_trail_applied"), False)
                 )
                 if force_trail_applied:
                     self._order_container["force_trail_lock"] = True

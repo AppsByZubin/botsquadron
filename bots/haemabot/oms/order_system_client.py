@@ -621,6 +621,7 @@ class OrderSystemClient:
         c: Optional[float] = None,
         ts: Optional[datetime] = None,
         trade_id: Optional[str] = None,
+        force_trail: bool = False,
     ) -> Optional[Dict[str, Any]]:
         price = _first_float(c, h, l, o)
         if price is None or price <= 0:
@@ -667,17 +668,18 @@ class OrderSystemClient:
         if not _to_bool(trade.get("tsl_active"), False):
             return trade
 
-        update = self._build_trailing_update(trade, price)
+        update = self._build_trailing_update(trade, price, force=force_trail)
         if update is None:
             return trade
 
         log.info(
-            "Trailing SL update trade_id=%s symbol=%s price=%.2f stoploss=%.2f sl_limit=%.2f",
+            "Trailing SL update trade_id=%s symbol=%s price=%.2f stoploss=%.2f sl_limit=%.2f force=%s",
             resolved_trade_id,
             symbol,
             price,
             update["stoploss"],
             update.get("sl_limit", 0.0),
+            force_trail,
         )
         try:
             self.modify_trade(
@@ -698,7 +700,10 @@ class OrderSystemClient:
             "spot_trail_anchor": price,
             "_spot_trail_anchor": price,
         })
-        return self._remember_trade(trade)
+        remembered = self._remember_trade(trade)
+        if force_trail:
+            remembered["force_trail_applied"] = True
+        return remembered
 
     def square_off_trade(
         self,
@@ -1284,7 +1289,12 @@ class OrderSystemClient:
             return {"reason": constants.TARGET_HIT, "exit_price": float(target)}
         return None
 
-    def _build_trailing_update(self, trade: Mapping[str, Any], price: float) -> Optional[Dict[str, float]]:
+    def _build_trailing_update(
+        self,
+        trade: Mapping[str, Any],
+        price: float,
+        force: bool = False,
+    ) -> Optional[Dict[str, float]]:
         entry = _to_float(trade.get("entry_price"), 0.0)
         trail_points = _to_float(_first_value(trade.get("trail_points"), trade.get("_trail_points")), 0.0)
         current_sl = _to_float(trade.get("stoploss"), 0.0)
@@ -1297,7 +1307,7 @@ class OrderSystemClient:
 
         if side == constants.SELL:
             start_price = entry - _start_after_points(entry, start_after)
-            if price > start_price:
+            if not force and price > start_price:
                 return None
             new_sl = self._round_price(price + trail_points, "FLOOR")
             if current_sl > 0 and new_sl >= current_sl - self.tick_size:
@@ -1309,7 +1319,7 @@ class OrderSystemClient:
             }
 
         start_price = entry + _start_after_points(entry, start_after)
-        if price < start_price:
+        if not force and price < start_price:
             return None
         new_sl = self._round_price(price - trail_points, "CEIL")
         if current_sl > 0 and new_sl <= current_sl + self.tick_size:
