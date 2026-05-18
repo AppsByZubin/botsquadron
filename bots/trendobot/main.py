@@ -33,7 +33,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "-l",
         "--level",
-        help="Execution Mode fallback when TRENDOBOT_MODE/SOLOBOT_MODE is not set",
+        help="Execution Mode fallback when TRENDOBOT_MODE is not set",
         choices=constants.EXECUTION_MODES,
     )
 

@@ -236,6 +236,10 @@ class PCRVwmaEmaOrbStrategy:
             return None
 
     def _resolve_order_mode(self) -> Optional[str]:
+        env_mode = os.getenv("SOLOBOT_MODE")
+        if env_mode:
+            return env_mode
+
         if isinstance(self.params, dict):
             for section_name in ("oms", "ordersystem", "order_system", "order-system"):
                 section = self.params.get(section_name)
@@ -250,7 +254,7 @@ class PCRVwmaEmaOrbStrategy:
                 if mode:
                     return str(mode)
 
-        return os.getenv("SOLOBOT_MODE") or os.getenv("APP_MODE")
+        return None
 
     def _restore_open_order_container_from_ordersystem(self) -> None:
         if self.order_manager is None or not hasattr(self.order_manager, "get_account_details"):

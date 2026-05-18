@@ -120,12 +120,7 @@ def normalize_execution_mode(mode):
 
 
 def resolve_execution_mode(fallback_mode=None):
-    mode = (
-        _first_env("HAEMABOT_MODE", "HEMABOT_MODE", "BOT_MODE")
-        or fallback_mode
-        or os.getenv("APP_MODE")
-        or MOCK
-    )
+    mode = os.getenv("HAEMABOT_MODE") or fallback_mode or MOCK
     normalized = normalize_execution_mode(mode)
     if normalized not in EXECUTION_MODES:
         allowed = ", ".join(EXECUTION_MODES)
