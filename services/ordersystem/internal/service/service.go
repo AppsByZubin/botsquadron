@@ -485,6 +485,11 @@ func (s *Service) ModifyTrade(ctx context.Context, tradeID string, req model.Mod
 			continue
 		}
 
+		if message, handled := s.syncStopLossBeforeModify(ctx, trade, orderID); handled {
+			terminalOrderMessages = append(terminalOrderMessages, message)
+			continue
+		}
+
 		if _, err := s.upstox.ModifyOrder(ctx, upstox.ModifyOrderRequest{
 			Quantity:     qty,
 			Validity:     validity,
@@ -850,28 +855,37 @@ func entryOrderAlreadySynced(order model.EntryOrderForPolling) bool {
 	return order.EntryPrice > 0 && order.Qty > 0 && order.Brokerage > 0
 }
 
+func (s *Service) syncStopLossBeforeModify(ctx context.Context, trade model.Trade, orderID string) (string, bool) {
+	message, handled, _ := s.syncStopLossTerminalState(ctx, trade, orderID, "pre-modify")
+	return message, handled
+}
+
 func (s *Service) syncStopLossAfterTerminalModifyError(ctx context.Context, trade model.Trade, orderID string, modifyErr error) (string, bool) {
 	if !isTerminalModifyOrderError(modifyErr) {
 		return "", false
 	}
+	message, handled, _ := s.syncStopLossTerminalState(ctx, trade, orderID, "modify rejected")
+	return message, handled
+}
 
+func (s *Service) syncStopLossTerminalState(ctx context.Context, trade model.Trade, orderID string, reason string) (string, bool, bool) {
 	pollingTrade := tradeForStopLossSync(trade)
 	slOrder := stopLossOrderForSync(pollingTrade, trade, orderID)
 
 	var tradesResp upstox.OrderTrades
 	tradesResp, tradesErr := s.upstox.GetOrderTrades(ctx, orderID)
 	if tradesErr != nil {
-		log.Printf("modify rejected; order trades status sync failed for trade_id=%s order_id=%s: %v", trade.ID, orderID, tradesErr)
+		log.Printf("%s; order trades status sync failed for trade_id=%s order_id=%s: %v", reason, trade.ID, orderID, tradesErr)
 	}
 
 	var statusResp upstox.OrderStatus
 	statusResp, statusErr := s.upstox.GetOrderStatus(ctx, orderID)
 	if statusErr != nil {
-		log.Printf("modify rejected; order status sync failed for trade_id=%s order_id=%s: %v", trade.ID, orderID, statusErr)
+		log.Printf("%s; order status sync failed for trade_id=%s order_id=%s: %v", reason, trade.ID, orderID, statusErr)
 	}
 
 	if tradesErr != nil && statusErr != nil {
-		return "", false
+		return "", false, false
 	}
 
 	if tradesResp.Filled || upstox.IsFilledOrderStatus(statusResp.Status) {
@@ -884,7 +898,7 @@ func (s *Service) syncStopLossAfterTerminalModifyError(ctx context.Context, trad
 			filledQty = tradesResp.FilledQuantity
 		}
 		s.recordStopLossFill(ctx, pollingTrade, slOrder, statusResp, avgPrice, filledQty)
-		return fmt.Sprintf("%s: stoploss order already filled; synced trade status", orderID), true
+		return fmt.Sprintf("%s: stoploss order already filled; synced trade status", orderID), true, true
 	}
 
 	terminalStatus := strings.TrimSpace(statusResp.Status)
@@ -893,10 +907,10 @@ func (s *Service) syncStopLossAfterTerminalModifyError(ctx context.Context, trad
 	}
 	if upstox.IsTerminalOrderStatus(terminalStatus) {
 		s.handleTerminalUnfilledStopLoss(ctx, trade.ID, orderID, terminalStatus)
-		return fmt.Sprintf("%s: stoploss order already terminal (%s); disabled trailing", orderID, terminalStatus), true
+		return fmt.Sprintf("%s: stoploss order already terminal (%s); disabled trailing", orderID, terminalStatus), true, true
 	}
 
-	return "", false
+	return "", false, true
 }
 
 func tradeForStopLossSync(trade model.Trade) model.TradeForSLPolling {

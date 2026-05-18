@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -319,6 +320,18 @@ func TestSLOrderQuantityRequiresOrderID(t *testing.T) {
 
 	if got := slOrderQuantity(trade, ""); got != 0 {
 		t.Fatalf("slOrderQuantity(empty order id) = %d, want 0", got)
+	}
+}
+
+func TestIsTerminalModifyOrderError(t *testing.T) {
+	t.Parallel()
+
+	terminalErr := `upstox modify order failed (400): {"errors":[{"errorCode":"UDAPI100041","message":"Modifications of already cancelled/rejected/completed orders is not allowed"}]}`
+	if !isTerminalModifyOrderError(errors.New(terminalErr)) {
+		t.Fatal("isTerminalModifyOrderError returned false for terminal Upstox modify error")
+	}
+	if isTerminalModifyOrderError(errors.New("temporary rate limit")) {
+		t.Fatal("isTerminalModifyOrderError returned true for unrelated error")
 	}
 }
 
