@@ -47,10 +47,11 @@ type FeedEntry struct {
 }
 
 type BotManager struct {
-	mu          sync.RWMutex
-	bots        map[string]*BotHandler
-	natsConn    *nats.Conn
-	upstoxToken string
+	mu            sync.RWMutex
+	subscriptions map[string]map[string]bool
+	handler       *BotHandler
+	natsConn      *nats.Conn
+	upstoxToken   string
 }
 
 type BotHandler struct {
@@ -93,9 +94,9 @@ func NewBotManager(natsConn *nats.Conn) *BotManager {
 	}
 
 	return &BotManager{
-		bots:        make(map[string]*BotHandler),
-		natsConn:    natsConn,
-		upstoxToken: token,
+		subscriptions: make(map[string]map[string]bool),
+		natsConn:      natsConn,
+		upstoxToken:   token,
 	}
 }
 
@@ -112,89 +113,114 @@ func (bm *BotManager) handleInstrumentSubscription(msg *nats.Msg) {
 	bm.mu.Lock()
 	defer bm.mu.Unlock()
 
+	botID := strings.TrimSpace(sub.BotID)
+	if botID == "" {
+		log.Printf("Ignoring instrument subscription with empty bot_id")
+		return
+	}
+
 	switch sub.Action {
 	case "subscribe":
-		bm.addOrUpdateBot(sub.BotID, sub.InstrumentKeys, sub.ForceReconnect)
+		bm.subscriptions[botID] = instrumentSet(sub.InstrumentKeys)
 	case "add":
-		if bot, exists := bm.bots[sub.BotID]; exists {
-			bot.addInstruments(sub.InstrumentKeys, bm.upstoxToken)
-		} else {
-			bm.addOrUpdateBot(sub.BotID, sub.InstrumentKeys, false)
+		current := bm.subscriptions[botID]
+		if current == nil {
+			current = make(map[string]bool)
+			bm.subscriptions[botID] = current
+		}
+		for _, key := range sub.InstrumentKeys {
+			if clean := strings.TrimSpace(key); clean != "" {
+				current[clean] = true
+			}
 		}
 	case "remove":
-		if bot, exists := bm.bots[sub.BotID]; exists {
-			bot.removeInstruments(sub.InstrumentKeys, bm.upstoxToken)
+		current := bm.subscriptions[botID]
+		for _, key := range sub.InstrumentKeys {
+			delete(current, strings.TrimSpace(key))
+		}
+		if len(current) == 0 {
+			delete(bm.subscriptions, botID)
 		}
 	case "unsubscribe":
-		bm.removeBot(sub.BotID)
+		delete(bm.subscriptions, botID)
+	default:
+		log.Printf("Ignoring unknown subscription action for bot %s: %s", botID, sub.Action)
+		return
 	}
+
+	bm.syncSharedHandlerLocked(sub.ForceReconnect)
 }
 
-func (bm *BotManager) addOrUpdateBot(botID string, instrumentKeys []string, forceReconnect bool) {
-	if bot, exists := bm.bots[botID]; exists {
-		bot.updateInstruments(instrumentKeys, bm.upstoxToken, forceReconnect)
-	} else {
+func instrumentSet(instrumentKeys []string) map[string]bool {
+	out := make(map[string]bool)
+	for _, key := range instrumentKeys {
+		if clean := strings.TrimSpace(key); clean != "" {
+			out[clean] = true
+		}
+	}
+	return out
+}
+
+func (bm *BotManager) unionInstrumentKeysLocked() []string {
+	seen := make(map[string]bool)
+	out := make([]string, 0)
+	for _, keys := range bm.subscriptions {
+		for key := range keys {
+			if !seen[key] {
+				seen[key] = true
+				out = append(out, key)
+			}
+		}
+	}
+	return out
+}
+
+func (bm *BotManager) syncSharedHandlerLocked(forceReconnect bool) {
+	unionKeys := bm.unionInstrumentKeysLocked()
+	if len(unionKeys) == 0 {
+		bm.stopSharedHandlerLocked("no active bot subscriptions")
+		return
+	}
+
+	if bm.handler == nil {
 		ctx, cancel := context.WithCancel(context.Background())
-		bot := &BotHandler{
-			botID:          botID,
+		bm.handler = &BotHandler{
+			botID:          "shared-marketfeeder",
 			instrumentKeys: make(map[string]bool),
 			ctx:            ctx,
 			cancel:         cancel,
 			natsConn:       bm.natsConn,
 		}
-
-		for _, key := range instrumentKeys {
-			bot.instrumentKeys[key] = true
-		}
-
-		bm.bots[botID] = bot
-		bot.ensureWebSocket(bm.upstoxToken)
-		log.Printf("Started new bot handler for %s with %d instruments", botID, len(instrumentKeys))
+		log.Printf("Started shared marketfeeder handler")
 	}
+
+	bm.handler.updateInstruments(unionKeys, bm.upstoxToken, forceReconnect)
+	log.Printf("Shared marketfeeder subscriptions: %d bots, %d union instruments", len(bm.subscriptions), len(unionKeys))
 }
 
-func (bm *BotManager) removeBot(botID string) {
-	botID = strings.TrimSpace(botID)
-	if botID == "" {
-		log.Printf("Ignoring unsubscribe with empty bot_id")
+func (bm *BotManager) stopSharedHandlerLocked(reason string) {
+	if bm.handler == nil {
 		return
 	}
 
-	bot, exists := bm.bots[botID]
-	if !exists {
-		log.Printf("No active bot handler to unsubscribe for %s", botID)
-		return
-	}
-
-	bot.cancel()
-	bot.mu.Lock()
-	conn := bot.conn
-	bot.conn = nil
-	bot.mu.Unlock()
+	log.Printf("Stopping shared marketfeeder handler: %s", reason)
+	bm.handler.cancel()
+	bm.handler.mu.Lock()
+	conn := bm.handler.conn
+	bm.handler.conn = nil
+	bm.handler.mu.Unlock()
 	if conn != nil {
 		if err := conn.Close(); err != nil {
-			log.Printf("Error closing websocket for bot %s: %v", botID, err)
+			log.Printf("Error closing shared websocket: %v", err)
 		}
 	}
-	delete(bm.bots, botID)
-	log.Printf("Unsubscribed and removed bot handler for %s", botID)
+	bm.handler = nil
 }
 
 func (bm *BotManager) shutdown() {
 	bm.mu.Lock()
 	defer bm.mu.Unlock()
-
-	for botID, bot := range bm.bots {
-		log.Printf("Shutting down bot %s", botID)
-		bot.cancel()
-		bot.mu.Lock()
-		conn := bot.conn
-		bot.conn = nil
-		bot.mu.Unlock()
-		if conn != nil {
-			conn.Close()
-		}
-	}
+	bm.stopSharedHandlerLocked("shutdown")
 }
 
 func (bh *BotHandler) updateInstruments(instrumentKeys []string, token string, forceReconnect bool) {
@@ -659,7 +685,6 @@ func (bh *BotHandler) handleTickData(message []byte) {
 
 		// Extract tick data based on feed type
 		var tick TickData
-		tick.BotID = bh.botID
 		tick.InstrumentKey = instrumentKey
 		tick.Timestamp = time.Unix(feedResponse.CurrentTs/1000, (feedResponse.CurrentTs%1000)*1000000)
 
@@ -689,8 +714,7 @@ func (bh *BotHandler) handleTickData(message []byte) {
 				}
 
 				payload := LiveFeedPayload{
-					BotID: bh.botID,
-					Type:  "live_feed",
+					Type: "live_feed",
 					Feeds: map[string]FeedEntry{
 						instrumentKey: {FullFeed: fullFeed},
 					},
