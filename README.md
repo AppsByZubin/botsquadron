@@ -213,6 +213,46 @@ Set production credentials through the chart's `secretEnv` values, including `DA
 
 Persistent runtime storage and stop/start operations are managed in the `botyard` Helm chart.
 
+### End-of-Day Dangling Trade Cleanup
+
+After market hours, use the production cleanup script to close any OMS trades that are still marked open for the day across all bot strategies. The script is intentionally a database/local-state cleanup only: it does not call Upstox, cancel broker orders, or delete trade history.
+
+Run a dry run first:
+
+```bash
+bash scripts/prod_close_dangling_trades_for_day.sh
+```
+
+If the listed trades are confirmed dangling and broker-side positions/orders are already safe, close them in OMS:
+
+```bash
+CONFIRM_CLOSE=1 bash scripts/prod_close_dangling_trades_for_day.sh
+```
+
+For a specific trading day:
+
+```bash
+TARGET_DATE=18-05-2026 CONFIRM_CLOSE=1 bash scripts/prod_close_dangling_trades_for_day.sh
+```
+
+The script:
+
+- reads the live `DATABASE_URL` from the running ordersystem pod
+- lists `OPEN`, `PLACED`, `ENTRY_PLACED`, and blank-status trades for `TARGET_DATE`
+- patches bot local `order_log.csv` files when reachable
+- scales matching bot workloads down, marks matching OMS trades as `EOD_SQUARE_OFF`, disables trailing, marks linked SL rows with `exit_time`, then scales workloads back up
+
+Useful overrides:
+
+```bash
+NAMESPACE=botspace
+TARGET_DATE=DD-MM-YYYY
+ORDERSYSTEM_POD=<ordersystem-pod-name>
+BOT_WORKLOAD_PATTERN='solobot|trendobot|haemabot|hemabot'
+BOT_POD_PATTERN='solobot|trendobot|haemabot|hemabot'
+RESUME_BOTS=0
+```
+
 ## Development
 
 ### Adding New Bots

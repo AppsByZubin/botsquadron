@@ -905,8 +905,19 @@ func (s *Service) syncStopLossAfterTerminalModifyError(ctx context.Context, trad
 		return "", false
 	}
 	message, outcome, _ := s.syncStopLossTerminalStateDetailed(ctx, trade, orderID, "modify rejected")
-	handled := outcome != stopLossNotTerminal
-	return message, handled
+	if outcome != stopLossNotTerminal {
+		return message, true
+	}
+
+	// Upstox sometimes rejects modify with UDAPI100041 before order details/trades
+	// reflect the terminal state. Treat the modify rejection as authoritative for
+	// trailing management so bots do not repeatedly retry the same dead SL order.
+	if err := s.store.DisableTrailingByTradeID(ctx, trade.ID); err != nil {
+		log.Printf("disable trailing after terminal modify rejection failed for trade_id=%s order_id=%s: %v", trade.ID, orderID, err)
+		return "", false
+	}
+	log.Printf("modify rejected for terminal SL; disabled trailing and kept trade open trade_id=%s order_id=%s: %v", trade.ID, orderID, modifyErr)
+	return fmt.Sprintf("%s: modify rejected because stoploss order is terminal; disabled trailing", orderID), true
 }
 
 func (s *Service) syncStopLossTerminalState(ctx context.Context, trade model.Trade, orderID string, reason string) (string, bool, bool) {
