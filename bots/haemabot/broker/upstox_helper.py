@@ -18,12 +18,113 @@ import gzip
 import time
 import json
 import requests
+import re
 from datetime import datetime
 import common.constants as constants
 
 logger =create_logger("UpstoxHelperLogger")
 
 UPSTOX_INSTRUMENT_SEARCH_URL = "https://api.upstox.com/v2/instruments/search"
+
+
+def _csv_values(value):
+    return [
+        part.strip().upper()
+        for part in str(value or "").split(",")
+        if part and part.strip()
+    ]
+
+
+def _search_params_label(params):
+    keys = ("query", "expiry", "exchanges", "segments", "instrument_types")
+    return ", ".join(
+        f"{key}={params[key]}"
+        for key in keys
+        if params.get(key) not in (None, "")
+    )
+
+
+def _instrument_search_candidates(params):
+    """
+    Build conservative fallback shapes for Upstox instrument search.
+
+    Upstox accepts market segment filters such as FO/COMM separately from
+    instrument types such as FUT. Older config in this bot used segments=FUT,
+    so we retain that request and then retry using the newer split.
+    """
+    candidates = []
+    seen = set()
+
+    def add(candidate):
+        clean = {key: value for key, value in candidate.items() if value not in (None, "")}
+        marker = tuple(sorted((key, str(value)) for key, value in clean.items()))
+        if marker in seen:
+            return
+        seen.add(marker)
+        candidates.append(clean)
+
+    add(params)
+
+    exchanges = set(_csv_values(params.get("exchanges")))
+    segments = set(_csv_values(params.get("segments")))
+    instrument_types = set(_csv_values(params.get("instrument_types")))
+    wants_future = "FUT" in segments or "FUT" in instrument_types
+
+    if not wants_future:
+        return candidates
+
+    future_types = params.get("instrument_types") or "FUT"
+    exchange_is_mcx = not exchanges or "ALL" in exchanges or "MCX" in exchanges
+    retry_segments = ["COMM", "FO", "FUT", "ALL"] if exchange_is_mcx else ["FO", "FUT", "ALL"]
+
+    for segment in retry_segments:
+        candidate = dict(params)
+        candidate["segments"] = segment
+        candidate["instrument_types"] = future_types
+        add(candidate)
+
+    candidate = dict(params)
+    candidate.pop("segments", None)
+    candidate["instrument_types"] = future_types
+    add(candidate)
+
+    return candidates
+
+
+def _normalized_symbol(value):
+    return re.sub(r"[^A-Z0-9]", "", str(value or "").upper())
+
+
+def _expiry_sort_key(instrument):
+    expiry = str(instrument.get("expiry") or "")
+    try:
+        return datetime.strptime(expiry, "%Y-%m-%d").date()
+    except ValueError:
+        return datetime.max.date()
+
+
+def _instrument_symbol_rank(instrument, query):
+    target_symbol = _normalized_symbol(query) or "CRUDEOIL"
+    underlying_symbol = _normalized_symbol(instrument.get("underlying_symbol"))
+    normalized_trading_symbol = _normalized_symbol(instrument.get("trading_symbol"))
+
+    if underlying_symbol == target_symbol:
+        return 0
+    if normalized_trading_symbol.startswith(f"{target_symbol}FUT"):
+        return 1
+    if normalized_trading_symbol.startswith(target_symbol):
+        return 2
+    if underlying_symbol.startswith(target_symbol):
+        return 3
+    return 9
+
+
+def _expiry_candidates(expiry):
+    normalized = str(expiry or "").strip()
+    if normalized.lower() in {"current_month", "this_month", "near_month", "monthly"}:
+        return [normalized, "next_month"]
+    return [normalized]
+
 
 class UpstoxHelper:
     """
@@ -147,10 +248,10 @@ class UpstoxHelper:
         expiry="current_month",
         atm_offset=0,
         page_number=1,
-        records=20,
+        records=30,
         exchanges="MCX",
-        segments="FUT",
-        instrument_types=None,
+        segments="COMM",
+        instrument_types="FUT",
         timeout=15.0,
     ):
         """
@@ -159,8 +260,9 @@ class UpstoxHelper:
         Notes:
         - Mirrors the commodity lookup flow used by the crude oil websocket
           playground script.
-        - Upstox can return commodity futures via segments=FO with
-          instrument_types=FUT, so we retry with that shape when FUT is empty.
+        - Upstox separates segment filters (COMM/FO) from instrument type
+          filters (FUT), so we retry legacy segments=FUT requests with that
+          split when needed.
         """
         params = {
             "query": query,
@@ -200,44 +302,85 @@ class UpstoxHelper:
                 )
             return payload.get("data") or []
 
-        instruments = _fetch(params)
-        if instruments:
-            return instruments
+        candidates = _instrument_search_candidates(params)
+        for attempt_index, fetch_params in enumerate(candidates):
+            instruments = _fetch(fetch_params)
+            if instruments:
+                if attempt_index > 0:
+                    logger.info(
+                        "Instrument search found %s instruments after retry with %s.",
+                        len(instruments),
+                        _search_params_label(fetch_params),
+                    )
+                return instruments
 
-        if instrument_types is None and str(segments).upper() == "FUT":
-            fallback_params = dict(params)
-            fallback_params["segments"] = "FO"
-            fallback_params["instrument_types"] = "FUT"
-            logger.info(
-                "No instruments found with segments=FUT. Retrying with "
-                "segments=FO&instrument_types=FUT."
-            )
-            return _fetch(fallback_params)
+            next_attempt_index = attempt_index + 1
+            if next_attempt_index < len(candidates):
+                logger.info(
+                    "No instruments found with %s. Retrying with %s.",
+                    _search_params_label(fetch_params),
+                    _search_params_label(candidates[next_attempt_index]),
+                )
 
-        return instruments
+        return []
 
     def get_crudeoil_future_contract(
         self,
         query="Crudeoil",
         expiry="current_month",
         exchanges="MCX",
-        segments="FUT",
+        segments="COMM",
+        instrument_types="FUT",
         selected_index=0,
     ):
         """
         Return the selected MCX crude oil future contract from instruments/search.
         """
-        instruments = self.search_instruments(
-            query=query,
-            expiry=expiry,
-            exchanges=exchanges,
-            segments=segments,
-        )
+        instruments = []
+        tried_expiries = []
+        expiry_values = _expiry_candidates(expiry)
+        for expiry_index, expiry_value in enumerate(expiry_values):
+            tried_expiries.append(expiry_value)
+            instruments = self.search_instruments(
+                query=query,
+                expiry=expiry_value,
+                exchanges=exchanges,
+                segments=segments,
+                instrument_types=instrument_types,
+            )
+            if instruments:
+                break
+            if expiry_index + 1 < len(expiry_values):
+                logger.info(
+                    "No crude oil future instruments found for expiry=%s. "
+                    "Trying next expiry candidate.",
+                    expiry_value,
+                )
+
         if not instruments:
             raise RuntimeError(
-                f"No instruments found for query={query!r}, expiry={expiry!r}, "
-                f"exchanges={exchanges!r}, segments={segments!r}"
+                f"No instruments found for query={query!r}, expiry_candidates={tried_expiries!r}, "
+                f"exchanges={exchanges!r}, segments={segments!r}, "
+                f"instrument_types={instrument_types!r}"
             )
+
+        instruments = [
+            instrument for instrument in instruments
+            if str(instrument.get("instrument_type") or "").upper() == "FUT"
+        ]
+        if not instruments:
+            raise RuntimeError(
+                f"Instrument search returned no futures for query={query!r}, "
+                f"expiry_candidates={tried_expiries!r}"
+            )
+        instruments = sorted(
+            instruments,
+            key=lambda instrument: (
+                _instrument_symbol_rank(instrument, query),
+                _expiry_sort_key(instrument),
+                str(instrument.get("trading_symbol") or ""),
+            ),
+        )
 
         selected_index = int(selected_index or 0)
         if selected_index < 0 or selected_index >= len(instruments):
@@ -533,4 +676,3 @@ class UpstoxHelper:
 
         except Exception as e:
             raise Exception(f"Failed to fetch LTP: {e}")
-

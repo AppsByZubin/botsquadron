@@ -336,7 +336,8 @@ async def nifty50_engine(strategy, mode, param_data):
                 query=str(_get_strategy_param("OIL_QUERY", "oil_query", default="Crudeoil")),
                 expiry=str(_get_strategy_param("OIL_EXPIRY", "oil_expiry", default="current_month")),
                 exchanges=str(_get_strategy_param("OIL_EXCHANGES", "oil_exchanges", default="MCX")),
-                segments=str(_get_strategy_param("OIL_SEGMENTS", "oil_segments", default="FUT")),
+                segments=str(_get_strategy_param("OIL_SEGMENTS", "oil_segments", default="COMM")),
+                instrument_types=str(_get_strategy_param("OIL_INSTRUMENT_TYPES", "oil_instrument_types", default="FUT")),
                 selected_index=int(_get_strategy_param("OIL_SELECT", "oil_select", default=0) or 0),
             )
             logger.info(
