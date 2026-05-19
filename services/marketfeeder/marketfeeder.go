@@ -3,6 +3,7 @@ package marketfeeder
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -53,17 +54,36 @@ type BotManager struct {
 }
 
 type BotHandler struct {
-	botID           string
-	instrumentKeys  map[string]bool
-	conn            *websocket.Conn
-	ctx             context.Context
-	cancel          context.CancelFunc
-	natsConn        *nats.Conn
-	mu              sync.RWMutex
-	writeMu         sync.Mutex
-	wsRunning       bool
-	lastWSReadNano  int64
-	lastPublishNano int64
+	botID             string
+	instrumentKeys    map[string]bool
+	conn              *websocket.Conn
+	ctx               context.Context
+	cancel            context.CancelFunc
+	natsConn          *nats.Conn
+	mu                sync.RWMutex
+	writeMu           sync.Mutex
+	wsRunning         bool
+	lastWSReadNano    int64
+	lastPublishNano   int64
+	reconnectAfter    time.Time
+	reconnectFailures int
+}
+
+type authorizeError struct {
+	statusCode int
+	status     string
+	body       string
+	retryAfter time.Duration
+}
+
+func (e *authorizeError) Error() string {
+	return fmt.Sprintf("authorize API returned %s: %s", e.status, e.body)
+}
+
+func (e *authorizeError) rateLimited() bool {
+	return e.statusCode == http.StatusTooManyRequests ||
+		strings.Contains(strings.ToLower(e.body), "udapi10005") ||
+		strings.Contains(strings.ToLower(e.body), "too many")
 }
 
 func NewBotManager(natsConn *nats.Conn) *BotManager {
@@ -248,10 +268,50 @@ func (bh *BotHandler) ensureWebSocket(token string) {
 		bh.mu.Unlock()
 		return
 	}
+	if !bh.reconnectAfter.IsZero() && time.Now().Before(bh.reconnectAfter) {
+		wait := time.Until(bh.reconnectAfter)
+		bh.mu.Unlock()
+		log.Printf("Upstox websocket reconnect for bot %s is backing off for %s", bh.botID, wait.Round(time.Second))
+		return
+	}
 	bh.wsRunning = true
 	bh.mu.Unlock()
 
 	go bh.startWebSocket(token)
+}
+
+func (bh *BotHandler) rateLimitReconnectDelay(err error) time.Duration {
+	base := getenvSeconds("UPSTOX_WS_RATE_LIMIT_RECONNECT_WAIT_SEC", 60*time.Second)
+	maxWait := getenvSeconds("UPSTOX_WS_RATE_LIMIT_RECONNECT_MAX_WAIT_SEC", 5*time.Minute)
+	if maxWait < base {
+		maxWait = base
+	}
+
+	var authErr *authorizeError
+	if errors.As(err, &authErr) && authErr.retryAfter > 0 {
+		base = authErr.retryAfter
+		if base > maxWait {
+			maxWait = base
+		}
+	}
+
+	bh.mu.Lock()
+	defer bh.mu.Unlock()
+
+	bh.reconnectFailures++
+	delay := base
+	for attempt := 1; attempt < bh.reconnectFailures && delay < maxWait; attempt++ {
+		delay *= 2
+		if delay > maxWait {
+			delay = maxWait
+		}
+	}
+	return delay
+}
+
+func isAuthorizeRateLimit(err error) bool {
+	var authErr *authorizeError
+	return errors.As(err, &authErr) && authErr.rateLimited()
 }
 
 func (bh *BotHandler) markWSRead() {
@@ -340,17 +400,22 @@ func (bh *BotHandler) startWebSocket(token string) {
 	log.Printf("Starting Upstox websocket for bot %s", bh.botID)
 
 	var conn *websocket.Conn
+	retryWait := getenvSeconds("UPSTOX_WS_RECONNECT_WAIT_SEC", 5*time.Second)
 	defer func() {
 		bh.mu.Lock()
 		if conn != nil && bh.conn == conn {
 			bh.conn = nil
 		}
 		shouldReconnect := bh.ctx.Err() == nil && len(bh.instrumentKeys) > 0
+		if shouldReconnect {
+			bh.reconnectAfter = time.Now().Add(retryWait)
+		} else {
+			bh.reconnectAfter = time.Time{}
+		}
 		bh.wsRunning = false
 		bh.mu.Unlock()
 
 		if shouldReconnect {
-			retryWait := getenvSeconds("UPSTOX_WS_RECONNECT_WAIT_SEC", 5*time.Second)
 			log.Printf("Upstox websocket stopped for bot %s; reconnecting in %s", bh.botID, retryWait)
 			time.AfterFunc(retryWait, func() {
 				bh.ensureWebSocket(token)
@@ -360,6 +425,9 @@ func (bh *BotHandler) startWebSocket(token string) {
 
 	authorizedWSURL, err := getAuthorizedWSURL(token)
 	if err != nil {
+		if isAuthorizeRateLimit(err) {
+			retryWait = bh.rateLimitReconnectDelay(err)
+		}
 		log.Printf("Failed to get authorized websocket URL for bot %s: %v", bh.botID, err)
 		return
 	}
@@ -386,6 +454,8 @@ func (bh *BotHandler) startWebSocket(token string) {
 	atomic.StoreInt64(&bh.lastPublishNano, nowNano)
 	bh.mu.Lock()
 	bh.conn = conn
+	bh.reconnectAfter = time.Time{}
+	bh.reconnectFailures = 0
 	bh.mu.Unlock()
 	defer conn.Close()
 
@@ -699,7 +769,12 @@ func getAuthorizedWSURL(token string) (string, error) {
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("authorize API returned %s: %s", resp.Status, string(body))
+		return "", &authorizeError{
+			statusCode: resp.StatusCode,
+			status:     resp.Status,
+			body:       string(body),
+			retryAfter: parseRetryAfter(resp.Header.Get("Retry-After")),
+		}
 	}
 
 	var out authorizeResponse
@@ -711,6 +786,23 @@ func getAuthorizedWSURL(token string) (string, error) {
 	}
 
 	return out.Data.AuthorizedRedirectURI, nil
+}
+
+func parseRetryAfter(value string) time.Duration {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0
+	}
+	if seconds, err := strconv.ParseFloat(value, 64); err == nil && seconds > 0 {
+		return time.Duration(seconds * float64(time.Second))
+	}
+	if retryAt, err := http.ParseTime(value); err == nil {
+		delay := time.Until(retryAt)
+		if delay > 0 {
+			return delay
+		}
+	}
+	return 0
 }
 
 func getenvDefault(key, fallback string) string {
