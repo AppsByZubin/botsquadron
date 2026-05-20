@@ -44,6 +44,10 @@ func (f *fakeService) GetTradeByID(context.Context, string) (model.Trade, error)
 	return model.Trade{}, nil
 }
 
+func (f *fakeService) RefreshTradeBrokerStatus(context.Context, string) (model.Trade, error) {
+	return model.Trade{}, nil
+}
+
 func (f *fakeService) KillBot(context.Context, string, model.KillBotRequest) (model.BotKillSwitchResponse, error) {
 	return model.BotKillSwitchResponse{}, nil
 }

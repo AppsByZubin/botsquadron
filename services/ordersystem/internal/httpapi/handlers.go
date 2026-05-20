@@ -25,6 +25,7 @@ type Business interface {
 	CreateTrade(context.Context, model.CreateTradeRequest) (model.CreateTradeResponse, error)
 	GetAccountDetails(context.Context, model.GetAccountDetailsRequest) (model.AccountDetailsResponse, error)
 	GetTradeByID(context.Context, string) (model.Trade, error)
+	RefreshTradeBrokerStatus(context.Context, string) (model.Trade, error)
 	KillBot(context.Context, string, model.KillBotRequest) (model.BotKillSwitchResponse, error)
 	ResumeBot(context.Context, string, model.ResumeBotRequest) (model.BotKillSwitchResponse, error)
 	GetBotKillSwitch(context.Context, string) (model.BotKillSwitchResponse, error)
@@ -48,6 +49,7 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("POST /v1/trades", h.handleCreateTrade)
 	mux.HandleFunc("POST /v1/trades/{id}/modify", h.handleModifyTrade)
 	mux.HandleFunc("POST /v1/trades/{id}/square-off", h.handleSquareOffTrade)
+	mux.HandleFunc("POST /v1/trades/{id}/refresh", h.handleRefreshTradeBrokerStatus)
 	mux.HandleFunc("GET /v1/trades/{id}", h.handleGetTradeByID)
 	mux.HandleFunc("POST /v1/bots/{bot_name}/kill", h.handleKillBot)
 	mux.HandleFunc("POST /v1/bots/{bot_name}/resume", h.handleResumeBot)
@@ -315,6 +317,33 @@ func (h *Handler) handleSquareOffTrade(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, resp)
+}
+
+func (h *Handler) handleRefreshTradeBrokerStatus(w http.ResponseWriter, r *http.Request) {
+	tradeID := strings.TrimSpace(r.PathValue("id"))
+	if tradeID == "" {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "trade id is required"})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), h.requestTimeout)
+	defer cancel()
+
+	trade, err := h.business.RefreshTradeBrokerStatus(ctx, tradeID)
+	if err != nil {
+		statusCode := http.StatusInternalServerError
+		lowerErr := strings.ToLower(err.Error())
+		if strings.Contains(lowerErr, "required") || strings.Contains(lowerErr, "must be") {
+			statusCode = http.StatusBadRequest
+		}
+		if strings.Contains(lowerErr, "no rows") || strings.Contains(lowerErr, "not found") {
+			statusCode = http.StatusNotFound
+		}
+		writeJSON(w, statusCode, errorResponse{Error: err.Error()})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, trade)
 }
 
 func (h *Handler) handleGetTradeByID(w http.ResponseWriter, r *http.Request) {

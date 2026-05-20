@@ -294,6 +294,39 @@ func (s *Service) GetTradeByID(ctx context.Context, tradeID string) (model.Trade
 	return s.store.GetTradeByID(ctx, tradeID)
 }
 
+func (s *Service) RefreshTradeBrokerStatus(ctx context.Context, tradeID string) (model.Trade, error) {
+	tradeID = strings.TrimSpace(tradeID)
+	if tradeID == "" {
+		return model.Trade{}, fmt.Errorf("trade id is required")
+	}
+	if s.store == nil {
+		return model.Trade{}, fmt.Errorf("store is not configured")
+	}
+
+	trade, err := s.store.GetTradeByID(ctx, tradeID)
+	if err != nil {
+		return model.Trade{}, err
+	}
+	if isClosedTradeStatus(trade.Status) {
+		return trade, nil
+	}
+	if !s.cfg.IsProduction() || s.upstox == nil || !s.upstox.Enabled() {
+		return trade, nil
+	}
+
+	pollingTrade := tradeForStopLossSync(trade)
+	s.syncEntryOrders(ctx, pollingTrade)
+	for _, slOrder := range pollingTrade.SLOrders {
+		orderID := strings.TrimSpace(slOrder.OrderID)
+		if orderID == "" {
+			continue
+		}
+		s.syncStopLossTerminalStateDetailed(ctx, trade, orderID, "manual refresh")
+	}
+
+	return s.store.GetTradeByID(ctx, tradeID)
+}
+
 func (s *Service) KillBot(ctx context.Context, botName string, req model.KillBotRequest) (model.BotKillSwitchResponse, error) {
 	botName = strings.TrimSpace(botName)
 	if botName == "" {
@@ -846,50 +879,88 @@ func (s *Service) refreshStopLossTrade(ctx context.Context, trade model.TradeFor
 			continue
 		}
 
-		var tradesResp upstox.OrderTrades
-		tradesResp, err := s.upstox.GetOrderTrades(ctx, orderID)
-		if err != nil {
-			if upstox.IsRateLimited(err) {
-				log.Printf("poll sl order trades rate-limited for trade_id=%s order_id=%s: %v", trade.ID, orderID, err)
-				continue
-			} else {
-				log.Printf("poll sl order trades failed for trade_id=%s order_id=%s: %v", trade.ID, orderID, err)
-			}
-		}
-
-		statusResp, err := s.upstox.GetOrderStatus(ctx, orderID)
-		if err != nil {
-			if upstox.IsRateLimited(err) {
-				log.Printf("poll sl order status rate-limited for trade_id=%s order_id=%s: %v", trade.ID, orderID, err)
-				continue
-			} else {
-				log.Printf("poll sl order status failed for trade_id=%s order_id=%s: %v", trade.ID, orderID, err)
-			}
-		}
-
-		if tradesResp.Filled || upstox.IsFilledOrderStatus(statusResp.Status) {
-			avgPrice := statusResp.AveragePrice
-			if tradesResp.AveragePrice != nil && *tradesResp.AveragePrice > 0 {
-				avgPrice = tradesResp.AveragePrice
-			}
-			filledQty := statusResp.FilledQuantity
-			if tradesResp.FilledQuantity > 0 {
-				filledQty = tradesResp.FilledQuantity
-			}
-			s.recordStopLossFill(ctx, trade, slOrder, statusResp, avgPrice, filledQty)
+		statusResp, haveStatus := s.getStopLossOrderStatus(ctx, "poll", trade.ID, orderID)
+		if haveStatus && isStopLossFill(statusResp, upstox.OrderTrades{}, false) {
+			s.recordStopLossFillFromResponses(ctx, trade, slOrder, statusResp, upstox.OrderTrades{}, false)
 			continue
 		}
 
-		terminalStatus := strings.TrimSpace(statusResp.Status)
-		if terminalStatus == "" {
-			terminalStatus = strings.TrimSpace(tradesResp.Status)
+		var tradesResp upstox.OrderTrades
+		haveTrades := false
+		tradesResp, haveTrades = s.getStopLossOrderTrades(ctx, "poll", trade.ID, orderID)
+
+		if !haveStatus && !haveTrades {
+			continue
 		}
+
+		if isStopLossFill(statusResp, tradesResp, haveTrades) {
+			s.recordStopLossFillFromResponses(ctx, trade, slOrder, statusResp, tradesResp, haveTrades)
+			continue
+		}
+
+		terminalStatus := stopLossTerminalStatus(statusResp, tradesResp, haveTrades)
 		if !upstox.IsTerminalOrderStatus(terminalStatus) {
 			continue
 		}
 
 		s.handleTerminalUnfilledStopLoss(ctx, trade.ID, orderID, terminalStatus)
 	}
+}
+
+func (s *Service) getStopLossOrderStatus(ctx context.Context, reason string, tradeID string, orderID string) (upstox.OrderStatus, bool) {
+	statusResp, err := s.upstox.GetOrderStatus(ctx, orderID)
+	if err != nil {
+		if upstox.IsRateLimited(err) {
+			log.Printf("%s sl order status rate-limited for trade_id=%s order_id=%s: %v", reason, tradeID, orderID, err)
+		} else {
+			log.Printf("%s sl order status failed for trade_id=%s order_id=%s: %v", reason, tradeID, orderID, err)
+		}
+		return upstox.OrderStatus{}, false
+	}
+	return statusResp, true
+}
+
+func (s *Service) getStopLossOrderTrades(ctx context.Context, reason string, tradeID string, orderID string) (upstox.OrderTrades, bool) {
+	tradesResp, err := s.upstox.GetOrderTrades(ctx, orderID)
+	if err != nil {
+		if upstox.IsRateLimited(err) {
+			log.Printf("%s sl order trades rate-limited for trade_id=%s order_id=%s: %v", reason, tradeID, orderID, err)
+		} else {
+			log.Printf("%s sl order trades failed for trade_id=%s order_id=%s: %v", reason, tradeID, orderID, err)
+		}
+		return upstox.OrderTrades{}, false
+	}
+	return tradesResp, true
+}
+
+func isStopLossFill(statusResp upstox.OrderStatus, tradesResp upstox.OrderTrades, haveTrades bool) bool {
+	if upstox.IsFilledOrderStatus(statusResp.Status) {
+		return true
+	}
+	if statusResp.FilledQuantity > 0 && statusResp.Quantity > 0 && statusResp.FilledQuantity >= statusResp.Quantity {
+		return true
+	}
+	return haveTrades && tradesResp.Filled
+}
+
+func stopLossTerminalStatus(statusResp upstox.OrderStatus, tradesResp upstox.OrderTrades, haveTrades bool) string {
+	terminalStatus := strings.TrimSpace(statusResp.Status)
+	if terminalStatus == "" && haveTrades {
+		terminalStatus = strings.TrimSpace(tradesResp.Status)
+	}
+	return terminalStatus
+}
+
+func (s *Service) recordStopLossFillFromResponses(ctx context.Context, trade model.TradeForSLPolling, slOrder model.StopLossOrderForPolling, statusResp upstox.OrderStatus, tradesResp upstox.OrderTrades, haveTrades bool) {
+	avgPrice := statusResp.AveragePrice
+	if haveTrades && tradesResp.AveragePrice != nil && *tradesResp.AveragePrice > 0 {
+		avgPrice = tradesResp.AveragePrice
+	}
+	filledQty := statusResp.FilledQuantity
+	if haveTrades && tradesResp.FilledQuantity > 0 {
+		filledQty = tradesResp.FilledQuantity
+	}
+	s.recordStopLossFill(ctx, trade, slOrder, statusResp, avgPrice, filledQty)
 }
 
 func (s *Service) syncEntryOrders(ctx context.Context, trade model.TradeForSLPolling) {
@@ -970,39 +1041,24 @@ func (s *Service) syncStopLossTerminalStateDetailed(ctx context.Context, trade m
 	pollingTrade := tradeForStopLossSync(trade)
 	slOrder := stopLossOrderForSync(pollingTrade, trade, orderID)
 
-	var tradesResp upstox.OrderTrades
-	tradesResp, tradesErr := s.upstox.GetOrderTrades(ctx, orderID)
-	if tradesErr != nil {
-		log.Printf("%s; order trades status sync failed for trade_id=%s order_id=%s: %v", reason, trade.ID, orderID, tradesErr)
-	}
-
-	var statusResp upstox.OrderStatus
-	statusResp, statusErr := s.upstox.GetOrderStatus(ctx, orderID)
-	if statusErr != nil {
-		log.Printf("%s; order status sync failed for trade_id=%s order_id=%s: %v", reason, trade.ID, orderID, statusErr)
-	}
-
-	if tradesErr != nil && statusErr != nil {
-		return "", stopLossNotTerminal, false
-	}
-
-	if tradesResp.Filled || upstox.IsFilledOrderStatus(statusResp.Status) {
-		avgPrice := statusResp.AveragePrice
-		if tradesResp.AveragePrice != nil && *tradesResp.AveragePrice > 0 {
-			avgPrice = tradesResp.AveragePrice
-		}
-		filledQty := statusResp.FilledQuantity
-		if tradesResp.FilledQuantity > 0 {
-			filledQty = tradesResp.FilledQuantity
-		}
-		s.recordStopLossFill(ctx, pollingTrade, slOrder, statusResp, avgPrice, filledQty)
+	statusResp, haveStatus := s.getStopLossOrderStatus(ctx, reason+" sync", trade.ID, orderID)
+	if haveStatus && isStopLossFill(statusResp, upstox.OrderTrades{}, false) {
+		s.recordStopLossFillFromResponses(ctx, pollingTrade, slOrder, statusResp, upstox.OrderTrades{}, false)
 		return fmt.Sprintf("%s: stoploss order already filled; synced trade status", orderID), stopLossFilled, true
 	}
 
-	terminalStatus := strings.TrimSpace(statusResp.Status)
-	if terminalStatus == "" {
-		terminalStatus = strings.TrimSpace(tradesResp.Status)
+	tradesResp, haveTrades := s.getStopLossOrderTrades(ctx, reason+" sync", trade.ID, orderID)
+
+	if !haveStatus && !haveTrades {
+		return "", stopLossNotTerminal, false
 	}
+
+	if isStopLossFill(statusResp, tradesResp, haveTrades) {
+		s.recordStopLossFillFromResponses(ctx, pollingTrade, slOrder, statusResp, tradesResp, haveTrades)
+		return fmt.Sprintf("%s: stoploss order already filled; synced trade status", orderID), stopLossFilled, true
+	}
+
+	terminalStatus := stopLossTerminalStatus(statusResp, tradesResp, haveTrades)
 	if upstox.IsTerminalOrderStatus(terminalStatus) {
 		s.handleTerminalUnfilledStopLoss(ctx, trade.ID, orderID, terminalStatus)
 		return fmt.Sprintf("%s: stoploss order already terminal (%s); disabled trailing", orderID, terminalStatus), stopLossTerminalUnfilled, true

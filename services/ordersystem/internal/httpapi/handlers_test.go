@@ -33,6 +33,10 @@ func (f fakeBusiness) GetTradeByID(context.Context, string) (model.Trade, error)
 	return model.Trade{}, nil
 }
 
+func (f fakeBusiness) RefreshTradeBrokerStatus(context.Context, string) (model.Trade, error) {
+	return model.Trade{}, nil
+}
+
 func (f fakeBusiness) KillBot(context.Context, string, model.KillBotRequest) (model.BotKillSwitchResponse, error) {
 	return model.BotKillSwitchResponse{}, nil
 }

@@ -9,6 +9,7 @@ import (
 
 	"github.com/AppsByZubin/botsquadron/services/ordersystem/internal/config"
 	"github.com/AppsByZubin/botsquadron/services/ordersystem/internal/model"
+	"github.com/AppsByZubin/botsquadron/services/ordersystem/internal/upstox"
 )
 
 func TestModifyTradeRequiresTradeID(t *testing.T) {
@@ -22,6 +23,34 @@ func TestModifyTradeRequiresTradeID(t *testing.T) {
 	}
 	if !strings.Contains(strings.ToLower(err.Error()), "trade id is required") {
 		t.Fatalf("error = %q, want trade id validation", err.Error())
+	}
+}
+
+func TestIsStopLossFillAcceptsCompleteOrderDetails(t *testing.T) {
+	t.Parallel()
+
+	status := upstox.OrderStatus{
+		Status:         "complete",
+		Quantity:       65,
+		FilledQuantity: 65,
+	}
+
+	if !isStopLossFill(status, upstox.OrderTrades{}, false) {
+		t.Fatal("isStopLossFill returned false for complete order details")
+	}
+}
+
+func TestIsStopLossFillAcceptsFullQuantityWhenStatusVaries(t *testing.T) {
+	t.Parallel()
+
+	status := upstox.OrderStatus{
+		Status:         "validation pending",
+		Quantity:       65,
+		FilledQuantity: 65,
+	}
+
+	if !isStopLossFill(status, upstox.OrderTrades{}, false) {
+		t.Fatal("isStopLossFill returned false for fully filled order details")
 	}
 }
 

@@ -1496,7 +1496,7 @@ WHERE trade_id::text = $1
 		return fmt.Errorf("record sl fill: %w", err)
 	}
 	if result.RowsAffected() == 0 {
-		return nil
+		return fmt.Errorf("record sl fill matched no sl order row for trade_id=%s order_id=%s", tradeID, brokerOrderID)
 	}
 
 	if strings.TrimSpace(exitStatus) == "" {

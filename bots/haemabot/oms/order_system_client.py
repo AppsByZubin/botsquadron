@@ -557,7 +557,34 @@ class OrderSystemClient:
             "sl_limit": _to_float(sl_limit, None),
             "spot_trail_anchor": _to_float(spot_trail_anchor, None),
         })
-        response = self._request("POST", f"/v1/trades/{trade_id}/modify", json=payload)
+        try:
+            response = self._request("POST", f"/v1/trades/{trade_id}/modify", json=payload)
+        except OrderSystemError as exc:
+            if _is_terminal_order_modify_error(exc):
+                log.warning(
+                    "Modify SL hit terminal broker order response; asking ordersystem to refresh broker status trade_id=%s: %s",
+                    trade_id,
+                    exc,
+                )
+                try:
+                    trade = self.refresh_trade_from_broker(trade_id, event_type=None)
+                    status = str((trade or {}).get("status") or "").strip().upper()
+                    if status in self.CLOSED_STATUSES:
+                        self._log_local_event(
+                            "MODIFY_SYNC_CLOSED_TRADE",
+                            trade,
+                            extra={"request": payload, "error": str(exc)},
+                        )
+                        return {
+                            "trade_id": trade_id,
+                            "status": status,
+                            "closed_trade": trade,
+                            "closed_trades": [trade],
+                            "message": "stoploss broker status synced after terminal modify response",
+                        }
+                except Exception as refresh_exc:
+                    log.warning("Broker refresh after modify terminal response failed trade_id=%s: %s", trade_id, refresh_exc)
+            raise
         closed_trades = self._sync_closed_trades_from_response(response, "MODIFY_SYNC_CLOSED_TRADE")
         if closed_trades:
             closed_trade = closed_trades[0]
@@ -619,6 +646,23 @@ class OrderSystemClient:
         trade = self._request("GET", f"/v1/trades/{trade_id}")
         self._upsert_local_trade(self._local_row_from_trade(trade))
         return self._remember_trade(trade)
+
+    def refresh_trade_from_broker(
+        self,
+        trade_id: str,
+        ts: Optional[datetime] = None,
+        event_type: Optional[str] = "BROKER_SYNC_CLOSED_TRADE",
+    ) -> Dict[str, Any]:
+        trade = self._request("POST", f"/v1/trades/{trade_id}/refresh", json={})
+        self._upsert_local_trade(self._local_row_from_trade(trade))
+        remembered = self._remember_trade(trade)
+        status = str(remembered.get("status") or "").strip().upper()
+        if status in self.CLOSED_STATUSES:
+            if event_type:
+                self._log_local_event(event_type, remembered, ts=ts)
+            self._forget_trade(remembered)
+            self._trade_refresh_last.pop(str(trade_id), None)
+        return remembered
 
     def refresh_trade(self, trade_id: str, ts: Optional[datetime] = None) -> Optional[Dict[str, Any]]:
         trade = self.get_trade_by_id(trade_id)
@@ -761,7 +805,7 @@ class OrderSystemClient:
                     exc,
                 )
                 try:
-                    return self.refresh_trade(resolved_trade_id, ts=ts)
+                    return self.refresh_trade_from_broker(resolved_trade_id, ts=ts, event_type="MODIFY_SYNC_CLOSED_TRADE")
                 except Exception as refresh_exc:
                     log.warning("Trade refresh after terminal modify response failed trade_id=%s: %s", resolved_trade_id, refresh_exc)
                     return trade
@@ -807,12 +851,12 @@ class OrderSystemClient:
         except OrderSystemError as exc:
             if _is_terminal_order_modify_error(exc):
                 log.warning(
-                    "Square-off hit terminal broker order response; refreshing trade_id=%s before failing: %s",
+                    "Square-off hit terminal broker order response; asking ordersystem to refresh broker status trade_id=%s: %s",
                     trade_id,
                     exc,
                 )
                 try:
-                    trade = self.refresh_trade(trade_id, ts=ts)
+                    trade = self.refresh_trade_from_broker(trade_id, ts=ts, event_type=None)
                     status = str((trade or {}).get("status") or "").strip().upper()
                     if status in self.CLOSED_STATUSES:
                         self._log_local_event(
