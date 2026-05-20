@@ -120,6 +120,7 @@ Validation:
 - `validity` must be `DAY` or `IOC`.
 - `order_type` must be `SL` or `SL-M`.
 - In sandbox/production mode, `stoploss` is required; `SL` orders also require `sl_limit`.
+- If Upstox rejects an SL modification, ordersystem refreshes that SL order's broker status before failing the request. When the SL is already filled/closed, ordersystem records the trade as `STOPLOSS HIT` and returns `closed_trade`/`closed_trades` so the bot can sync its local ledger immediately.
 
 ### Square-Off Trade Request Example
 

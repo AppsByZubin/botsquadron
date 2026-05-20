@@ -485,8 +485,13 @@ func (s *Service) ModifyTrade(ctx context.Context, tradeID string, req model.Mod
 			continue
 		}
 
-		if message, handled := s.syncStopLossBeforeModify(ctx, trade, orderID); handled {
+		if message, outcome := s.syncStopLossBeforeModify(ctx, trade, orderID); outcome != stopLossNotTerminal {
 			terminalOrderMessages = append(terminalOrderMessages, message)
+			if outcome == stopLossFilled {
+				if resp, ok := s.closedModifyTradeResponse(ctx, tradeID, strings.Join(terminalOrderMessages, "; ")); ok {
+					return resp, nil
+				}
+			}
 			continue
 		}
 
@@ -502,8 +507,13 @@ func (s *Service) ModifyTrade(ctx context.Context, tradeID string, req model.Mod
 			if upstox.IsRateLimited(err) {
 				return model.ModifyTradeResponse{}, fmt.Errorf("modify trade rate limited for trade_id=%s order_id=%s: %w", tradeID, orderID, err)
 			}
-			if message, handled := s.syncStopLossAfterTerminalModifyError(ctx, trade, orderID, err); handled {
+			if message, outcome := s.syncStopLossAfterModifyError(ctx, trade, orderID, err); outcome != stopLossNotTerminal {
 				terminalOrderMessages = append(terminalOrderMessages, message)
+				if outcome == stopLossFilled {
+					if resp, ok := s.closedModifyTradeResponse(ctx, tradeID, strings.Join(terminalOrderMessages, "; ")); ok {
+						return resp, nil
+					}
+				}
 				continue
 			}
 			failedOrderMessages = append(failedOrderMessages, fmt.Sprintf("%s: %v", orderID, err))
@@ -538,6 +548,30 @@ func (s *Service) ModifyTrade(ctx context.Context, tradeID string, req model.Mod
 		ModifiedOrderIDs: modifiedOrderIDs,
 		Message:          message,
 	}, nil
+}
+
+func (s *Service) closedModifyTradeResponse(ctx context.Context, tradeID string, message string) (model.ModifyTradeResponse, bool) {
+	closedTrade, err := s.store.GetTradeByID(ctx, tradeID)
+	if err != nil {
+		log.Printf("reload trade after stoploss modify sync failed for trade_id=%s: %v", tradeID, err)
+		return model.ModifyTradeResponse{}, false
+	}
+	if !isClosedTradeStatus(closedTrade.Status) {
+		return model.ModifyTradeResponse{}, false
+	}
+	if strings.TrimSpace(message) == "" {
+		message = "stoploss order already closed; synced trade status"
+	}
+	return model.ModifyTradeResponse{
+		TradeID:      tradeID,
+		Status:       closedTrade.Status,
+		ExitPrice:    closedTrade.ExitPrice,
+		ExitTime:     closedTrade.ExitTime,
+		ClosedTrade:  &closedTrade,
+		ClosedTrades: []model.Trade{closedTrade},
+		ClosedOrders: []model.Trade{closedTrade},
+		Message:      message,
+	}, true
 }
 
 func (s *Service) SquareOffTrade(ctx context.Context, tradeID string, req model.SquareOffTradeRequest) (model.SquareOffTradeResponse, error) {
@@ -894,19 +928,18 @@ func entryOrderAlreadySynced(order model.EntryOrderForPolling) bool {
 	return order.EntryPrice > 0 && order.Qty > 0 && order.Brokerage > 0
 }
 
-func (s *Service) syncStopLossBeforeModify(ctx context.Context, trade model.Trade, orderID string) (string, bool) {
+func (s *Service) syncStopLossBeforeModify(ctx context.Context, trade model.Trade, orderID string) (string, stopLossTerminalOutcome) {
 	message, outcome, _ := s.syncStopLossTerminalStateDetailed(ctx, trade, orderID, "pre-modify")
-	handled := outcome != stopLossNotTerminal
-	return message, handled
+	return message, outcome
 }
 
-func (s *Service) syncStopLossAfterTerminalModifyError(ctx context.Context, trade model.Trade, orderID string, modifyErr error) (string, bool) {
-	if !isTerminalModifyOrderError(modifyErr) {
-		return "", false
-	}
+func (s *Service) syncStopLossAfterModifyError(ctx context.Context, trade model.Trade, orderID string, modifyErr error) (string, stopLossTerminalOutcome) {
 	message, outcome, _ := s.syncStopLossTerminalStateDetailed(ctx, trade, orderID, "modify rejected")
 	if outcome != stopLossNotTerminal {
-		return message, true
+		return message, outcome
+	}
+	if !isTerminalModifyOrderError(modifyErr) {
+		return "", stopLossNotTerminal
 	}
 
 	// Upstox sometimes rejects modify with UDAPI100041 before order details/trades
@@ -914,10 +947,10 @@ func (s *Service) syncStopLossAfterTerminalModifyError(ctx context.Context, trad
 	// trailing management so bots do not repeatedly retry the same dead SL order.
 	if err := s.store.DisableTrailingByTradeID(ctx, trade.ID); err != nil {
 		log.Printf("disable trailing after terminal modify rejection failed for trade_id=%s order_id=%s: %v", trade.ID, orderID, err)
-		return "", false
+		return "", stopLossNotTerminal
 	}
 	log.Printf("modify rejected for terminal SL; disabled trailing and kept trade open trade_id=%s order_id=%s: %v", trade.ID, orderID, modifyErr)
-	return fmt.Sprintf("%s: modify rejected because stoploss order is terminal; disabled trailing", orderID), true
+	return fmt.Sprintf("%s: modify rejected because stoploss order is terminal; disabled trailing", orderID), stopLossTerminalUnfilled
 }
 
 func (s *Service) syncStopLossTerminalState(ctx context.Context, trade model.Trade, orderID string, reason string) (string, bool, bool) {

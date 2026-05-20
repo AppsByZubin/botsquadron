@@ -550,6 +550,15 @@ class OrderSystemClient:
             "spot_trail_anchor": _to_float(spot_trail_anchor, None),
         })
         response = self._request("POST", f"/v1/trades/{trade_id}/modify", json=payload)
+        closed_trades = self._sync_closed_trades_from_response(response, "MODIFY_SYNC_CLOSED_TRADE")
+        if closed_trades:
+            closed_trade = closed_trades[0]
+            self._log_local_event("MODIFY_TRADE", closed_trade, extra={"request": payload, "response": dict(response)})
+            return response
+        modified_order_ids = response.get("modified_order_ids") if isinstance(response, Mapping) else None
+        if not modified_order_ids:
+            self._log_local_event("MODIFY_TRADE", self._get_cached_trade(trade_id) or {"id": trade_id}, extra={"request": payload, "response": dict(response)})
+            return response
         updates = {
             "stoploss": payload.get("stoploss"),
             "sl_limit": payload.get("sl_limit"),
@@ -571,12 +580,17 @@ class OrderSystemClient:
         ts: Optional[datetime] = None,
     ) -> bool:
         try:
-            self.modify_trade(
+            response = self.modify_trade(
                 trade_id=trade_id,
                 stoploss=new_trigger,
                 sl_limit=new_limit,
                 spot_trail_anchor=ltp_now,
             )
+            if self._first_closed_trade_from_response(response) is not None:
+                return False
+            modified_order_ids = response.get("modified_order_ids") if isinstance(response, Mapping) else None
+            if not modified_order_ids:
+                return False
             trade = self._get_cached_trade(trade_id) or {"id": trade_id}
             self._log_local_event(
                 "MODIFY_SL_ORDER",
@@ -743,6 +757,9 @@ class OrderSystemClient:
                     return trade
             raise
         modified_order_ids = modify_response.get("modified_order_ids") if isinstance(modify_response, Mapping) else None
+        closed_trade = self._first_closed_trade_from_response(modify_response) if isinstance(modify_response, Mapping) else None
+        if closed_trade is not None:
+            return closed_trade
         if not modified_order_ids:
             try:
                 return self.refresh_trade(resolved_trade_id, ts=ts)
@@ -828,23 +845,57 @@ class OrderSystemClient:
                 self._remember_trade(trade)
                 self._upsert_local_trade(self._local_row_from_trade(trade))
 
-    def _sync_closed_trades_from_kill_response(self, response: Mapping[str, Any]) -> None:
-        closed_trades = response.get("closed_trades") if isinstance(response, Mapping) else None
-        if not isinstance(closed_trades, list) and isinstance(response, Mapping):
-            closed_trades = response.get("closed_orders")
-        if not isinstance(closed_trades, list):
-            return
+    def _first_closed_trade_from_response(self, response: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+        closed_trades = self._closed_trades_from_response(response)
+        return closed_trades[0] if closed_trades else None
 
-        for trade in closed_trades:
+    def _closed_trades_from_response(self, response: Mapping[str, Any]) -> List[Dict[str, Any]]:
+        if not isinstance(response, Mapping):
+            return []
+
+        candidates: List[Any] = []
+        closed_trade = response.get("closed_trade")
+        if isinstance(closed_trade, Mapping):
+            candidates.append(closed_trade)
+
+        for key in ("closed_trades", "closed_orders"):
+            values = response.get(key)
+            if isinstance(values, list):
+                candidates.extend(values)
+
+        closed_trades: List[Dict[str, Any]] = []
+        seen = set()
+        for trade in candidates:
             if not isinstance(trade, Mapping):
                 continue
+            trade_id = str(trade.get("id") or trade.get("trade_id") or "").strip()
+            if trade_id and trade_id in seen:
+                continue
+            status = str(trade.get("status") or "").strip().upper()
+            if status and status not in self.CLOSED_STATUSES:
+                continue
             remembered = self._remember_trade(trade)
-            self._upsert_local_trade(self._local_row_from_trade(remembered))
+            if trade_id:
+                seen.add(trade_id)
+            closed_trades.append(remembered)
+        return closed_trades
+
+    def _sync_closed_trades_from_response(self, response: Mapping[str, Any], event_type: str) -> List[Dict[str, Any]]:
+        closed_trades = self._closed_trades_from_response(response)
+        for trade in closed_trades:
+            self._upsert_local_trade(self._local_row_from_trade(trade))
             self._log_local_event(
-                "KILL_MODE_SYNC_CLOSED_TRADE",
-                remembered,
+                event_type,
+                trade,
                 extra={"message": response.get("message"), "status": response.get("status")},
             )
+            trade_id = str(trade.get("id") or trade.get("trade_id") or "").strip()
+            if trade_id:
+                self._trade_refresh_last.pop(trade_id, None)
+        return closed_trades
+
+    def _sync_closed_trades_from_kill_response(self, response: Mapping[str, Any]) -> None:
+        self._sync_closed_trades_from_response(response, "KILL_MODE_SYNC_CLOSED_TRADE")
 
     def _local_row_from_create(
         self,

@@ -578,7 +578,7 @@ func (c *Client) GetBrokerage(ctx context.Context, req BrokerageRequest) (Broker
 func IsTerminalOrderStatus(status string) bool {
 	s := normalizeStatus(status)
 	switch s {
-	case "complete", "completed", "rejected", "cancelled", "canceled", "not cancelled", "not modified":
+	case "complete", "completed", "closed", "rejected", "cancelled", "canceled", "not cancelled", "not modified":
 		return true
 	default:
 		return false
@@ -587,7 +587,7 @@ func IsTerminalOrderStatus(status string) bool {
 
 func IsFilledOrderStatus(status string) bool {
 	switch normalizeStatus(status) {
-	case "complete", "completed", "filled", "executed":
+	case "complete", "completed", "closed", "filled", "executed":
 		return true
 	default:
 		return false

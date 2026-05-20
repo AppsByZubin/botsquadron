@@ -152,6 +152,17 @@ func TestClientModifyOrderBacksOffOn429(t *testing.T) {
 	}
 }
 
+func TestClosedOrderStatusIsTerminalAndFilled(t *testing.T) {
+	t.Parallel()
+
+	if !IsTerminalOrderStatus("closed") {
+		t.Fatal("IsTerminalOrderStatus(closed) = false, want true")
+	}
+	if !IsFilledOrderStatus("closed") {
+		t.Fatal("IsFilledOrderStatus(closed) = false, want true")
+	}
+}
+
 func TestClientPlaceOrderCapturesSlicedOrderIDs(t *testing.T) {
 	t.Parallel()
 
