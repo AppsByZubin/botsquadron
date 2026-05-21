@@ -83,6 +83,47 @@ func TestLoadDefaultsUpstoxV2EndpointsToAPIHost(t *testing.T) {
 	}
 }
 
+func TestLoadForcesProductionEndpointFQDNs(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgresql://user:pass@example.com:5432/omsdb?sslmode=disable")
+	t.Setenv("APP_MODE", "production")
+	t.Setenv("UPSTOX_API_ACCESS_TOKEN", "prod-token")
+	t.Setenv("UPSTOX_API_BASE_URL", "https://api-hft.upstox.com")
+	t.Setenv("UPSTOX_ORDER_PLACE_PATH", "/v3/order/place")
+	t.Setenv("UPSTOX_ORDER_MODIFY_PATH", "https://api.upstox.com/v3/order/modify")
+	t.Setenv("UPSTOX_ORDER_CANCEL_PATH", "/v3/order/cancel")
+	t.Setenv("UPSTOX_EXIT_POSITIONS_PATH", "/v2/order/positions/exit")
+	t.Setenv("UPSTOX_ORDER_DETAILS_PATH", "/v2/order/details")
+	t.Setenv("UPSTOX_ORDER_TRADES_PATH", "https://api-hft.upstox.com/v2/order/trades")
+	t.Setenv("UPSTOX_BROKERAGE_PATH", "/v2/charges/brokerage")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+
+	if cfg.UpstoxOrderPlacePath != "https://api-hft.upstox.com/v3/order/place" {
+		t.Fatalf("UpstoxOrderPlacePath = %q, want api-hft.upstox.com", cfg.UpstoxOrderPlacePath)
+	}
+	if cfg.UpstoxOrderModifyPath != "https://api-hft.upstox.com/v3/order/modify" {
+		t.Fatalf("UpstoxOrderModifyPath = %q, want api-hft.upstox.com", cfg.UpstoxOrderModifyPath)
+	}
+	if cfg.UpstoxOrderCancelPath != "https://api-hft.upstox.com/v3/order/cancel" {
+		t.Fatalf("UpstoxOrderCancelPath = %q, want api-hft.upstox.com", cfg.UpstoxOrderCancelPath)
+	}
+	if cfg.UpstoxExitPositionsPath != "https://api.upstox.com/v2/order/positions/exit" {
+		t.Fatalf("UpstoxExitPositionsPath = %q, want api.upstox.com", cfg.UpstoxExitPositionsPath)
+	}
+	if cfg.UpstoxOrderDetailsPath != "https://api.upstox.com/v2/order/details" {
+		t.Fatalf("UpstoxOrderDetailsPath = %q, want api.upstox.com", cfg.UpstoxOrderDetailsPath)
+	}
+	if cfg.UpstoxOrderTradesPath != "https://api.upstox.com/v2/order/trades" {
+		t.Fatalf("UpstoxOrderTradesPath = %q, want api.upstox.com", cfg.UpstoxOrderTradesPath)
+	}
+	if cfg.UpstoxBrokeragePath != "https://api.upstox.com/v2/charges/brokerage" {
+		t.Fatalf("UpstoxBrokeragePath = %q, want api.upstox.com", cfg.UpstoxBrokeragePath)
+	}
+}
+
 func TestLoadDefaultsToSandbox(t *testing.T) {
 	t.Setenv("DATABASE_URL", "postgresql://user:pass@example.com:5432/omsdb?sslmode=disable")
 	t.Setenv("UPSTOX_SANDBOX_API_ACCESS_TOKEN", "sandbox-token")

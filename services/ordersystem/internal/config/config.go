@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -36,6 +37,9 @@ type Config struct {
 const (
 	ModeSandbox    = "sandbox"
 	ModeProduction = "production"
+
+	upstoxStandardBaseURL = "https://api.upstox.com"
+	upstoxHFTBaseURL      = "https://api-hft.upstox.com"
 )
 
 func Load() (Config, error) {
@@ -51,13 +55,13 @@ func Load() (Config, error) {
 		AccountInitialCash:      parseFloatEnv("ACCOUNT_INITIAL_CASH", 0),
 		UpstoxBaseURL:           resolveUpstoxBaseURL(appMode),
 		UpstoxAccessToken:       resolveUpstoxAccessToken(appMode),
-		UpstoxOrderPlacePath:    normalizePath(getEnv("UPSTOX_ORDER_PLACE_PATH", "/v3/order/place")),
-		UpstoxOrderModifyPath:   normalizePath(getEnv("UPSTOX_ORDER_MODIFY_PATH", "/v3/order/modify")),
-		UpstoxOrderCancelPath:   normalizePath(getEnv("UPSTOX_ORDER_CANCEL_PATH", "/v3/order/cancel")),
-		UpstoxExitPositionsPath: normalizePath(getEnv("UPSTOX_EXIT_POSITIONS_PATH", defaultUpstoxStandardPath(appMode, "/v2/order/positions/exit"))),
-		UpstoxOrderDetailsPath:  normalizePath(getEnv("UPSTOX_ORDER_DETAILS_PATH", defaultUpstoxStandardPath(appMode, "/v2/order/details"))),
-		UpstoxOrderTradesPath:   normalizePath(getEnv("UPSTOX_ORDER_TRADES_PATH", defaultUpstoxStandardPath(appMode, "/v2/order/trades"))),
-		UpstoxBrokeragePath:     normalizePath(getEnv("UPSTOX_BROKERAGE_PATH", defaultUpstoxStandardPath(appMode, "/v2/charges/brokerage"))),
+		UpstoxOrderPlacePath:    resolveUpstoxEndpoint(appMode, "UPSTOX_ORDER_PLACE_PATH", upstoxHFTBaseURL, "/v3/order/place"),
+		UpstoxOrderModifyPath:   resolveUpstoxEndpoint(appMode, "UPSTOX_ORDER_MODIFY_PATH", upstoxHFTBaseURL, "/v3/order/modify"),
+		UpstoxOrderCancelPath:   resolveUpstoxEndpoint(appMode, "UPSTOX_ORDER_CANCEL_PATH", upstoxHFTBaseURL, "/v3/order/cancel"),
+		UpstoxExitPositionsPath: resolveUpstoxEndpoint(appMode, "UPSTOX_EXIT_POSITIONS_PATH", upstoxStandardBaseURL, "/v2/order/positions/exit"),
+		UpstoxOrderDetailsPath:  resolveUpstoxEndpoint(appMode, "UPSTOX_ORDER_DETAILS_PATH", upstoxStandardBaseURL, "/v2/order/details"),
+		UpstoxOrderTradesPath:   resolveUpstoxEndpoint(appMode, "UPSTOX_ORDER_TRADES_PATH", upstoxStandardBaseURL, "/v2/order/trades"),
+		UpstoxBrokeragePath:     resolveUpstoxEndpoint(appMode, "UPSTOX_BROKERAGE_PATH", upstoxStandardBaseURL, "/v2/charges/brokerage"),
 		UpstoxAPIVersion:        strings.TrimSpace(getEnv("UPSTOX_API_VERSION", "2.0")),
 		UpstoxOrderRequestGap:   parseDurationEnv("ORDERSYSTEM_UPSTOX_ORDER_REQUEST_GAP", 750*time.Millisecond),
 		UpstoxStatusRequestGap:  parseDurationEnv("ORDERSYSTEM_UPSTOX_STATUS_REQUEST_GAP", 750*time.Millisecond),
@@ -163,15 +167,33 @@ func resolveUpstoxBaseURL(appMode string) string {
 	if normalizeAppMode(appMode) == ModeSandbox {
 		return strings.TrimRight(getEnv("UPSTOX_SANDBOX_API_BASE_URL", "https://api-sandbox.upstox.com"), "/")
 	}
-	return strings.TrimRight(getEnv("UPSTOX_API_BASE_URL", "https://api.upstox.com"), "/")
+	return strings.TrimRight(getEnv("UPSTOX_API_BASE_URL", upstoxStandardBaseURL), "/")
 }
 
-func defaultUpstoxStandardPath(appMode string, path string) string {
-	path = normalizePath(path)
-	if normalizeAppMode(appMode) == ModeProduction {
-		return "https://api.upstox.com" + path
+func resolveUpstoxEndpoint(appMode string, envKey string, productionBaseURL string, defaultPath string) string {
+	value := strings.TrimSpace(os.Getenv(envKey))
+	if value == "" {
+		value = defaultPath
 	}
-	return path
+	if normalizeAppMode(appMode) != ModeProduction {
+		return normalizePath(value)
+	}
+	return strings.TrimRight(productionBaseURL, "/") + endpointPath(value)
+}
+
+func endpointPath(value string) string {
+	value = strings.TrimSpace(value)
+	if strings.HasPrefix(value, "http://") || strings.HasPrefix(value, "https://") {
+		parsed, err := url.Parse(value)
+		if err == nil {
+			path := normalizePath(parsed.EscapedPath())
+			if parsed.RawQuery != "" {
+				path += "?" + parsed.RawQuery
+			}
+			return path
+		}
+	}
+	return normalizePath(value)
 }
 
 func resolveUpstoxAccessToken(appMode string) string {

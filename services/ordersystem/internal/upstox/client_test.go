@@ -433,7 +433,7 @@ func TestClientGetOrderStatusErrorIncludesURL(t *testing.T) {
 	client := NewClient(config.Config{
 		UpstoxBaseURL:          "https://api-hft.upstox.com",
 		UpstoxAccessToken:      "test-token",
-		UpstoxOrderDetailsPath: "/v2/order/details",
+		UpstoxOrderDetailsPath: "https://api.upstox.com/v2/order/details",
 		UpstoxAPIVersion:       "2.0",
 	})
 	client.httpClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
@@ -450,7 +450,7 @@ func TestClientGetOrderStatusErrorIncludesURL(t *testing.T) {
 	}
 
 	msg := err.Error()
-	wantURL := "url=https://api-hft.upstox.com/v2/order/details?order_id=sl-123"
+	wantURL := "url=https://api.upstox.com/v2/order/details?order_id=sl-123"
 	if !strings.Contains(msg, wantURL) {
 		t.Fatalf("error = %q, want request URL %s", msg, wantURL)
 	}

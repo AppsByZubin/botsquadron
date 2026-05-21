@@ -57,6 +57,16 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 	var upClient *upstox.Client
 	if strings.TrimSpace(cfg.UpstoxAccessToken) != "" {
 		upClient = upstox.NewClient(cfg)
+		logger.Printf(
+			"upstox endpoints configured place=%s modify=%s cancel=%s exit_positions=%s order_details=%s order_trades=%s brokerage=%s",
+			cfg.UpstoxOrderPlacePath,
+			cfg.UpstoxOrderModifyPath,
+			cfg.UpstoxOrderCancelPath,
+			cfg.UpstoxExitPositionsPath,
+			cfg.UpstoxOrderDetailsPath,
+			cfg.UpstoxOrderTradesPath,
+			cfg.UpstoxBrokeragePath,
+		)
 	}
 
 	svc := service.New(cfg, st, upClient)

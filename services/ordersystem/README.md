@@ -183,11 +183,11 @@ Upstox:
 
 - `UPSTOX_API_ACCESS_TOKEN` required when `APP_MODE=production`
 - `UPSTOX_SANDBOX_API_ACCESS_TOKEN` required when `APP_MODE=sandbox` (`upstox_sandbox_api_access_token` is also accepted)
-- `UPSTOX_API_BASE_URL` default `https://api.upstox.com` and used in production for relative Upstox endpoint paths
+- `UPSTOX_API_BASE_URL` default `https://api.upstox.com`; production order endpoints below are resolved to their documented FQDNs even when env overrides are relative paths
 - `UPSTOX_SANDBOX_API_BASE_URL` default `https://api-sandbox.upstox.com` and used in sandbox
-- `UPSTOX_ORDER_PLACE_PATH` default `/v3/order/place`
-- `UPSTOX_ORDER_MODIFY_PATH` default `/v3/order/modify`
-- `UPSTOX_ORDER_CANCEL_PATH` default `/v3/order/cancel`
+- `UPSTOX_ORDER_PLACE_PATH` default `https://api-hft.upstox.com/v3/order/place` in production, `/v3/order/place` in sandbox
+- `UPSTOX_ORDER_MODIFY_PATH` default `https://api-hft.upstox.com/v3/order/modify` in production, `/v3/order/modify` in sandbox
+- `UPSTOX_ORDER_CANCEL_PATH` default `https://api-hft.upstox.com/v3/order/cancel` in production, `/v3/order/cancel` in sandbox
 - `UPSTOX_EXIT_POSITIONS_PATH` default `https://api.upstox.com/v2/order/positions/exit` in production, `/v2/order/positions/exit` in sandbox
 - `UPSTOX_ORDER_DETAILS_PATH` default `https://api.upstox.com/v2/order/details` in production, `/v2/order/details` in sandbox
 - `UPSTOX_ORDER_TRADES_PATH` default `https://api.upstox.com/v2/order/trades` in production, `/v2/order/trades` in sandbox
