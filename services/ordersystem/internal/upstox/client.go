@@ -704,13 +704,14 @@ func (c *Client) getBrokerData(ctx context.Context, req brokerGETRequest) (json.
 		}
 	}
 
-	requestURL := c.buildURLWithQuery(req.path, req.orderID, req.query)
+	requestURL := c.buildURLWithQueryVersion(req.path, req.orderID, req.query, false)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create %s request url=%s: %w", req.operation, requestURL, err)
 	}
 
-	c.setHeaders(httpReq)
+	c.setHeadersWithVersion(httpReq, false)
+	httpReq.Header.Set("Content-Type", "application/json")
 
 	httpResp, err := c.httpClient.Do(httpReq)
 	if err != nil {
@@ -835,13 +836,17 @@ func (c *Client) buildURL(path string, orderID string) string {
 }
 
 func (c *Client) buildURLWithQuery(path string, orderID string, query url.Values) string {
-	if strings.HasPrefix(path, "http://") || strings.HasPrefix(path, "https://") {
-		return c.withQuery(path, orderID, query)
-	}
-	return c.withQuery(c.baseURL+path, orderID, query)
+	return c.buildURLWithQueryVersion(path, orderID, query, true)
 }
 
-func (c *Client) withQuery(rawURL string, orderID string, query url.Values) string {
+func (c *Client) buildURLWithQueryVersion(path string, orderID string, query url.Values, includeAPIVersion bool) string {
+	if strings.HasPrefix(path, "http://") || strings.HasPrefix(path, "https://") {
+		return c.withQuery(path, orderID, query, includeAPIVersion)
+	}
+	return c.withQuery(c.baseURL+path, orderID, query, includeAPIVersion)
+}
+
+func (c *Client) withQuery(rawURL string, orderID string, query url.Values, includeAPIVersion bool) string {
 	if orderID != "" && strings.Contains(rawURL, "{order_id}") {
 		return strings.ReplaceAll(rawURL, "{order_id}", url.PathEscape(orderID))
 	}
@@ -860,7 +865,7 @@ func (c *Client) withQuery(rawURL string, orderID string, query url.Values) stri
 	if orderID != "" {
 		q.Set("order_id", orderID)
 	}
-	if c.apiVersion != "" {
+	if includeAPIVersion && c.apiVersion != "" {
 		q.Set("api_version", c.apiVersion)
 	}
 	parsed.RawQuery = q.Encode()
@@ -868,9 +873,13 @@ func (c *Client) withQuery(rawURL string, orderID string, query url.Values) stri
 }
 
 func (c *Client) setHeaders(req *http.Request) {
+	c.setHeadersWithVersion(req, true)
+}
+
+func (c *Client) setHeadersWithVersion(req *http.Request, includeAPIVersion bool) {
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Authorization", "Bearer "+c.accessToken)
-	if c.apiVersion != "" {
+	if includeAPIVersion && c.apiVersion != "" {
 		req.Header.Set("Api-Version", c.apiVersion)
 	}
 }

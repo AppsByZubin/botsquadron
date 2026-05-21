@@ -309,7 +309,9 @@ func TestClientGetOrderTradesComputesAveragePrice(t *testing.T) {
 	var gotMethod string
 	var gotPath string
 	var gotOrderID string
-	var gotAPIVersion string
+	var gotQueryVersion string
+	var gotAPIVersionHeader string
+	var gotContentType string
 
 	client := NewClient(config.Config{
 		UpstoxBaseURL:         "https://api.example.com",
@@ -321,7 +323,9 @@ func TestClientGetOrderTradesComputesAveragePrice(t *testing.T) {
 		gotMethod = r.Method
 		gotPath = r.URL.Path
 		gotOrderID = r.URL.Query().Get("order_id")
-		gotAPIVersion = r.Header.Get("Api-Version")
+		gotQueryVersion = r.URL.Query().Get("api_version")
+		gotAPIVersionHeader = r.Header.Get("Api-Version")
+		gotContentType = r.Header.Get("Content-Type")
 
 		return &http.Response{
 			StatusCode: http.StatusOK,
@@ -344,8 +348,14 @@ func TestClientGetOrderTradesComputesAveragePrice(t *testing.T) {
 	if gotOrderID != "sl-123" {
 		t.Fatalf("order_id query = %s, want sl-123", gotOrderID)
 	}
-	if gotAPIVersion != "2.0" {
-		t.Fatalf("Api-Version header = %s, want 2.0", gotAPIVersion)
+	if gotQueryVersion != "" {
+		t.Fatalf("api_version query = %s, want empty for broker data GET", gotQueryVersion)
+	}
+	if gotAPIVersionHeader != "" {
+		t.Fatalf("Api-Version header = %s, want empty for broker data GET", gotAPIVersionHeader)
+	}
+	if gotContentType != "application/json" {
+		t.Fatalf("Content-Type header = %s, want application/json", gotContentType)
 	}
 	if !resp.Filled {
 		t.Fatalf("filled = false, want true")
@@ -369,6 +379,15 @@ func TestClientGetOrderStatusExtractsExecutionFields(t *testing.T) {
 	client.httpClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		if got := r.URL.Query().Get("order_id"); got != "entry-123" {
 			t.Fatalf("order_id query = %s, want entry-123", got)
+		}
+		if got := r.URL.Query().Get("api_version"); got != "" {
+			t.Fatalf("api_version query = %s, want empty for broker data GET", got)
+		}
+		if got := r.Header.Get("Api-Version"); got != "" {
+			t.Fatalf("Api-Version header = %s, want empty for broker data GET", got)
+		}
+		if got := r.Header.Get("Content-Type"); got != "application/json" {
+			t.Fatalf("Content-Type header = %s, want application/json", got)
 		}
 		return &http.Response{
 			StatusCode: http.StatusOK,
@@ -431,8 +450,12 @@ func TestClientGetOrderStatusErrorIncludesURL(t *testing.T) {
 	}
 
 	msg := err.Error()
-	if !strings.Contains(msg, "url=https://api-hft.upstox.com/v2/order/details") {
-		t.Fatalf("error = %q, want request URL", msg)
+	wantURL := "url=https://api-hft.upstox.com/v2/order/details?order_id=sl-123"
+	if !strings.Contains(msg, wantURL) {
+		t.Fatalf("error = %q, want request URL %s", msg, wantURL)
+	}
+	if strings.Contains(msg, "api_version") {
+		t.Fatalf("error = %q, want no api_version query", msg)
 	}
 	if !strings.Contains(msg, "order_id=sl-123") {
 		t.Fatalf("error = %q, want order_id query", msg)
