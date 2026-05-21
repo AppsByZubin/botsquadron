@@ -51,10 +51,43 @@ func TestLoadSelectsSandboxUpstoxBaseURLAndToken(t *testing.T) {
 	}
 }
 
+func TestLoadDefaultsUpstoxV2EndpointsToAPIHost(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgresql://user:pass@example.com:5432/omsdb?sslmode=disable")
+	t.Setenv("APP_MODE", "production")
+	t.Setenv("UPSTOX_API_ACCESS_TOKEN", "prod-token")
+	t.Setenv("UPSTOX_API_BASE_URL", "https://api-hft.upstox.com")
+	t.Setenv("UPSTOX_EXIT_POSITIONS_PATH", "")
+	t.Setenv("UPSTOX_ORDER_DETAILS_PATH", "")
+	t.Setenv("UPSTOX_ORDER_TRADES_PATH", "")
+	t.Setenv("UPSTOX_BROKERAGE_PATH", "")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+
+	if cfg.UpstoxBaseURL != "https://api-hft.upstox.com" {
+		t.Fatalf("UpstoxBaseURL = %q, want HFT base URL", cfg.UpstoxBaseURL)
+	}
+	if cfg.UpstoxExitPositionsPath != "https://api.upstox.com/v2/order/positions/exit" {
+		t.Fatalf("UpstoxExitPositionsPath = %q, want api.upstox.com absolute URL", cfg.UpstoxExitPositionsPath)
+	}
+	if cfg.UpstoxOrderDetailsPath != "https://api.upstox.com/v2/order/details" {
+		t.Fatalf("UpstoxOrderDetailsPath = %q, want api.upstox.com absolute URL", cfg.UpstoxOrderDetailsPath)
+	}
+	if cfg.UpstoxOrderTradesPath != "https://api.upstox.com/v2/order/trades" {
+		t.Fatalf("UpstoxOrderTradesPath = %q, want api.upstox.com absolute URL", cfg.UpstoxOrderTradesPath)
+	}
+	if cfg.UpstoxBrokeragePath != "https://api.upstox.com/v2/charges/brokerage" {
+		t.Fatalf("UpstoxBrokeragePath = %q, want api.upstox.com absolute URL", cfg.UpstoxBrokeragePath)
+	}
+}
+
 func TestLoadDefaultsToSandbox(t *testing.T) {
 	t.Setenv("DATABASE_URL", "postgresql://user:pass@example.com:5432/omsdb?sslmode=disable")
 	t.Setenv("UPSTOX_SANDBOX_API_ACCESS_TOKEN", "sandbox-token")
 	t.Setenv("UPSTOX_SANDBOX_API_BASE_URL", "https://sandbox.example.com/")
+	t.Setenv("UPSTOX_ORDER_DETAILS_PATH", "")
 
 	cfg, err := Load()
 	if err != nil {
@@ -65,6 +98,9 @@ func TestLoadDefaultsToSandbox(t *testing.T) {
 	}
 	if cfg.UpstoxBaseURL != "https://sandbox.example.com" {
 		t.Fatalf("UpstoxBaseURL = %q, want sandbox base URL", cfg.UpstoxBaseURL)
+	}
+	if cfg.UpstoxOrderDetailsPath != "/v2/order/details" {
+		t.Fatalf("UpstoxOrderDetailsPath = %q, want sandbox-relative path", cfg.UpstoxOrderDetailsPath)
 	}
 }
 

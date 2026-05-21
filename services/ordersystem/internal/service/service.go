@@ -960,6 +960,16 @@ func (s *Service) recordStopLossFillFromResponses(ctx context.Context, trade mod
 	if haveTrades && tradesResp.FilledQuantity > 0 {
 		filledQty = tradesResp.FilledQuantity
 	}
+	log.Printf(
+		"broker SL fill response trade_id=%s order_id=%s status=%s filled_qty=%d avg_price=%s status_raw=%s trades_raw=%s",
+		trade.ID,
+		strings.TrimSpace(slOrder.OrderID),
+		strings.TrimSpace(statusResp.Status),
+		filledQty,
+		floatPtrForLog(avgPrice),
+		rawJSONForLog(statusResp.RawData),
+		rawJSONForLog(tradesResp.RawData),
+	)
 	s.recordStopLossFill(ctx, trade, slOrder, statusResp, avgPrice, filledQty)
 }
 
@@ -1157,7 +1167,9 @@ func (s *Service) recordStopLossFill(ctx context.Context, trade model.TradeForSL
 	brokerage := s.calculateBrokerage(ctx, trade, statusResp, exitPrice, exitQty, oppositeSide(trade.Side))
 	if err := s.store.RecordStopLossFill(ctx, trade.ID, orderID, exitPrice, exitQty, brokerage, "STOPLOSS HIT"); err != nil {
 		log.Printf("record SL fill failed for trade_id=%s order_id=%s: %v", trade.ID, orderID, err)
+		return
 	}
+	log.Printf("recorded SL fill in DB trade_id=%s order_id=%s exit_price=%.2f qty=%d brokerage=%s", trade.ID, orderID, exitPrice, exitQty, floatPtrForLog(brokerage))
 }
 
 func (s *Service) calculateBrokerage(ctx context.Context, trade model.TradeForSLPolling, statusResp upstox.OrderStatus, price float64, qty int, fallbackTxnType string) *float64 {
@@ -1210,6 +1222,25 @@ func executionQuantity(values ...int) int {
 		}
 	}
 	return 0
+}
+
+func floatPtrForLog(value *float64) string {
+	if value == nil {
+		return "<nil>"
+	}
+	return fmt.Sprintf("%.2f", *value)
+}
+
+func rawJSONForLog(data []byte) string {
+	text := strings.TrimSpace(string(data))
+	if text == "" {
+		return "<empty>"
+	}
+	const maxLogBytes = 4096
+	if len(text) > maxLogBytes {
+		return text[:maxLogBytes] + "...<truncated>"
+	}
+	return text
 }
 
 func singleOrderFallbackQty(tradeQty int, orderCount int) int {

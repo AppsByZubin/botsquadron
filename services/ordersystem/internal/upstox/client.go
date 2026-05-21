@@ -707,35 +707,35 @@ func (c *Client) getBrokerData(ctx context.Context, req brokerGETRequest) (json.
 	requestURL := c.buildURLWithQuery(req.path, req.orderID, req.query)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
 	if err != nil {
-		return nil, fmt.Errorf("create %s request: %w", req.operation, err)
+		return nil, fmt.Errorf("create %s request url=%s: %w", req.operation, requestURL, err)
 	}
 
 	c.setHeaders(httpReq)
 
 	httpResp, err := c.httpClient.Do(httpReq)
 	if err != nil {
-		return nil, fmt.Errorf("%s request failed: %w", req.operation, err)
+		return nil, fmt.Errorf("%s request failed url=%s: %w", req.operation, requestURL, err)
 	}
 	defer httpResp.Body.Close()
 
 	payload, err := io.ReadAll(io.LimitReader(httpResp.Body, 2<<20))
 	if err != nil {
-		return nil, fmt.Errorf("read %s response: %w", req.operation, err)
+		return nil, fmt.Errorf("read %s response url=%s: %w", req.operation, requestURL, err)
 	}
 
 	if httpResp.StatusCode >= 300 {
 		if httpResp.StatusCode == http.StatusTooManyRequests {
 			return c.rememberBrokerRateLimit(req, httpResp.Header.Get("Retry-After"))
 		}
-		return nil, fmt.Errorf("upstox %s failed (%d): %s", req.operation, httpResp.StatusCode, strings.TrimSpace(string(payload)))
+		return nil, fmt.Errorf("upstox %s failed (%d) url=%s: %s", req.operation, httpResp.StatusCode, requestURL, strings.TrimSpace(string(payload)))
 	}
 
 	statusEnvelope, data, err := decodeEnvelope(payload)
 	if err != nil {
-		return nil, fmt.Errorf("decode %s response: %w", req.operation, err)
+		return nil, fmt.Errorf("decode %s response url=%s: %w", req.operation, requestURL, err)
 	}
 	if statusEnvelope != "" && !strings.EqualFold(statusEnvelope, "success") {
-		return nil, fmt.Errorf("upstox %s non-success status: %s", req.operation, statusEnvelope)
+		return nil, fmt.Errorf("upstox %s non-success status url=%s: %s", req.operation, requestURL, statusEnvelope)
 	}
 
 	c.rememberBrokerData(req.cacheKey, data)

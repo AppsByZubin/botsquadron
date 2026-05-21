@@ -408,6 +408,40 @@ func TestClientGetOrderStatusExtractsExecutionFields(t *testing.T) {
 	}
 }
 
+func TestClientGetOrderStatusErrorIncludesURL(t *testing.T) {
+	t.Parallel()
+
+	client := NewClient(config.Config{
+		UpstoxBaseURL:          "https://api-hft.upstox.com",
+		UpstoxAccessToken:      "test-token",
+		UpstoxOrderDetailsPath: "/v2/order/details",
+		UpstoxAPIVersion:       "2.0",
+	})
+	client.httpClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusNotFound,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{"status":"error","errors":[{"errorCode":"UDAPI100060","message":"Resource not Found."}]}`)),
+		}, nil
+	})}
+
+	_, err := client.GetOrderStatus(context.Background(), "sl-123")
+	if err == nil {
+		t.Fatal("GetOrderStatus returned nil error, want 404")
+	}
+
+	msg := err.Error()
+	if !strings.Contains(msg, "url=https://api-hft.upstox.com/v2/order/details") {
+		t.Fatalf("error = %q, want request URL", msg)
+	}
+	if !strings.Contains(msg, "order_id=sl-123") {
+		t.Fatalf("error = %q, want order_id query", msg)
+	}
+	if !strings.Contains(msg, "UDAPI100060") {
+		t.Fatalf("error = %q, want Upstox payload", msg)
+	}
+}
+
 func TestClientGetBrokerageReadsChargesTotal(t *testing.T) {
 	t.Parallel()
 

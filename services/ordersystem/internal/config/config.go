@@ -54,10 +54,10 @@ func Load() (Config, error) {
 		UpstoxOrderPlacePath:    normalizePath(getEnv("UPSTOX_ORDER_PLACE_PATH", "/v3/order/place")),
 		UpstoxOrderModifyPath:   normalizePath(getEnv("UPSTOX_ORDER_MODIFY_PATH", "/v3/order/modify")),
 		UpstoxOrderCancelPath:   normalizePath(getEnv("UPSTOX_ORDER_CANCEL_PATH", "/v3/order/cancel")),
-		UpstoxExitPositionsPath: normalizePath(getEnv("UPSTOX_EXIT_POSITIONS_PATH", "/v2/order/positions/exit")),
-		UpstoxOrderDetailsPath:  normalizePath(getEnv("UPSTOX_ORDER_DETAILS_PATH", "/v2/order/details")),
-		UpstoxOrderTradesPath:   normalizePath(getEnv("UPSTOX_ORDER_TRADES_PATH", "/v2/order/trades")),
-		UpstoxBrokeragePath:     normalizePath(getEnv("UPSTOX_BROKERAGE_PATH", "/v2/charges/brokerage")),
+		UpstoxExitPositionsPath: normalizePath(getEnv("UPSTOX_EXIT_POSITIONS_PATH", defaultUpstoxStandardPath(appMode, "/v2/order/positions/exit"))),
+		UpstoxOrderDetailsPath:  normalizePath(getEnv("UPSTOX_ORDER_DETAILS_PATH", defaultUpstoxStandardPath(appMode, "/v2/order/details"))),
+		UpstoxOrderTradesPath:   normalizePath(getEnv("UPSTOX_ORDER_TRADES_PATH", defaultUpstoxStandardPath(appMode, "/v2/order/trades"))),
+		UpstoxBrokeragePath:     normalizePath(getEnv("UPSTOX_BROKERAGE_PATH", defaultUpstoxStandardPath(appMode, "/v2/charges/brokerage"))),
 		UpstoxAPIVersion:        strings.TrimSpace(getEnv("UPSTOX_API_VERSION", "2.0")),
 		UpstoxOrderRequestGap:   parseDurationEnv("ORDERSYSTEM_UPSTOX_ORDER_REQUEST_GAP", 750*time.Millisecond),
 		UpstoxStatusRequestGap:  parseDurationEnv("ORDERSYSTEM_UPSTOX_STATUS_REQUEST_GAP", 750*time.Millisecond),
@@ -164,6 +164,14 @@ func resolveUpstoxBaseURL(appMode string) string {
 		return strings.TrimRight(getEnv("UPSTOX_SANDBOX_API_BASE_URL", "https://api-sandbox.upstox.com"), "/")
 	}
 	return strings.TrimRight(getEnv("UPSTOX_API_BASE_URL", "https://api.upstox.com"), "/")
+}
+
+func defaultUpstoxStandardPath(appMode string, path string) string {
+	path = normalizePath(path)
+	if normalizeAppMode(appMode) == ModeProduction {
+		return "https://api.upstox.com" + path
+	}
+	return path
 }
 
 func resolveUpstoxAccessToken(appMode string) string {

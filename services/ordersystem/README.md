@@ -183,15 +183,15 @@ Upstox:
 
 - `UPSTOX_API_ACCESS_TOKEN` required when `APP_MODE=production`
 - `UPSTOX_SANDBOX_API_ACCESS_TOKEN` required when `APP_MODE=sandbox` (`upstox_sandbox_api_access_token` is also accepted)
-- `UPSTOX_API_BASE_URL` default `https://api.upstox.com` and used in production
+- `UPSTOX_API_BASE_URL` default `https://api.upstox.com` and used in production for relative Upstox endpoint paths
 - `UPSTOX_SANDBOX_API_BASE_URL` default `https://api-sandbox.upstox.com` and used in sandbox
 - `UPSTOX_ORDER_PLACE_PATH` default `/v3/order/place`
 - `UPSTOX_ORDER_MODIFY_PATH` default `/v3/order/modify`
 - `UPSTOX_ORDER_CANCEL_PATH` default `/v3/order/cancel`
-- `UPSTOX_EXIT_POSITIONS_PATH` default `/v2/order/positions/exit`
-- `UPSTOX_ORDER_DETAILS_PATH` default `/v2/order/details`
-- `UPSTOX_ORDER_TRADES_PATH` default `/v2/order/trades`
-- `UPSTOX_BROKERAGE_PATH` default `/v2/charges/brokerage`
+- `UPSTOX_EXIT_POSITIONS_PATH` default `https://api.upstox.com/v2/order/positions/exit` in production, `/v2/order/positions/exit` in sandbox
+- `UPSTOX_ORDER_DETAILS_PATH` default `https://api.upstox.com/v2/order/details` in production, `/v2/order/details` in sandbox
+- `UPSTOX_ORDER_TRADES_PATH` default `https://api.upstox.com/v2/order/trades` in production, `/v2/order/trades` in sandbox
+- `UPSTOX_BROKERAGE_PATH` default `https://api.upstox.com/v2/charges/brokerage` in production, `/v2/charges/brokerage` in sandbox
 - `UPSTOX_API_VERSION` default `2.0`
 - `ORDERSYSTEM_UPSTOX_ORDER_REQUEST_GAP` default `750ms`
 - `ORDERSYSTEM_UPSTOX_STATUS_REQUEST_GAP` default `750ms`
