@@ -2024,14 +2024,14 @@ class HmEmaAdxStrategy:
             oil_has_large_down_candle = self._coerce_bool(latest.get("oil_has_large_down_candle"), False)
 
             if oil_has_large_volume:
-                if side in {constants.CALL, constants.CE} and oil_has_large_up_candle:
+                if side in {constants.CALL, constants.CE} and oil_has_large_down_candle :
                     logger.info(
-                        "Force trailing CALL: crude oil has large up candle with large volume."
+                        "Force trailing CALL: crude oil has large down candle with large volume."
                     )
                     return True
-                if side in {constants.PUT, constants.PE} and oil_has_large_down_candle:
+                if side in {constants.PUT, constants.PE} and oil_has_large_up_candle:
                     logger.info(
-                        "Force trailing PUT: crude oil has large down candle with large volume."
+                        "Force trailing PUT: crude oil has large up candle with large volume."
                     )
                     return True
 
@@ -2040,14 +2040,17 @@ class HmEmaAdxStrategy:
         adx_threshold = safe_float(sp.get("adx_threshold", 25))
 
         if self.index_atr is not None and min_atr_14 is not None and self.index_atr < min_atr_14:
+            logger.info(f"Force trailing: index ATR {self.index_atr:.2f} is below threshold {min_atr_14:.2f}.")
             return True
         if self.index_adx is not None and adx_threshold is not None and self.index_adx < adx_threshold:
+            logger.info(f"Force trailing: index ADX {self.index_adx:.2f} is below threshold {adx_threshold:.2f}.")
             return True
         if (
             self.index_adx is not None
             and self.index_prev_adx is not None
             and (self.index_adx + 0.5) < self.index_prev_adx
         ):
+            logger.info(f"Force trailing: index ADX {self.index_adx:.2f} is decreasing from {self.index_prev_adx:.2f}.")
             return True
 
         return False
