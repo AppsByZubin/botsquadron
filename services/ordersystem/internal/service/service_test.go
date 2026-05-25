@@ -61,7 +61,8 @@ func TestModifyTradeRequestAcceptsTradeStateFields(t *testing.T) {
 	decoder := json.NewDecoder(strings.NewReader(`{
 		"stoploss": 91,
 		"sl_limit": 90.5,
-		"spot_trail_anchor": 22375
+		"spot_trail_anchor": 22375,
+		"force_trail": true
 	}`))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&req); err != nil {
@@ -71,6 +72,9 @@ func TestModifyTradeRequestAcceptsTradeStateFields(t *testing.T) {
 	requireFloatPtr(t, "stoploss", req.Stoploss, 91)
 	requireFloatPtr(t, "slLimit", req.SLLimit, 90.5)
 	requireFloatPtr(t, "spotTrailAnchor", req.SpotTrailAnchor, 22375)
+	if !req.ForceTrail {
+		t.Fatal("ForceTrail = false, want true")
+	}
 }
 
 func TestModifyTradeRequestRejectsAliases(t *testing.T) {
@@ -318,6 +322,64 @@ func TestValidateModifiedTradeAgainstTradeChecksSLLimitDirection(t *testing.T) {
 			}
 			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 				t.Fatalf("error = %v, want %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestShouldSkipBrokerStoplossModifyForForceTrail(t *testing.T) {
+	t.Parallel()
+
+	lowerStoploss := 95.0
+	higherStoploss := 105.0
+
+	tests := []struct {
+		name       string
+		trade      model.Trade
+		stoploss   *float64
+		forceTrail bool
+		want       bool
+	}{
+		{
+			name:       "force trail skips lower requested stoploss",
+			trade:      model.Trade{Stoploss: 100},
+			stoploss:   &lowerStoploss,
+			forceTrail: true,
+			want:       true,
+		},
+		{
+			name:       "force trail allows higher requested stoploss",
+			trade:      model.Trade{Stoploss: 100},
+			stoploss:   &higherStoploss,
+			forceTrail: true,
+		},
+		{
+			name:       "regular modify allows lower requested stoploss",
+			trade:      model.Trade{Stoploss: 100},
+			stoploss:   &lowerStoploss,
+			forceTrail: false,
+		},
+		{
+			name:       "missing current stoploss does not skip",
+			trade:      model.Trade{},
+			stoploss:   &lowerStoploss,
+			forceTrail: true,
+		},
+		{
+			name:       "missing requested stoploss does not skip",
+			trade:      model.Trade{Stoploss: 100},
+			forceTrail: true,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := shouldSkipBrokerStoplossModifyForForceTrail(tt.trade, tt.stoploss, tt.forceTrail)
+			if got != tt.want {
+				t.Fatalf("shouldSkipBrokerStoplossModifyForForceTrail() = %v, want %v", got, tt.want)
 			}
 		})
 	}

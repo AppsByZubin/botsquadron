@@ -547,6 +547,7 @@ class OrderSystemClient:
         disclosed_quantity: int = 0,
         validity: Optional[str] = None,
         mode: Optional[str] = None,
+        force_trail: bool = False,
     ) -> Dict[str, Any]:
         payload = _without_none({
             "mode": mode or self.mode,
@@ -556,7 +557,25 @@ class OrderSystemClient:
             "stoploss": _to_float(stoploss, None),
             "sl_limit": _to_float(sl_limit, None),
             "spot_trail_anchor": _to_float(spot_trail_anchor, None),
+            "force_trail": True if force_trail else None,
         })
+        cached_trade = self._get_cached_trade(trade_id)
+        current_stoploss = _to_float((cached_trade or {}).get("stoploss"), None)
+        requested_stoploss = payload.get("stoploss")
+        if force_trail and current_stoploss is not None and requested_stoploss is not None and current_stoploss > requested_stoploss:
+            response = {
+                "trade_id": trade_id,
+                "modified_order_ids": [],
+                "message": "force trail skipped because existing stoploss is greater than requested stoploss",
+            }
+            log.info(
+                "Force trailing SL modify skipped trade_id=%s old_stoploss=%.2f new_stoploss=%.2f",
+                trade_id,
+                current_stoploss,
+                requested_stoploss,
+            )
+            self._log_local_event("MODIFY_TRADE", cached_trade or {"id": trade_id}, extra={"request": payload, "response": dict(response)})
+            return response
         try:
             response = self._request("POST", f"/v1/trades/{trade_id}/modify", json=payload)
         except OrderSystemError as exc:
@@ -613,6 +632,7 @@ class OrderSystemClient:
         new_trigger: Optional[float] = None,
         new_limit: Optional[float] = None,
         ts: Optional[datetime] = None,
+        force_trail: bool = False,
     ) -> bool:
         try:
             response = self.modify_trade(
@@ -620,6 +640,7 @@ class OrderSystemClient:
                 stoploss=new_trigger,
                 sl_limit=new_limit,
                 spot_trail_anchor=ltp_now,
+                force_trail=force_trail,
             )
             if self._first_closed_trade_from_response(response) is not None:
                 return False
@@ -793,6 +814,7 @@ class OrderSystemClient:
                 stoploss=update["stoploss"],
                 sl_limit=update.get("sl_limit"),
                 spot_trail_anchor=price,
+                force_trail=force_trail,
             )
         except OrderSystemError as exc:
             if _is_rate_limit_error(exc):
@@ -1492,6 +1514,8 @@ class OrderSystemClient:
             if not force and price > start_price:
                 return None
             new_sl = self._round_price(price + trail_points, "FLOOR")
+            if force and current_sl > 0 and current_sl > new_sl:
+                return None
             if current_sl > 0 and new_sl >= current_sl - self.tick_size:
                 return None
             gap = _positive_gap(current_limit - current_sl, self.sl_limit_gap)
@@ -1504,6 +1528,8 @@ class OrderSystemClient:
         if not force and price < start_price:
             return None
         new_sl = self._round_price(price - trail_points, "CEIL")
+        if force and current_sl > 0 and current_sl > new_sl:
+            return None
         if current_sl > 0 and new_sl <= current_sl + self.tick_size:
             return None
         gap = _positive_gap(current_sl - current_limit, self.sl_limit_gap)

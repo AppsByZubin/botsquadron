@@ -136,8 +136,29 @@ class MockOrderSystemClient(OrderSystemClient):
         disclosed_quantity: int = 0,
         validity: Optional[str] = None,
         mode: Optional[str] = None,
+        force_trail: bool = False,
     ) -> Dict[str, Any]:
         del disclosed_quantity, mode
+        current_trade = self._get_cached_trade(trade_id) or self._read_local_trade(trade_id)
+        current_stoploss = _to_float((current_trade or {}).get("stoploss"), None)
+        requested_stoploss = _to_float(stoploss, None)
+        if force_trail and current_stoploss is not None and requested_stoploss is not None and current_stoploss > requested_stoploss:
+            response = {
+                "trade_id": trade_id,
+                "modified_order_ids": [],
+                "message": "force trail skipped because existing stoploss is greater than requested stoploss",
+            }
+            self._log_local_event(
+                "MOCK_MODIFY_TRADE",
+                current_trade or {"id": trade_id},
+                extra={
+                    "order_type": str(order_type or constants.SL).upper(),
+                    "validity": str(validity or self.validity).upper(),
+                    "force_trail": True,
+                    "new_stoploss": requested_stoploss,
+                },
+            )
+            return response
         updates = {
             "stoploss": _to_float(stoploss, None),
             "sl_limit": _to_float(sl_limit, None),
@@ -177,6 +198,7 @@ class MockOrderSystemClient(OrderSystemClient):
         c: Optional[float] = None,
         ts: Optional[datetime] = None,
         trade_id: Optional[str] = None,
+        force_trail: bool = False,
     ) -> Optional[Dict[str, Any]]:
         resolved_trade_id = str(
             trade_id
@@ -207,7 +229,16 @@ class MockOrderSystemClient(OrderSystemClient):
                 reason=exit_signal.get("reason"),
             )
 
-        return super().on_tick(symbol=symbol, o=o, h=h, l=l, c=c, ts=ts, trade_id=resolved_trade_id)
+        return super().on_tick(
+            symbol=symbol,
+            o=o,
+            h=h,
+            l=l,
+            c=c,
+            ts=ts,
+            trade_id=resolved_trade_id,
+            force_trail=force_trail,
+        )
 
     def square_off_trade(
         self,

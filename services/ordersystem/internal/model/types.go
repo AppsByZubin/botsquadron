@@ -134,6 +134,7 @@ type ModifyTradeRequest struct {
 	Stoploss        *float64 `json:"stoploss,omitempty"`
 	SLLimit         *float64 `json:"sl_limit,omitempty"`
 	SpotTrailAnchor *float64 `json:"spot_trail_anchor,omitempty"`
+	ForceTrail      bool     `json:"force_trail,omitempty"`
 }
 
 type ModifyTradeResponse struct {
