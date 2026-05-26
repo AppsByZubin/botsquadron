@@ -150,14 +150,29 @@ class HmEmaAdxStrategy:
             if isinstance(ht_new, dict):
                 ht.update(ht_new)
         self.index_fut_path = self._get_index_fut_path()
-        self.index_fur_key = self._get_index_fut_key()
+        configured_index_fut_key = self._get_index_fut_key()
         nifty_fut = self.selected_contracts.get("Nifty_Future") if isinstance(self.selected_contracts, dict) else None
-        if self.index_fur_key is None and isinstance(nifty_fut, dict):
-            self.index_fur_key = nifty_fut.get("instrument_key")
-        self.oil_key = self._get_oil_key()
+        selected_index_fut_key = nifty_fut.get("instrument_key") if isinstance(nifty_fut, dict) else None
+        if configured_index_fut_key and selected_index_fut_key and configured_index_fut_key != selected_index_fut_key:
+            logger.info(
+                "Using selected Nifty future instrument_key=%s instead of configured instrument_key=%s",
+                selected_index_fut_key,
+                configured_index_fut_key,
+            )
+        self.index_fur_key = selected_index_fut_key or configured_index_fut_key
+
+        configured_oil_key = self._get_oil_key()
+        self.oil_key = configured_oil_key
         crude_oil_fut = self.selected_contracts.get("CrudeOil_Future") if isinstance(self.selected_contracts, dict) else None
-        if self.oil_track_enabled and self.oil_key is None and isinstance(crude_oil_fut, dict):
-            self.oil_key = crude_oil_fut.get("instrument_key")
+        selected_oil_key = crude_oil_fut.get("instrument_key") if isinstance(crude_oil_fut, dict) else None
+        if self.oil_track_enabled and selected_oil_key:
+            if configured_oil_key and configured_oil_key != selected_oil_key:
+                logger.info(
+                    "Using selected crude oil future instrument_key=%s instead of configured instrument_key=%s",
+                    selected_oil_key,
+                    configured_oil_key,
+                )
+            self.oil_key = selected_oil_key
         self.df_index_future = self._populate_index_future_data()
 
         self._oi_previous_snapshot= {}

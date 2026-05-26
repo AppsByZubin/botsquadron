@@ -15,13 +15,33 @@ import upstox_client
 from logger import create_logger
 import io
 import gzip
-import time
 import json
 import requests
 from datetime import datetime
+from zoneinfo import ZoneInfo
 import common.constants as constants
 
 logger =create_logger("UpstoxHelperLogger")
+IST = ZoneInfo("Asia/Kolkata")
+
+
+def _expiry_date_from_epoch_ms(expiry_ms):
+    try:
+        return datetime.fromtimestamp(float(expiry_ms) / 1000.0, IST).date()
+    except (TypeError, ValueError, OSError):
+        return None
+
+
+def _is_nifty_index_future(inst):
+    return (
+        inst.get("segment") == "NSE_FO"
+        and inst.get("instrument_type") == "FUT"
+        and (
+            inst.get("asset_symbol") == "NIFTY"
+            or inst.get("underlying_symbol") == "NIFTY"
+            or inst.get("underlying_key") == constants.NIFTY50_SYMBOL
+        )
+    )
 
 class UpstoxHelper:
     """
@@ -178,23 +198,34 @@ class UpstoxHelper:
 
             instruments = json.loads(data_bytes.decode("utf-8"))
 
-            now_ms = int(time.time() * 1000)
+            today_ist = datetime.now(IST).date()
+            nifty_futs = []
+            skipped_expiring_today = 0
 
-            # Filter NIFTY index futures
-            nifty_futs = [
-                inst for inst in instruments
-                if inst.get("segment") == "NSE_FO"
-                and inst.get("instrument_type") == "FUT"
-                and inst.get("expiry", 0) >= now_ms
-                and (
-                    inst.get("asset_symbol") == "NIFTY"
-                    or inst.get("underlying_symbol") == "NIFTY"
-                    or inst.get("underlying_key") == constants.NIFTY50_SYMBOL
+            for inst in instruments:
+                if not _is_nifty_index_future(inst):
+                    continue
+
+                expiry_date = _expiry_date_from_epoch_ms(inst.get("expiry"))
+                if expiry_date is None:
+                    continue
+
+                if expiry_date <= today_ist:
+                    if expiry_date == today_ist:
+                        skipped_expiring_today += 1
+                    continue
+
+                nifty_futs.append(inst)
+
+            if skipped_expiring_today:
+                logger.info(
+                    "Skipping %s NIFTY future contract(s) expiring today (%s IST); selecting next expiry.",
+                    skipped_expiring_today,
+                    today_ist,
                 )
-            ]
 
             if not nifty_futs:
-                raise RuntimeError("No upcoming NIFTY futures found in NSE.json")
+                raise RuntimeError("No upcoming NIFTY futures found after today in NSE.json")
             
             # Sort by expiry (Unix ms)
             nifty_futs.sort(key=lambda x: x["expiry"])
@@ -207,7 +238,7 @@ class UpstoxHelper:
             chosen = nifty_futs[index]
 
             # Convert expiry to human-readable date
-            expiry_dt = datetime.fromtimestamp(chosen["expiry"] / 1000.0)
+            expiry_dt = datetime.fromtimestamp(float(chosen["expiry"]) / 1000.0, IST)
             return {
                 "exchange": chosen["exchange"],
                 "expiry": expiry_dt.date(),
@@ -413,5 +444,3 @@ class UpstoxHelper:
 
         except Exception as e:
             raise Exception(f"Failed to fetch LTP: {e}")
-
-

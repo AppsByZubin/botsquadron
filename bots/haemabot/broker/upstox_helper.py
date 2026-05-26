@@ -15,14 +15,15 @@ import upstox_client
 from logger import create_logger
 import io
 import gzip
-import time
 import json
 import requests
 import re
 from datetime import datetime
+from zoneinfo import ZoneInfo
 import common.constants as constants
 
 logger =create_logger("UpstoxHelperLogger")
+IST = ZoneInfo("Asia/Kolkata")
 
 UPSTOX_INSTRUMENT_SEARCH_URL = "https://api.upstox.com/v2/instruments/search"
 
@@ -96,11 +97,44 @@ def _normalized_symbol(value):
 
 
 def _expiry_sort_key(instrument):
-    expiry = str(instrument.get("expiry") or "")
+    expiry_date = _expiry_date_from_text(instrument.get("expiry"))
+    if expiry_date is not None:
+        return expiry_date
+    return datetime.max.date()
+
+
+def _expiry_date_from_text(expiry):
+    expiry = str(expiry or "").strip()
+    if not expiry:
+        return None
     try:
         return datetime.strptime(expiry, "%Y-%m-%d").date()
     except ValueError:
-        return datetime.max.date()
+        pass
+
+    try:
+        return datetime.fromisoformat(expiry.replace("Z", "+00:00")).date()
+    except ValueError:
+        return None
+
+
+def _expiry_date_from_epoch_ms(expiry_ms):
+    try:
+        return datetime.fromtimestamp(float(expiry_ms) / 1000.0, IST).date()
+    except (TypeError, ValueError, OSError):
+        return None
+
+
+def _is_nifty_index_future(inst):
+    return (
+        inst.get("segment") == "NSE_FO"
+        and inst.get("instrument_type") == "FUT"
+        and (
+            inst.get("asset_symbol") == "NIFTY"
+            or inst.get("underlying_symbol") == "NIFTY"
+            or inst.get("underlying_key") == constants.NIFTY50_SYMBOL
+        )
+    )
 
 
 def _instrument_symbol_rank(instrument, query):
@@ -339,20 +373,43 @@ class UpstoxHelper:
         instruments = []
         tried_expiries = []
         expiry_values = _expiry_candidates(expiry)
+        today_ist = datetime.now(IST).date()
         for expiry_index, expiry_value in enumerate(expiry_values):
             tried_expiries.append(expiry_value)
-            instruments = self.search_instruments(
+            fetched_instruments = self.search_instruments(
                 query=query,
                 expiry=expiry_value,
                 exchanges=exchanges,
                 segments=segments,
                 instrument_types=instrument_types,
             )
+            skipped_expiring_today = 0
+            instruments = []
+            for instrument in fetched_instruments:
+                if str(instrument.get("instrument_type") or "").upper() != "FUT":
+                    continue
+
+                expiry_date = _expiry_date_from_text(instrument.get("expiry"))
+                if expiry_date is not None and expiry_date <= today_ist:
+                    if expiry_date == today_ist:
+                        skipped_expiring_today += 1
+                    continue
+
+                instruments.append(instrument)
+
+            if skipped_expiring_today:
+                logger.info(
+                    "Skipping %s %s future contract(s) expiring today (%s IST); selecting next expiry.",
+                    skipped_expiring_today,
+                    query,
+                    today_ist,
+                )
+
             if instruments:
                 break
             if expiry_index + 1 < len(expiry_values):
                 logger.info(
-                    "No crude oil future instruments found for expiry=%s. "
+                    "No eligible crude oil future instruments found for expiry=%s. "
                     "Trying next expiry candidate.",
                     expiry_value,
                 )
@@ -364,10 +421,6 @@ class UpstoxHelper:
                 f"instrument_types={instrument_types!r}"
             )
 
-        instruments = [
-            instrument for instrument in instruments
-            if str(instrument.get("instrument_type") or "").upper() == "FUT"
-        ]
         if not instruments:
             raise RuntimeError(
                 f"Instrument search returned no futures for query={query!r}, "
@@ -441,23 +494,34 @@ class UpstoxHelper:
 
             instruments = json.loads(data_bytes.decode("utf-8"))
 
-            now_ms = int(time.time() * 1000)
+            today_ist = datetime.now(IST).date()
+            nifty_futs = []
+            skipped_expiring_today = 0
 
-            # Filter NIFTY index futures
-            nifty_futs = [
-                inst for inst in instruments
-                if inst.get("segment") == "NSE_FO"
-                and inst.get("instrument_type") == "FUT"
-                and inst.get("expiry", 0) >= now_ms
-                and (
-                    inst.get("asset_symbol") == "NIFTY"
-                    or inst.get("underlying_symbol") == "NIFTY"
-                    or inst.get("underlying_key") == constants.NIFTY50_SYMBOL
+            for inst in instruments:
+                if not _is_nifty_index_future(inst):
+                    continue
+
+                expiry_date = _expiry_date_from_epoch_ms(inst.get("expiry"))
+                if expiry_date is None:
+                    continue
+
+                if expiry_date <= today_ist:
+                    if expiry_date == today_ist:
+                        skipped_expiring_today += 1
+                    continue
+
+                nifty_futs.append(inst)
+
+            if skipped_expiring_today:
+                logger.info(
+                    "Skipping %s NIFTY future contract(s) expiring today (%s IST); selecting next expiry.",
+                    skipped_expiring_today,
+                    today_ist,
                 )
-            ]
 
             if not nifty_futs:
-                raise RuntimeError("No upcoming NIFTY futures found in NSE.json")
+                raise RuntimeError("No upcoming NIFTY futures found after today in NSE.json")
             
             # Sort by expiry (Unix ms)
             nifty_futs.sort(key=lambda x: x["expiry"])
@@ -470,7 +534,7 @@ class UpstoxHelper:
             chosen = nifty_futs[index]
 
             # Convert expiry to human-readable date
-            expiry_dt = datetime.fromtimestamp(chosen["expiry"] / 1000.0)
+            expiry_dt = datetime.fromtimestamp(float(chosen["expiry"]) / 1000.0, IST)
             return {
                 "exchange": chosen["exchange"],
                 "expiry": expiry_dt.date(),
