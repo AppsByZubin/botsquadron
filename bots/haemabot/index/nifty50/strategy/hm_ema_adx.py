@@ -82,6 +82,12 @@ class HmEmaAdxStrategy:
         self._oil_vol_start_vtt = None
         self._oil_vol_last_vtt = None
         self._oil_vol_by_minute: Dict[str, float] = {}
+        self._indicator_revision = 0
+        self._last_engine_revision = -1
+        self._last_indicator_row = -1
+        self._fast_vwap_day: Optional[str] = None
+        self._fast_cum_pv = 0.0
+        self._fast_cum_vol = 0.0
         self._candle_lock = RLock()
 
         # DataFrames (initialized with fixed dtypes to avoid warnings)
@@ -1445,6 +1451,30 @@ class HmEmaAdxStrategy:
         ).max(axis=1)
         return self._wilder_rma(true_range, length)
 
+    def _reset_fast_indicator_state_from_frame(self) -> None:
+        if self.df_index is None or self.df_index.empty:
+            self._last_indicator_row = -1
+            self._fast_vwap_day = None
+            self._fast_cum_pv = 0.0
+            self._fast_cum_vol = 0.0
+            return
+
+        last_idx = len(self.df_index) - 1
+        minute_key = self.df_index["time"].astype(str).str.slice(0, 16)
+        day_key = str(minute_key.iloc[-1])[:10]
+        same_day = minute_key.str.slice(0, 10) == day_key
+        close = pd.to_numeric(self.df_index["close"], errors="coerce")
+        if "volume_fut" in self.df_index.columns:
+            volume = pd.to_numeric(self.df_index["volume_fut"], errors="coerce")
+        else:
+            fallback = pd.Series(np.nan, index=self.df_index.index)
+            volume = pd.to_numeric(self.df_index.get("fut_volume", fallback), errors="coerce")
+        pv = (close * volume).where(same_day)
+        self._fast_vwap_day = day_key
+        self._fast_cum_pv = float(pv.sum(skipna=True))
+        self._fast_cum_vol = float(volume.where(same_day).sum(skipna=True))
+        self._last_indicator_row = last_idx
+
     def _apply_indicators(self):
         """
         Applies spot-only indicators:
@@ -1522,6 +1552,9 @@ class HmEmaAdxStrategy:
             self.df_index["adx_14"] = pd.Series(np.asarray(adx_14, dtype="float64"), index=self.df_index.index)
             self._refresh_index_trail_state()
             self.check_price_action(safe_float(self.df_index['atr_14'].iloc[-1]))
+
+        self._indicator_revision += 1
+        self._reset_fast_indicator_state_from_frame()
 
     def calculate_hm_signals(self, hm_midline: Optional[float] = None) -> None:
         """
@@ -1617,6 +1650,11 @@ class HmEmaAdxStrategy:
         try:
             if not self.enable_trading_engine:
                 return
+
+            current_revision = self._indicator_revision
+            if self._last_engine_revision == current_revision:
+                return
+            self._last_engine_revision = current_revision
 
             if len(self.df_index) < 30:
                 return

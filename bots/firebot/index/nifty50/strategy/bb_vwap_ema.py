@@ -15,7 +15,6 @@ import logger
 from typing import Any, Dict, List, Optional
 from datetime import datetime,time,timedelta
 import numpy as np
-import talib
 from technicals.atr.atr_for_ticks import AtrEngine
 
 from utils.generic_utils import (
@@ -72,6 +71,12 @@ class BbVwapEmaStrategy:
         self._fut_vol_start_vtt = None
         self._fut_vol_last_vtt = None
         self._fut_vol_by_minute: Dict[str, float] = {}
+        self._indicator_revision = 0
+        self._last_engine_revision = -1
+        self._last_indicator_row = -1
+        self._fast_vwap_day: Optional[str] = None
+        self._fast_cum_pv = 0.0
+        self._fast_cum_vol = 0.0
         self._candle_lock = RLock()
 
         # DataFrames (initialized with fixed dtypes to avoid warnings)
@@ -187,8 +192,6 @@ class BbVwapEmaStrategy:
             "bb_width": pd.Series(dtype="float64"),
             "bb_percent_b": pd.Series(dtype="float64"),
             "angle_vwap": pd.Series(dtype="float64"),
-            "atr_14": pd.Series(dtype="float64"),
-            "adx_14": pd.Series(dtype="float64"),
             "rsi_7": pd.Series(dtype="float64"),
             "rsi_ma_14": pd.Series(dtype="float64"),
             "angle_ema_9": pd.Series(dtype="float64"),
@@ -217,9 +220,6 @@ class BbVwapEmaStrategy:
         self._today_realized_pnl: float = 0.0
         self._today_realized_pnl_trade_ids = set()
         self.order_maneger = order_manager
-        self.index_atr: Optional[float] = None
-        self.index_adx: Optional[float] = None
-        self.index_prev_adx: Optional[float] = None
 
         # In-memory trade state machine used by _trade_processing():
         # None -> WAITING -> OPEN -> cleared.
@@ -233,7 +233,6 @@ class BbVwapEmaStrategy:
             "lot": None,
             "max_gamma": None,
             "start_trail_after": None,
-            "force_trail_lock": False
         }
         self._trade_end_time=None
         self._init_trade_window_times()
@@ -399,7 +398,6 @@ class BbVwapEmaStrategy:
             "lot": int(qty) if qty is not None and qty > 0 else None,
             "max_gamma": None,
             "start_trail_after": safe_float(trade.get("start_trail_after")),
-            "force_trail_lock": False,
         })
         logger.info(f"Restored OPEN trade from ordersystem into _order_container: {self._order_container}")
         return True
@@ -1199,6 +1197,26 @@ class BbVwapEmaStrategy:
             "lower_plot": lower.shift(offset),
         }
 
+    def _reset_fast_indicator_state_from_frame(self) -> None:
+        if self.df_index is None or self.df_index.empty:
+            self._last_indicator_row = -1
+            self._fast_vwap_day = None
+            self._fast_cum_pv = 0.0
+            self._fast_cum_vol = 0.0
+            return
+
+        last_idx = len(self.df_index) - 1
+        minute_key = self.df_index["time"].astype(str).str.slice(0, 16)
+        day_key = str(minute_key.iloc[-1])[:10]
+        same_day = minute_key.str.slice(0, 10) == day_key
+        hlc3 = pd.to_numeric(self.df_index["hlc3"], errors="coerce")
+        volume = pd.to_numeric(self.df_index["fut_volume"], errors="coerce")
+        pv = (hlc3 * volume).where(same_day)
+        self._fast_vwap_day = day_key
+        self._fast_cum_pv = float(pv.sum(skipna=True))
+        self._fast_cum_vol = float(volume.where(same_day).sum(skipna=True))
+        self._last_indicator_row = last_idx
+
     def _calculate_rsi(self, length: int = 7) -> pd.Series:
         close = pd.to_numeric(self.df_index["close"], errors="coerce").astype(float)
         delta = close.diff()
@@ -1213,24 +1231,9 @@ class BbVwapEmaStrategy:
         rsi = rsi.mask((avg_gain == 0) & (avg_loss == 0), 50.0)
         return rsi.replace([np.inf, -np.inf], np.nan)
 
-    def _calculate_atr(self, length: int = 14) -> pd.Series:
-        high = pd.to_numeric(self.df_index["high"], errors="coerce").astype(float)
-        low = pd.to_numeric(self.df_index["low"], errors="coerce").astype(float)
-        close = pd.to_numeric(self.df_index["close"], errors="coerce").astype(float)
-        prev_close = close.shift(1)
-        true_range = pd.concat(
-            [
-                high - low,
-                (high - prev_close).abs(),
-                (low - prev_close).abs(),
-            ],
-            axis=1,
-        ).max(axis=1)
-        return self._wilder_rma(true_range, length)
-
     def _apply_indicators(self):
         """
-        Applies BB/VWAP/EMA indicators while preserving ATR/ADX for trade trailing guards.
+        Applies BB/VWAP/EMA indicators.
         """
         self._refresh_merged_dataframe()
         self._sync_merged_features_to_index()
@@ -1301,16 +1304,8 @@ class BbVwapEmaStrategy:
         self.df_index["bb_percent_b"] = bb_percent_b.to_numpy()
         self.df_index["angle_vwap"] = np.degrees(np.arctan(np.clip(slope_vwap, -10, 10)))
         self.df_index["angle_ema_9"] = np.degrees(np.arctan(np.clip(slope_ema, -10, 10)))
-
-        if len(self.df_index) >= 14:
-            atr = self._calculate_atr(length=14)
-            self.df_index["atr_14"] = atr
-            high_np = high.to_numpy(dtype="float64")
-            low_np = low.to_numpy(dtype="float64")
-            close_np = close.to_numpy(dtype="float64")
-            adx_14 = talib.ADX(high_np, low_np, close_np, timeperiod=14)
-            self.df_index["adx_14"] = pd.Series(np.asarray(adx_14, dtype="float64"), index=self.df_index.index)
-            self._refresh_index_trail_state()
+        self._indicator_revision += 1
+        self._reset_fast_indicator_state_from_frame()
 
     def check_price_action(self,atr):
         """
@@ -1376,7 +1371,12 @@ class BbVwapEmaStrategy:
             if not self.enable_trading_engine:
                 return
 
+            current_revision = self._indicator_revision
+            if self._last_engine_revision == current_revision:
+                return
+
             if len(self.df_index) < max(self.bb_length, self.ema_length):
+                self._last_engine_revision = current_revision
                 return
 
             ref_ts = self._resolve_reference_ts()
@@ -1386,9 +1386,11 @@ class BbVwapEmaStrategy:
                     f"Entry blocked by post-exit cooldown for {cooldown_left_sec}s "
                     f"(until {self._post_exit_cooldown_until.strftime('%H:%M:%S')})"
                 )
+                self._last_engine_revision = current_revision
                 return
 
             if self._is_daily_loss_limit_active(ref_ts):
+                self._last_engine_revision = current_revision
                 return
 
             latest = self.df_index.iloc[-1]
@@ -1415,6 +1417,7 @@ class BbVwapEmaStrategy:
                 or candle_length is None
                 or angle_ema_9 is None
             ):
+                self._last_engine_revision = current_revision
                 return
 
             logger.debug(
@@ -1440,6 +1443,7 @@ class BbVwapEmaStrategy:
             )
 
             logger.debug(f"condition check call_setup:{call_setup}, put_setup:{put_setup}")
+            self._last_engine_revision = current_revision
             self.df_index.loc[latest.name, "signal"] = constants.WAITING
 
             if call_setup and self._order_container["status"] is None and (self._order_counter < self._max_order_counter):
@@ -1451,7 +1455,6 @@ class BbVwapEmaStrategy:
                 self._order_container["side"] = constants.CALL
                 self._order_container["status"] = constants.WAITING
                 self._order_container["lot"] = int(lot)
-                self._order_container["force_trail_lock"] = False
                 logger.info(f"Order intent set side={constants.CALL}, lot={lot}, status={constants.WAITING}")
                 return
 
@@ -1464,7 +1467,6 @@ class BbVwapEmaStrategy:
                 self._order_container["side"] = constants.PUT
                 self._order_container["status"] = constants.WAITING
                 self._order_container["lot"] = int(lot)
-                self._order_container["force_trail_lock"] = False
                 logger.info(f"Order intent set side={constants.PUT}, lot={lot}, status={constants.WAITING}")
                 return
         
@@ -1714,46 +1716,6 @@ class BbVwapEmaStrategy:
     # ------------------------------------------------------------------
     def _reset_order_container(self) -> None:
         self._order_container = {k: None for k in self._order_container}
-        self._order_container["force_trail_lock"] = False
-
-    def _refresh_index_trail_state(self) -> None:
-        if self.df_index is None or len(self.df_index) < 2:
-            self.index_atr = None
-            self.index_adx = None
-            self.index_prev_adx = None
-            return
-
-        latest = self.df_index.iloc[-1]
-        previous = self.df_index.iloc[-2]
-        self.index_atr = safe_float(latest.get("atr_14"))
-        self.index_adx = safe_float(latest.get("adx_14"))
-        self.index_prev_adx = safe_float(previous.get("adx_14"))
-
-    def _should_force_trail_open_order(self) -> bool:
-        if self._order_container.get("status") != constants.OPEN:
-            return False
-        if self._coerce_bool(self._order_container.get("force_trail_lock"), False):
-            return False
-
-        sp = (self.params.get("strategy-parameters") or {}) if isinstance(self.params, dict) else {}
-        min_atr_14 = safe_float(sp.get("min_atr_14", 9.0))
-        adx_threshold = safe_float(sp.get("adx_threshold", 25))
-
-        if self.index_atr is not None and min_atr_14 is not None and self.index_atr < min_atr_14:
-            logger.info(f"Force trailing: index ATR {self.index_atr:.2f} is below threshold {min_atr_14:.2f}.")
-            return True
-        if self.index_adx is not None and adx_threshold is not None and self.index_adx < adx_threshold:
-            logger.info(f"Force trailing: index ADX {self.index_adx:.2f} is below threshold {adx_threshold:.2f}.")
-            return True
-        if (
-            self.index_adx is not None
-            and self.index_prev_adx is not None
-            and (self.index_adx + 0.5) < self.index_prev_adx
-        ):
-            logger.info(f"Force trailing: index ADX {self.index_adx:.2f} is decreasing from {self.index_prev_adx:.2f}.")
-            return True
-
-        return False
 
     def _get_itm_contracts(self, side: str, index_price: float, itm_range: float) -> Dict[str, Dict[str, Any]]:
         output: Dict[str, Dict[str, Any]] = {}
@@ -1940,10 +1902,10 @@ class BbVwapEmaStrategy:
                 True,
             )
             atr_target_mult = float(
-                sp.get("atr_target_mult", self.params.get("atr_target_mult", 5.0))
+                sp.get("atr_target_mult", self.params.get("atr_target_mult", 10))
             )
             atr_sl_mult = float(
-                sp.get("atr_sl_mult", self.params.get("atr_sl_mult", 1.1))
+                sp.get("atr_sl_mult", self.params.get("atr_sl_mult", 3))
             )
             max_atr_for_contract = float(sp.get("max_atr_for_contract", self.params.get("max_atr_for_contract", 20)))
             min_atr_for_contract = float(sp.get("min_atr_for_contract", self.params.get("min_atr_for_contract", 10)))
@@ -2048,7 +2010,6 @@ class BbVwapEmaStrategy:
             if trade_id:
                 self._order_container["trade_id"] = trade_id
                 self._order_container["status"] = constants.OPEN
-                self._order_container["force_trail_lock"] = False
                 self._order_counter += 1
                 logger.info(f"{self._order_container}")
 
@@ -2068,19 +2029,11 @@ class BbVwapEmaStrategy:
                     break
 
             if latest_ltp is not None and ts is not None:
-                force_trail = self._should_force_trail_open_order()
                 tick_result = self.order_maneger.on_tick(
                     symbol=self._order_container["instrument_symbol"],
                     o=latest_ltp, h=latest_ltp, l=latest_ltp, c=latest_ltp,
                     ts=ts,
-                    force_trail=force_trail,
                 )
-                force_trail_applied = (
-                    isinstance(tick_result, dict)
-                    and self._coerce_bool(tick_result.get("force_trail_applied"), False)
-                )
-                if force_trail_applied:
-                    self._order_container["force_trail_lock"] = True
 
                 trade_id = self._order_container.get("trade_id")
                 trade_info = tick_result if isinstance(tick_result, dict) else None

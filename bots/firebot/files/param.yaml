@@ -8,11 +8,11 @@ strategy-parameters:
 
   max_daily_loss_pct_of_initial_cash: 0.04  # Stop new trades for the day after 2% realized loss
 
-  # on high volatile days, increase min_atr_14 and option_atr_period
-  min_atr_14: 8
+  # on high volatile days, increase option_atr_period
   option_atr_period: 5
-
-  adx_threshold: 21
+  use_option_atr_risk: true
+  atr_target_mult: 10
+  atr_sl_mult: 3
 
   trailing-stop: true
   trailing-stop-distance: 10  # SL trails by 10 points once trailing starts
