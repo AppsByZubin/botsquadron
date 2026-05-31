@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Orchestrates haemabot startup.
+Orchestrates firebot startup.
 """
 
 import asyncio
@@ -27,23 +27,23 @@ def orchestrator(instruments, strategy, mode=None):
     strategy = (strategy or constants.DEFAULT_STRATEGY).strip().lower()
 
     logger.info(
-        f"Starting haemabot orchestrator for instruments: {instruments}, strategy: {strategy}, mode: {mode}"
+        f"Starting firebot orchestrator for instruments: {instruments}, strategy: {strategy}, mode: {mode}"
     )
 
     ledger_paths = initialize_local_ledgers_for_modes(list(constants.EXECUTION_MODES))
     logger.info(
-        f"Initialized local OMS ledgers under {constants.HAEMABOT_EXECUTION_RESULTS_DIR} "
+        f"Initialized local OMS ledgers under {constants.FIREBOT_EXECUTION_RESULTS_DIR} "
         f"for modes: {', '.join(ledger_paths.keys())}"
     )
 
     param_data = load_param_data(mode) or {}
     if not param_data:
-        logger.info("No haemabot params configured yet; continuing with defaults.")
+        logger.info("No firebot params configured yet; continuing with defaults.")
 
     skip_execution, skip_reason = should_skip_strategy_execution(
         param_data,
         strategy,
-        current_date=os.getenv("HAEMABOT_CURR_DATE") or os.getenv("HEMABOT_CURR_DATE"),
+        current_date=os.getenv("FIREBOT_CURR_DATE"),
     )
     if skip_execution:
         logger.info(f"Skipping strategy {strategy} for today because {skip_reason}.")
@@ -53,7 +53,7 @@ def orchestrator(instruments, strategy, mode=None):
         from index.nifty50.nifty50_engine import nifty50_engine
 
         asyncio.run(nifty50_engine(strategy, mode, param_data))
-        logger.info("Haemabot orchestrator setup complete.")
+        logger.info("Firebot orchestrator setup complete.")
         return True
 
     supported = ", ".join(constants.SUPPORTED_INSTRUMENTS)

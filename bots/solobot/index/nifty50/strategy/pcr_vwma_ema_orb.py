@@ -157,6 +157,12 @@ class PCRVwmaEmaOrbStrategy:
         self._fut_vol_start_vtt = None
         self._fut_vol_last_vtt = None
         self._fut_vol_by_minute = {}
+        self._indicator_revision = 0
+        self._last_engine_revision = -1
+        self._last_indicator_row = -1
+        self._fast_vwap_day: Optional[str] = None
+        self._fast_cum_pv = 0.0
+        self._fast_cum_vol = 0.0
 
         # processed minutes (bootstrap use)
         self.index_minutes_processed = index_minutes_processed or {}
@@ -893,6 +899,43 @@ class PCRVwmaEmaOrbStrategy:
             if self.curr_index_minute:
                 log.debug(f"Outside Trading Window at {self.curr_index_minute}")
 
+    def _reset_fast_indicator_state_from_frame(self) -> None:
+        if self.df_index is None or self.df_index.empty:
+            self._last_indicator_row = -1
+            self._fast_vwap_day = None
+            self._fast_cum_pv = 0.0
+            self._fast_cum_vol = 0.0
+            return
+
+        idx = self.df_index[["time", "close"]].copy()
+        idx["time_dt"] = pd.to_datetime(idx["time"], errors="coerce")
+        idx["close"] = pd.to_numeric(idx["close"], errors="coerce")
+        idx = idx.dropna(subset=["time_dt"])
+        if idx.empty:
+            self._last_indicator_row = len(self.df_index) - 1
+            self._fast_vwap_day = None
+            self._fast_cum_pv = 0.0
+            self._fast_cum_vol = 0.0
+            return
+
+        if not self.df_fut.empty and "time" in self.df_fut.columns and "volume" in self.df_fut.columns:
+            fut = self.df_fut[["time", "volume"]].copy()
+            fut["time_dt"] = pd.to_datetime(fut["time"], errors="coerce")
+            fut["volume"] = pd.to_numeric(fut["volume"], errors="coerce")
+            fut = fut.dropna(subset=["time_dt"]).drop_duplicates(subset=["time_dt"], keep="last")
+            merged = idx.merge(fut[["time_dt", "volume"]], on="time_dt", how="left")
+        else:
+            merged = idx.assign(volume=0.0)
+
+        merged["volume"] = pd.to_numeric(merged["volume"], errors="coerce").fillna(0.0)
+        day_key = merged["time_dt"].iloc[-1].strftime("%Y-%m-%d")
+        same_day = merged["time_dt"].dt.strftime("%Y-%m-%d") == day_key
+        pv = (merged["close"] * merged["volume"]).where(same_day)
+        self._fast_vwap_day = day_key
+        self._fast_cum_pv = float(pv.sum(skipna=True))
+        self._fast_cum_vol = float(merged["volume"].where(same_day).sum(skipna=True))
+        self._last_indicator_row = len(self.df_index) - 1
+
     def _apply_indicators(self):
         if self.df_index.empty:
             return
@@ -982,7 +1025,9 @@ class PCRVwmaEmaOrbStrategy:
             self.df_index["angle_ema_9"] = np.degrees(np.arctan(np.clip(slope_ema, -10, 10)))
             self.df_index["angle_vwma_25"] = np.degrees(np.arctan(np.clip(slope_vwma, -10, 10)))
             self.df_index["angle_rsi_ma_14"] = np.degrees(np.arctan(np.clip(slope_rsi_ma, -10, 10)))
-         
+
+        self._indicator_revision += 1
+        self._reset_fast_indicator_state_from_frame()
 
     def check_price_action(self, atr: float) -> None:
         if len(self.df_index) < 3:
@@ -1011,6 +1056,11 @@ class PCRVwmaEmaOrbStrategy:
     def _trading_engine_active(self):
         if not self.enable_trading_engine:
             return
+
+        current_revision = self._indicator_revision
+        if self._last_engine_revision == current_revision:
+            return
+        self._last_engine_revision = current_revision
         
         if len(self.pcr_value_queue) < 3:
             log.debug("Waiting for PCR polling to complete")

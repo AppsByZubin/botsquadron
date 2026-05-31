@@ -68,6 +68,12 @@ class VwmaEmaStStrategy:
         self._fut_vol_start_vtt = None
         self._fut_vol_last_vtt = None
         self._fut_vol_by_minute: Dict[str, float] = {}
+        self._indicator_revision = 0
+        self._last_engine_revision = -1
+        self._last_indicator_row = -1
+        self._fast_vwap_day: Optional[str] = None
+        self._fast_cum_pv = 0.0
+        self._fast_cum_vol = 0.0
         self._candle_lock = RLock()
 
         # DataFrames (initialized with fixed dtypes to avoid warnings)
@@ -1102,6 +1108,26 @@ class VwmaEmaStStrategy:
             }
         )
 
+    def _reset_fast_indicator_state_from_frame(self) -> None:
+        if self.df_index is None or self.df_index.empty:
+            self._last_indicator_row = -1
+            self._fast_vwap_day = None
+            self._fast_cum_pv = 0.0
+            self._fast_cum_vol = 0.0
+            return
+
+        last_idx = len(self.df_index) - 1
+        minute_key = self.df_index["time"].astype(str).str.slice(0, 16)
+        day_key = str(minute_key.iloc[-1])[:10]
+        same_day = minute_key.str.slice(0, 10) == day_key
+        close = pd.to_numeric(self.df_index["close"], errors="coerce")
+        volume = pd.to_numeric(self.df_index["fut_volume"], errors="coerce")
+        pv = (close * volume).where(same_day)
+        self._fast_vwap_day = day_key
+        self._fast_cum_pv = float(pv.sum(skipna=True))
+        self._fast_cum_vol = float(volume.where(same_day).sum(skipna=True))
+        self._last_indicator_row = last_idx
+
     def _apply_indicators(self):
         """
         Applies hybrid VWMA/EMA/Supertrend indicators using spot price and
@@ -1223,6 +1249,9 @@ class VwmaEmaStStrategy:
 
             self.check_price_action(safe_float(self.df_index["atr_14"].iloc[-1]))
 
+        self._indicator_revision += 1
+        self._reset_fast_indicator_state_from_frame()
+
     def check_price_action(self,atr):
         """
         Checks for momentum thrusts using consecutive candles plus ATR-sized range.
@@ -1287,6 +1316,11 @@ class VwmaEmaStStrategy:
         try:
             if not self.enable_trading_engine:
                 return
+
+            current_revision = self._indicator_revision
+            if self._last_engine_revision == current_revision:
+                return
+            self._last_engine_revision = current_revision
 
             if len(self.df_index) < 30:
                 return

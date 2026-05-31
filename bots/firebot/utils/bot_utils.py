@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-General utility helpers for haemabot.
+General utility helpers for firebot.
 """
 
 from datetime import date, datetime
@@ -19,14 +19,10 @@ logger = create_logger("BotUtilsLogger")
 IST = ZoneInfo("Asia/Kolkata")
 
 K8S_PARAM_ENV_KEYS = (
-    "HAEMABOT_PARAM_YAML",
-    "HAEMABOT_PARAMS_YAML",
-    "HAEMABOT_PARAM_DATA",
-    "HAEMABOT_PARAMS",
-    "HEMABOT_PARAM_YAML",
-    "HEMABOT_PARAMS_YAML",
-    "HEMABOT_PARAM_DATA",
-    "HEMABOT_PARAMS",
+    "FIREBOT_PARAM_YAML",
+    "FIREBOT_PARAMS_YAML",
+    "FIREBOT_PARAM_DATA",
+    "FIREBOT_PARAMS",
     "BOT_PARAM_YAML",
     "BOT_PARAMS_YAML",
     "PARAM_YAML",
@@ -34,10 +30,8 @@ K8S_PARAM_ENV_KEYS = (
 )
 
 K8S_PARAM_FILE_ENV_KEYS = (
-    "HAEMABOT_PARAM_FILE",
-    "HAEMABOT_PARAM_PATH",
-    "HEMABOT_PARAM_FILE",
-    "HEMABOT_PARAM_PATH",
+    "FIREBOT_PARAM_FILE",
+    "FIREBOT_PARAM_PATH",
     "BOT_PARAM_FILE",
     "BOT_PARAM_PATH",
     "PARAM_FILE",
@@ -58,7 +52,7 @@ DATE_FORMATS = ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%d%m%Y", "%Y%m%d")
 
 def stable_bot_id(bot_name: Optional[str], mode: Optional[str], date_value: Optional[str] = None) -> str:
     parts = [
-        bot_name or "haemabot",
+        bot_name or "firebot",
         _bot_id_mode(mode),
         _bot_id_date(date_value),
     ]
@@ -97,7 +91,7 @@ def _bot_id_date(value: Optional[str]) -> str:
 def _normalize_bot_id(value: str) -> str:
     normalized = "".join(ch.lower() if ch.isalnum() else "_" for ch in str(value or "").strip())
     normalized = "_".join(part for part in normalized.split("_") if part)
-    return normalized or "haemabot"
+    return normalized or "firebot"
 
 
 def _load_yaml_dict_from_file(path: Path) -> Optional[Dict[str, Any]]:

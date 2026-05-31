@@ -1,0 +1,1 @@
+"""Firebot trading bot package."""
