@@ -4,7 +4,7 @@
 General utility helpers for firebot.
 """
 
-from datetime import datetime
+from datetime import date, datetime
 import os
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional
@@ -37,6 +37,17 @@ K8S_PARAM_FILE_ENV_KEYS = (
     "PARAM_FILE",
     "PARAM_PATH",
 )
+
+SKIP_EXECUTION_KEYS = ("skip-execution", "skip_execution")
+SKIP_EXECUTION_DATE_KEYS = (
+    "skip-execution-dates",
+    "skip_execution_dates",
+    "skip-trading-dates",
+    "skip_trading_dates",
+    "no-trade-dates",
+    "no_trade_dates",
+)
+DATE_FORMATS = ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%d%m%Y", "%Y%m%d")
 
 
 def stable_bot_id(bot_name: Optional[str], mode: Optional[str], date_value: Optional[str] = None) -> str:
@@ -149,6 +160,92 @@ def _ensure_list(value: Any) -> List[str]:
     if isinstance(value, Iterable) and not isinstance(value, Mapping):
         return [str(item).strip() for item in value if str(item).strip()]
     return []
+
+
+def _coerce_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _ensure_param_list(value: Any) -> list:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [item.strip() for item in value.split(",") if item.strip()]
+    if isinstance(value, (list, tuple, set)):
+        return [item for item in value if str(item or "").strip()]
+    return [value]
+
+
+def _parse_date_iso(value: Any) -> Optional[str]:
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+
+    for layout in DATE_FORMATS:
+        try:
+            return datetime.strptime(raw, layout).date().isoformat()
+        except ValueError:
+            pass
+
+    digits_only = "".join(ch for ch in raw if ch.isdigit())
+    if len(digits_only) == 8:
+        for layout in ("%Y%m%d", "%d%m%Y"):
+            try:
+                return datetime.strptime(digits_only, layout).date().isoformat()
+            except ValueError:
+                pass
+
+    return None
+
+
+def _param_sources(param_data: Optional[Dict[str, Any]]) -> list:
+    if not isinstance(param_data, dict):
+        return []
+
+    sources = []
+    sp = param_data.get("strategy-parameters") or param_data.get("strategy_parameters")
+    if isinstance(sp, dict):
+        sources.append(sp)
+    sources.append(param_data)
+    return sources
+
+
+def should_skip_strategy_execution(
+    param_data: Optional[Dict[str, Any]],
+    strategy: Optional[str],
+    current_date: Optional[str] = None,
+) -> tuple:
+    today_iso = _parse_date_iso(current_date) or datetime.now(IST).date().isoformat()
+
+    for source in _param_sources(param_data):
+        for key in SKIP_EXECUTION_KEYS:
+            if _coerce_bool(source.get(key)):
+                return True, f"{key}=true"
+
+        for key in SKIP_EXECUTION_DATE_KEYS:
+            for configured_date in _ensure_param_list(source.get(key)):
+                raw_date = str(configured_date or "").strip().lower()
+                if raw_date in {"*", "all"}:
+                    return True, f"{key} contains {raw_date}"
+                if raw_date == "today":
+                    return True, f"{key} contains today"
+
+                configured_iso = _parse_date_iso(configured_date)
+                if configured_iso == today_iso:
+                    return True, f"{key} contains {today_iso}"
+                if configured_iso is None:
+                    logger.warning(
+                        f"Ignoring invalid {key} date for strategy {strategy}: {configured_date}"
+                    )
+
+    return False, ""
 
 
 def _pick_nested(mapping: Mapping[str, Any], *path: str) -> Any:

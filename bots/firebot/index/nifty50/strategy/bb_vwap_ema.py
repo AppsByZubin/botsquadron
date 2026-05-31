@@ -1920,7 +1920,7 @@ class BbVwapEmaStrategy:
                 atr_to_use = option_atr
                 target = entry_price + (atr_target_mult * option_atr)
                 sl_trigger = entry_price - (atr_sl_mult * option_atr)
-                start_trail_after = float(option_atr / entry_price)
+                start_trail_after = float(option_atr**2 / entry_price)
 
                 if option_atr > max_atr_for_contract:
                     start_trail_after = float(max_atr_for_contract / entry_price)

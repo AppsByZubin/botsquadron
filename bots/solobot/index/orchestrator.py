@@ -14,12 +14,13 @@
 """
 
 import asyncio
+import os
 import sys
 from common import constants
 from logger import create_logger
 from index.nifty50.nifty50_engine import nifty50_engine
 from oms.order_system_client import initialize_local_ledgers_for_modes
-from utils.bot_utils import load_param_data
+from utils.bot_utils import load_param_data, should_skip_strategy_execution
 
 logger = create_logger("OrchestratorLogger")
 
@@ -53,9 +54,21 @@ def orchestrator(instruments, strategy, mode=None):
         logger.error("Param data not found in Helm-provided environment config.")
         sys.exit(constants.FAIL_CODE)
 
+    skip_execution, skip_reason = should_skip_strategy_execution(
+        param_data,
+        strategy,
+        current_date=os.getenv("SOLOBOT_CURR_DATE"),
+    )
+    if skip_execution:
+        logger.info(f"Skipping strategy {strategy} for today because {skip_reason}.")
+        return False
+
     if instruments.lower() == constants.NIFTY50:
         asyncio.run(nifty50_engine(strategy, mode, param_data))
+        logger.info("Orchestrator setup complete.")
+        return True
 
     # Further implementation would go here to manage the trading workflow
     # including fetching data, applying strategies, and placing orders.
     logger.info("Orchestrator setup complete.")
+    return True

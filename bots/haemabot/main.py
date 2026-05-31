@@ -50,5 +50,8 @@ if __name__ == "__main__":
     logger.info(f"Received strategy: {args.strategy}")
     logger.info(f"Mode: {mode}")
 
-    orchestrator(args.instruments, args.strategy, mode=mode)
-    maybe_upload_trade_artifacts_to_s3(bot_name="haemabot", execution_mode=mode)
+    did_run = orchestrator(args.instruments, args.strategy, mode=mode)
+    if did_run is False:
+        logger.info("Skipping S3 upload because strategy execution was skipped.")
+    else:
+        maybe_upload_trade_artifacts_to_s3(bot_name="haemabot", execution_mode=mode)
