@@ -39,8 +39,8 @@ AFTER_HOURS_GUARD="${AFTER_HOURS_GUARD:-1}"
 MARKET_CLOSE_HHMM="${MARKET_CLOSE_HHMM:-1530}"
 FORCE_BEFORE_MARKET_CLOSE="${FORCE_BEFORE_MARKET_CLOSE:-0}"
 
-BOT_WORKLOAD_PATTERN="${BOT_WORKLOAD_PATTERN:-solobot|trendobot|haemabot|hemabot}"
-BOT_POD_PATTERN="${BOT_POD_PATTERN:-solobot|trendobot|haemabot|hemabot}"
+BOT_WORKLOAD_PATTERN="${BOT_WORKLOAD_PATTERN:-solobot|trendobot|haemabot|hemabot|firebot}"
+BOT_POD_PATTERN="${BOT_POD_PATTERN:-solobot|trendobot|haemabot|hemabot|firebot}"
 ORDERSYSTEM_POD="${ORDERSYSTEM_POD:-}"
 PSQL_IMAGE="${PSQL_IMAGE:-postgres:16-alpine}"
 PSQL_POD="${PSQL_POD:-oms-eod-close-${USER:-user}-$$}"
@@ -69,8 +69,8 @@ Useful overrides:
   NAMESPACE=botspace
   TARGET_DATE=DD-MM-YYYY
   CLOSE_STATUS=EOD_SQUARE_OFF
-  BOT_WORKLOAD_PATTERN='solobot|trendobot|haemabot|hemabot'
-  BOT_POD_PATTERN='solobot|trendobot|haemabot|hemabot'
+  BOT_WORKLOAD_PATTERN='solobot|trendobot|haemabot|hemabot|firebot'
+  BOT_POD_PATTERN='solobot|trendobot|haemabot|hemabot|firebot'
   ORDERSYSTEM_POD=<ordersystem-pod-name>
   DATABASE_URL='postgresql://...'
   FORCE_BEFORE_MARKET_CLOSE=1
@@ -335,6 +335,7 @@ files_dirs = [
     os.environ.get("TRENDOBOT_FILES_DIR", "").strip(),
     os.environ.get("HAEMABOT_FILES_DIR", "").strip(),
     os.environ.get("HEMABOT_FILES_DIR", "").strip(),
+    os.environ.get("FIREBOT_FILES_DIR", "").strip(),
     os.environ.get("BOT_FILES_DIR", "").strip(),
     "files",
     "/app/files",
