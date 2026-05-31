@@ -28,11 +28,11 @@ logger = logger.create_logger("VwmaEmaStStrategyLogger")
 
 class VwmaEmaStStrategy:
     """
-    Spot-only EMA + ADX intraday strategy.
+    Spot-only VWMA/EMA/Supertrend intraday strategy.
 
     Flow:
     1) Build index candles from ticks.
-    2) Compute EMA, RSI-MA, ATR, ADX and price-action context.
+    2) Compute EMA, RSI-MA, ATR, ADX, 1-minute/5-minute Supertrend and price-action context.
     3) Delegate live trade lifecycle to order manager.
     """
     def __init__(
@@ -158,6 +158,12 @@ class VwmaEmaStStrategy:
             "st_phase": pd.Series(dtype="object"),
             "st_turn_green": pd.Series(dtype="bool"),
             "st_turn_red": pd.Series(dtype="bool"),
+            "st_5min_time": pd.Series(dtype="datetime64[ns]"),
+            "supertrend_5min": pd.Series(dtype="float64"),
+            "st_5min_direction": pd.Series(dtype="float64"),
+            "st_5min_phase": pd.Series(dtype="object"),
+            "st_5min_turn_green": pd.Series(dtype="bool"),
+            "st_5min_turn_red": pd.Series(dtype="bool"),
 
             "candle_range": pd.Series(dtype="float64"),
             "volatile_count":pd.Series(dtype="float64"),
@@ -170,6 +176,7 @@ class VwmaEmaStStrategy:
             "is_bearish_thrust": pd.Series(dtype="bool"),
             "is_bullish_thrust":pd.Series(dtype="bool")
         })
+        self.df_index_5min = self._empty_5min_index_frame()
 
         self._max_order_counter = int(sp.get("trade-per-day", sp.get("trade_per_day", 2)) or 2)
         self._order_counter = 0
@@ -1108,6 +1115,152 @@ class VwmaEmaStStrategy:
             }
         )
 
+    @staticmethod
+    def _empty_5min_index_frame() -> pd.DataFrame:
+        return pd.DataFrame({
+            "time": pd.Series(dtype="datetime64[ns]"),
+            "available_time": pd.Series(dtype="datetime64[ns]"),
+            "open": pd.Series(dtype="float64"),
+            "high": pd.Series(dtype="float64"),
+            "low": pd.Series(dtype="float64"),
+            "close": pd.Series(dtype="float64"),
+            "candle_count": pd.Series(dtype="int64"),
+            "st_atr_10": pd.Series(dtype="float64"),
+            "st_upperbound": pd.Series(dtype="float64"),
+            "st_lowerbound": pd.Series(dtype="float64"),
+            "supertrend": pd.Series(dtype="float64"),
+            "st_direction": pd.Series(dtype="float64"),
+            "st_phase": pd.Series(dtype="object"),
+            "st_turn_green": pd.Series(dtype="bool"),
+            "st_turn_red": pd.Series(dtype="bool"),
+        })
+
+    def _reset_5min_indicator_columns(self) -> None:
+        if self.df_index is None:
+            return
+
+        self.df_index["st_5min_time"] = pd.Series(pd.NaT, index=self.df_index.index, dtype="datetime64[ns]")
+        self.df_index["supertrend_5min"] = pd.Series(np.nan, index=self.df_index.index, dtype="float64")
+        self.df_index["st_5min_direction"] = pd.Series(np.nan, index=self.df_index.index, dtype="float64")
+        self.df_index["st_5min_phase"] = pd.Series(None, index=self.df_index.index, dtype="object")
+        self.df_index["st_5min_turn_green"] = pd.Series(False, index=self.df_index.index, dtype="bool")
+        self.df_index["st_5min_turn_red"] = pd.Series(False, index=self.df_index.index, dtype="bool")
+
+    def _sync_5min_supertrend_to_index(self) -> None:
+        self._reset_5min_indicator_columns()
+        if self.df_index is None or self.df_index.empty or self.df_index_5min is None or self.df_index_5min.empty:
+            return
+
+        left = pd.DataFrame({
+            "_idx": self.df_index.index,
+            "time": pd.to_datetime(self.df_index["time"], errors="coerce"),
+        }).dropna(subset=["time"])
+        if left.empty:
+            return
+
+        right = self.df_index_5min[[
+            "available_time",
+            "time",
+            "supertrend",
+            "st_direction",
+            "st_phase",
+            "st_turn_green",
+            "st_turn_red",
+        ]].copy()
+        right["available_time"] = pd.to_datetime(right["available_time"], errors="coerce")
+        right["time"] = pd.to_datetime(right["time"], errors="coerce")
+        right = right.dropna(subset=["available_time"]).sort_values("available_time")
+        if right.empty:
+            return
+
+        right = right.rename(columns={
+            "available_time": "time",
+            "time": "st_5min_time",
+            "supertrend": "supertrend_5min",
+            "st_direction": "st_5min_direction",
+            "st_phase": "st_5min_phase",
+            "st_turn_green": "st_5min_turn_green",
+            "st_turn_red": "st_5min_turn_red",
+        })
+        merged = pd.merge_asof(
+            left.sort_values("time"),
+            right,
+            on="time",
+            direction="backward",
+        ).set_index("_idx")
+
+        for col in [
+            "st_5min_time",
+            "supertrend_5min",
+            "st_5min_direction",
+            "st_5min_phase",
+            "st_5min_turn_green",
+            "st_5min_turn_red",
+        ]:
+            if col in merged:
+                if col in {"st_5min_turn_green", "st_5min_turn_red"}:
+                    values = merged[col].map(
+                        lambda value: bool(value) if pd.notna(value) else False
+                    ).to_numpy(dtype=bool)
+                else:
+                    values = merged[col].to_numpy()
+                self.df_index.loc[merged.index, col] = values
+
+    def _apply_5min_supertrend(self, atr_period: int, factor: float) -> None:
+        self.df_index_5min = self._empty_5min_index_frame()
+        self._reset_5min_indicator_columns()
+        if self.df_index is None or self.df_index.empty:
+            return
+
+        df_src = self.df_index[["time", "open", "high", "low", "close"]].copy()
+        df_src["time"] = pd.to_datetime(df_src["time"], errors="coerce")
+        for col in ["open", "high", "low", "close"]:
+            df_src[col] = pd.to_numeric(df_src[col], errors="coerce")
+        df_src = df_src.dropna(subset=["time", "open", "high", "low", "close"]).sort_values("time")
+        if df_src.empty:
+            return
+
+        df_src["bucket"] = df_src["time"].dt.floor("5min")
+        df_5min = (
+            df_src.groupby("bucket", sort=True)
+            .agg(
+                open=("open", "first"),
+                high=("high", "max"),
+                low=("low", "min"),
+                close=("close", "last"),
+                candle_count=("close", "size"),
+            )
+            .reset_index()
+            .rename(columns={"bucket": "time"})
+        )
+        latest_minute = df_src["time"].max().floor("min")
+        df_5min["available_time"] = df_5min["time"] + pd.Timedelta(minutes=4)
+        df_5min = df_5min[df_5min["available_time"] <= latest_minute].reset_index(drop=True)
+        if df_5min.empty:
+            return
+
+        st_5min = self._calculate_supertrend(
+            high=df_5min["high"],
+            low=df_5min["low"],
+            close=df_5min["close"],
+            atr_period=atr_period,
+            factor=factor,
+        )
+        for col in ["st_atr_10", "st_upperbound", "st_lowerbound", "supertrend", "st_direction"]:
+            df_5min[col] = pd.Series(st_5min[col].to_numpy(), index=df_5min.index, dtype="float64")
+
+        st_direction = df_5min["st_direction"]
+        prev_st_direction = st_direction.shift(1)
+        df_5min["st_phase"] = np.select(
+            [st_direction < 0, st_direction > 0],
+            ["green", "red"],
+            default=None,
+        )
+        df_5min["st_turn_green"] = (st_direction < 0) & (prev_st_direction > 0)
+        df_5min["st_turn_red"] = (st_direction > 0) & (prev_st_direction < 0)
+        self.df_index_5min = df_5min
+        self._sync_5min_supertrend_to_index()
+
     def _reset_fast_indicator_state_from_frame(self) -> None:
         if self.df_index is None or self.df_index.empty:
             self._last_indicator_row = -1
@@ -1205,6 +1358,8 @@ class VwmaEmaStStrategy:
         if len(self.df_index) >= 14:
             st_atr_period = int(sp.get("supertrend_atr_period", 10) or 10)
             st_factor = float(sp.get("supertrend_factor", 3) or 3)
+            st_5min_atr_period = int(sp.get("supertrend_5min_atr_period", st_atr_period) or st_atr_period)
+            st_5min_factor = float(sp.get("supertrend_5min_factor", st_factor) or st_factor)
 
             self.df_index["ema_9"] = self._calculate_ema(close, length=9)
             self.df_index["rsi_7"] = self._calculate_rsi(length=7)
@@ -1246,6 +1401,7 @@ class VwmaEmaStStrategy:
             )
             self.df_index["st_turn_green"] = (st_direction < 0) & (prev_st_direction > 0)
             self.df_index["st_turn_red"] = (st_direction > 0) & (prev_st_direction < 0)
+            self._apply_5min_supertrend(st_5min_atr_period, st_5min_factor)
 
             self.check_price_action(safe_float(self.df_index["atr_14"].iloc[-1]))
 
@@ -1373,6 +1529,27 @@ class VwmaEmaStStrategy:
             st_phase = self._resolve_st_phase(latest)
             st_turn_green = self._indicator_flag_is_true(latest.get('st_turn_green', False))
             st_turn_red = self._indicator_flag_is_true(latest.get('st_turn_red', False))
+            supertrend_5min = safe_float(latest.get("supertrend_5min", np.nan))
+            st_5min_direction = safe_float(latest.get("st_5min_direction", np.nan))
+            st_5min_phase_raw = latest.get("st_5min_phase")
+            st_5min_phase = (
+                str(st_5min_phase_raw).strip().lower()
+                if st_5min_phase_raw is not None and not pd.isna(st_5min_phase_raw)
+                else ""
+            )
+            if st_5min_phase not in {"green", "red"}:
+                if st_5min_direction is not None and st_5min_direction < 0:
+                    st_5min_phase = "green"
+                elif st_5min_direction is not None and st_5min_direction > 0:
+                    st_5min_phase = "red"
+                else:
+                    st_5min_phase = None
+            st_5min_time = latest.get("st_5min_time")
+            st_5min_turn_green = self._indicator_flag_is_true(latest.get("st_5min_turn_green", False))
+            st_5min_turn_red = self._indicator_flag_is_true(latest.get("st_5min_turn_red", False))
+            if supertrend_5min is None or st_5min_direction is None or st_5min_phase is None:
+                logger.debug("5-minute Supertrend not ready for entry direction gate")
+                return
 
             up_angle_ema = float(sp.get("up_angle_ema", self.params.get("up_angle_ema", 50)))
             up_angle_vwma = float(sp.get("up_angle_vwma", self.params.get("up_angle_vwma", 20)))
@@ -1391,6 +1568,9 @@ class VwmaEmaStStrategy:
                 f"supertrend={supertrend}, st_direction={st_direction}, "
                 f"st_phase={st_phase}, "
                 f"st_turn_green={st_turn_green}, st_turn_red={st_turn_red}, "
+                f"st_5min_time={st_5min_time}, supertrend_5min={supertrend_5min}, "
+                f"st_5min_direction={st_5min_direction}, st_5min_phase={st_5min_phase}, "
+                f"st_5min_turn_green={st_5min_turn_green}, st_5min_turn_red={st_5min_turn_red}, "
                 f"orb_side={orb_side}, bullish_thrust={is_bullish_thrust}, bearish_thrust={is_bearish_thrust}, "
                 f"current_candle_range={safe_float(self.df_index.iloc[-1].get('candle_range', np.nan))}"
             )
@@ -1402,6 +1582,8 @@ class VwmaEmaStStrategy:
                 and (angle_vwma_25 > up_angle_vwma)
                 and (st_phase == "green")
                 and (st_direction < 0)
+                and (st_5min_phase == "green")
+                and (st_5min_direction < 0)
                 and ((not orb_enabled) or (orb_side == constants.CALL))
             )
 
@@ -1412,6 +1594,8 @@ class VwmaEmaStStrategy:
                 and (angle_vwma_25 < dn_angle_vwma)
                 and (st_phase == "red")
                 and (st_direction > 0)
+                and (st_5min_phase == "red")
+                and (st_5min_direction > 0)
                 and ((not orb_enabled) or (orb_side == constants.PUT))
             )
 
