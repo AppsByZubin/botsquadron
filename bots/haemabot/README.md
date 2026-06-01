@@ -25,4 +25,4 @@ python main.py --instruments nifty50 --strategy hm_ema_adx --level mock
 - `HAEMABOT_PARAM_YAML`: YAML config payload
 - `NATS_URL`: marketfeeder NATS URL
 - `UPSTOX_API_ACCESS_TOKEN`: Upstox token for market data/bootstrap
-- `HAEMABOT_UPLOAD_ARTIFACTS`: set to `true` to upload order artifacts to S3
+- `DO_S3_*`: S3/Spaces configuration for uploading end-of-day artifacts

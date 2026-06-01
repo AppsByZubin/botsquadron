@@ -14,7 +14,7 @@ sys.path.insert(0, str(HAEMABOT_DIR))
 from common import constants
 from index.orchestrator import orchestrator
 from logger import create_logger
-from utils.s3_upload_utils import maybe_upload_trade_artifacts_to_s3
+from utils.s3_upload_utils import upload_trade_artifacts_to_s3
 
 logger = create_logger("HaemaBotMain")
 
@@ -54,4 +54,4 @@ if __name__ == "__main__":
     if did_run is False:
         logger.info("Skipping S3 upload because strategy execution was skipped.")
     else:
-        maybe_upload_trade_artifacts_to_s3(bot_name="haemabot", execution_mode=mode)
+        upload_trade_artifacts_to_s3(bot_name="haemabot", execution_mode=mode)

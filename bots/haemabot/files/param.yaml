@@ -28,12 +28,6 @@ strategy-parameters:
   pcr_expiry: "2026-05-12"
   pcr_poll_interval_sec: 120
 
-  OIL_TRACK: True
-  OIL_QUERY: "Crudeoil"
-  OIL_EXPIRY: "current_month"
-  OIL_EXCHANGES: "MCX"
-  OIL_SEGMENTS: "FUT"
-
   max_atr_for_contract: 20
   min_atr_for_contract: 13
 

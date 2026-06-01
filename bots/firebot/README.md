@@ -26,4 +26,4 @@ python main.py --instruments nifty50 --strategy bb_vwap_ema --level mock
 - `FIREBOT_PARAM_YAML`: YAML config payload
 - `NATS_URL`: marketfeeder NATS URL
 - `UPSTOX_API_ACCESS_TOKEN`: Upstox token for market data/bootstrap
-- `FIREBOT_UPLOAD_ARTIFACTS`: set to `true` to upload order artifacts to S3
+- `DO_S3_*`: S3/Spaces configuration for uploading end-of-day artifacts

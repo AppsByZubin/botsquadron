@@ -58,22 +58,6 @@ def _env_float(name, default):
     return value if value > 0 else default
 
 
-def _coerce_bool(value, default=False):
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return bool(value)
-    if isinstance(value, str):
-        normalized = value.strip().lower()
-        if normalized in {"1", "true", "yes", "y", "on"}:
-            return True
-        if normalized in {"0", "false", "no", "n", "off"}:
-            return False
-    return default
-
-
 def _coerce_epoch_ms(value):
     if value is None:
         return None
@@ -256,23 +240,6 @@ async def nifty50_engine(strategy, mode, param_data):
             sp.get("pcr_expiry"),
         )
 
-        def _get_strategy_param(*names, default=None):
-            sources = [sp]
-            if isinstance(param_data, dict):
-                sources.append(param_data)
-            for source in sources:
-                if not isinstance(source, dict):
-                    continue
-                for name in names:
-                    if name in source:
-                        return source.get(name)
-            return default
-
-        oil_track_enabled = _coerce_bool(
-            _get_strategy_param("OIL_TRACK", "oil_track", default=False),
-            False,
-        )
-
         def _safe_int(value, default):
             try:
                 return int(float(value))
@@ -330,22 +297,6 @@ async def nifty50_engine(strategy, mode, param_data):
             logger.error("Failed to fetch upcoming NIFTY future contract.")
             sys.exit(constants.FAIL_CODE)
 
-        oil_contract = None
-        if oil_track_enabled:
-            oil_contract = upstox.get_crudeoil_future_contract(
-                query=str(_get_strategy_param("OIL_QUERY", "oil_query", default="Crudeoil")),
-                expiry=str(_get_strategy_param("OIL_EXPIRY", "oil_expiry", default="current_month")),
-                exchanges=str(_get_strategy_param("OIL_EXCHANGES", "oil_exchanges", default="MCX")),
-                segments=str(_get_strategy_param("OIL_SEGMENTS", "oil_segments", default="COMM")),
-                instrument_types=str(_get_strategy_param("OIL_INSTRUMENT_TYPES", "oil_instrument_types", default="FUT")),
-                selected_index=int(_get_strategy_param("OIL_SELECT", "oil_select", default=0) or 0),
-            )
-            logger.info(
-                "Crude oil tracking enabled. instrument_key=%s trading_symbol=%s",
-                oil_contract.get("instrument_key"),
-                oil_contract.get("trading_symbol"),
-            )
-
         if last_day_close == 0:
             last_day_close = get_spot_price(upstox, constants.NIFTY50, constants.NIFTY50_SYMBOL)
 
@@ -364,10 +315,8 @@ async def nifty50_engine(strategy, mode, param_data):
         selected_contracts = {}
         intraday_day_1min_candles = []
         intraday_day_future_candles = []
-        intraday_day_oil_candles = []
         minutes_processed = {}
         future_minutes_processed = {}
-        oil_minutes_processed = {}
 
         now_ist = datetime.now(ist)
         current_time = now_ist.time()
@@ -419,12 +368,6 @@ async def nifty50_engine(strategy, mode, param_data):
             future_data.reverse()
             intraday_day_future_candles.extend(future_data)
 
-            if oil_track_enabled and oil_contract is not None:
-                oil_data = get_instrument_intraday_data(upstox, oil_contract["instrument_key"])
-                oil_data.reverse()
-                intraday_day_oil_candles.extend(oil_data)
-
-
         columns = ["time", "open", "high", "low", "close", "volume", "oi"]
         
         df_nifty = pd.DataFrame()
@@ -453,21 +396,12 @@ async def nifty50_engine(strategy, mode, param_data):
             future_dt = datetime.fromisoformat(future_last_timestamp).astimezone(ist)
             future_minutes_processed[future_dt.strftime("%Y-%m-%d %H:%M")] = True
 
-        df_oil = pd.DataFrame()
-        if intraday_day_oil_candles:
-            df_oil = pd.DataFrame(intraday_day_oil_candles, columns=columns)
-            oil_last_timestamp = df_oil["time"].iloc[-1]
-            oil_dt = datetime.fromisoformat(oil_last_timestamp).astimezone(ist)
-            oil_minutes_processed[oil_dt.strftime("%Y-%m-%d %H:%M")] = True
-
         # instruments list
         list_of_instruments = []
         if not isinstance(selected_contracts, dict):
             logger.error("Failed to initialize selected contracts.")
             sys.exit(constants.FAIL_CODE)
         selected_contracts["Nifty_Future"] = future_contract
-        if oil_track_enabled and oil_contract is not None:
-            selected_contracts["CrudeOil_Future"] = oil_contract
 
         for key, value in selected_contracts.items():
             if isinstance(value, dict) and value.get("instrument_key"):
@@ -541,10 +475,8 @@ async def nifty50_engine(strategy, mode, param_data):
             selected_contracts=selected_contracts,
             index_minutes_processed=minutes_processed,
             future_minutes_processed=future_minutes_processed,
-            oil_minutes_processed=oil_minutes_processed,
             intraday_index_candles=intraday_day_1min_candles,
             intraday_future_candles=intraday_day_future_candles,
-            intraday_oil_candles=intraday_day_oil_candles,
         )
 
         if bot is None:
