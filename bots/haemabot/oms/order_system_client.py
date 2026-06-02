@@ -40,6 +40,8 @@ ORDER_COLUMNS = [
     "validity",
     "entry_order_ids",
     "sl_order_ids",
+    "entry_order_refs",
+    "sl_order_refs",
     "target_order_id",
     "entry_price",
     "target",
@@ -62,7 +64,7 @@ ORDER_COLUMNS = [
     "sl_order_qty_map",
 ]
 
-JSON_COLUMNS = {"entry_order_ids", "sl_order_ids", "sl_order_qty_map"}
+JSON_COLUMNS = {"entry_order_ids", "sl_order_ids", "entry_order_refs", "sl_order_refs", "sl_order_qty_map"}
 
 DAILY_PNL_COLUMNS = [
     "date",
@@ -993,6 +995,8 @@ class OrderSystemClient:
             "validity": payload.get("validity"),
             "entry_order_ids": response.get("entry_order_ids") or [],
             "sl_order_ids": response.get("sl_order_ids") or [],
+            "entry_order_refs": _response_order_refs(response, "entry"),
+            "sl_order_refs": _response_order_refs(response, "sl"),
             "target_order_id": None,
             "entry_price": payload.get("entry_price"),
             "target": payload.get("target"),
@@ -1026,6 +1030,8 @@ class OrderSystemClient:
             "validity": trade.get("validity"),
             "entry_order_ids": _trade_order_ids(trade, "entry"),
             "sl_order_ids": _trade_order_ids(trade, "sl"),
+            "entry_order_refs": _trade_order_refs(trade, "entry"),
+            "sl_order_refs": _trade_order_refs(trade, "sl"),
             "target_order_id": trade.get("target_order_id"),
             "entry_price": trade.get("entry_price"),
             "target": trade.get("target"),
@@ -1356,6 +1362,10 @@ class OrderSystemClient:
             "status": trade.get("status"),
             "entry_order_ids": _json_list(trade.get("entry_order_ids")),
             "sl_order_ids": _json_list(trade.get("sl_order_ids")),
+            "entry_order_refs": _trade_order_refs(trade, "entry"),
+            "sl_order_refs": _trade_order_refs(trade, "sl"),
+            "entry_exchange_order_ids": _exchange_order_ids(trade, "entry"),
+            "sl_exchange_order_ids": _exchange_order_ids(trade, "sl"),
             "target_order_id": trade.get("target_order_id"),
             "entry_price": _to_float(trade.get("entry_price"), None),
             "target": _to_float(trade.get("target"), None),
@@ -1806,6 +1816,82 @@ def _trade_order_ids(trade: Mapping[str, Any], order_type: str) -> List[str]:
         if order_id:
             out.append(order_id)
     return out
+
+
+def _response_order_refs(response: Mapping[str, Any], order_type: str) -> List[Dict[str, str]]:
+    refs_key = "entry_orders" if order_type == "entry" else "sl_orders"
+    refs = _normalize_order_refs(response.get(refs_key))
+    if refs:
+        return refs
+
+    ids_key = "entry_order_ids" if order_type == "entry" else "sl_order_ids"
+    return [{"order_id": order_id, "exchange_order_id": ""} for order_id in _json_list(response.get(ids_key))]
+
+
+def _trade_order_refs(trade: Mapping[str, Any], order_type: str) -> List[Dict[str, str]]:
+    local_key = "entry_order_refs" if order_type == "entry" else "sl_order_refs"
+    refs = _normalize_order_refs(trade.get(local_key))
+    if refs:
+        return refs
+
+    response_key = "entry_orders" if order_type == "entry" else "sl_orders"
+    refs = _normalize_order_refs(trade.get(response_key))
+    if refs:
+        return refs
+
+    orders = trade.get("orders")
+    if isinstance(orders, list):
+        refs = []
+        for order in orders:
+            if not isinstance(order, Mapping):
+                continue
+            if str(order.get("order_type") or "").strip().lower() != order_type:
+                continue
+            refs.extend(_normalize_order_refs([order]))
+        if refs:
+            return refs
+
+    return [{"order_id": order_id, "exchange_order_id": ""} for order_id in _trade_order_ids(trade, order_type)]
+
+
+def _exchange_order_ids(trade: Mapping[str, Any], order_type: str) -> List[str]:
+    return [
+        str(ref.get("exchange_order_id") or "").strip()
+        for ref in _trade_order_refs(trade, order_type)
+        if str(ref.get("exchange_order_id") or "").strip()
+    ]
+
+
+def _normalize_order_refs(value: Any) -> List[Dict[str, str]]:
+    if value is None or value == "":
+        return []
+    if isinstance(value, str):
+        try:
+            value = jsonlib.loads(value)
+        except ValueError:
+            value = [value]
+    if isinstance(value, Mapping):
+        value = [value]
+    if not isinstance(value, list):
+        return []
+
+    refs: List[Dict[str, str]] = []
+    for item in value:
+        if isinstance(item, Mapping):
+            order_id = str(_first_value(item.get("order_id"), item.get("orderId"), item.get("id")) or "").strip()
+            exchange_order_id = str(_first_value(item.get("exchange_order_id"), item.get("exchangeOrderId")) or "").strip()
+        else:
+            order_id = str(item or "").strip()
+            exchange_order_id = ""
+        if not order_id:
+            continue
+        existing = next((ref for ref in refs if ref.get("order_id") == order_id), None)
+        if existing:
+            if not existing.get("exchange_order_id") and exchange_order_id:
+                existing["exchange_order_id"] = exchange_order_id
+            continue
+        refs.append({"order_id": order_id, "exchange_order_id": exchange_order_id})
+    return refs
 
 
 def _normalize_timestamp(value: Any) -> Optional[str]:

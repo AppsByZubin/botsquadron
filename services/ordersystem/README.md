@@ -8,6 +8,7 @@
 - `POST /v1/trades` to create trade records from bots
 - `POST /v1/trades/{id}/modify` to modify all SL broker orders for a trade
 - `POST /v1/trades/{id}/square-off` to square off a trade from strategy code
+- `POST /v1/bots/{bot_name}/block-orders` to block new order requests for a bot without touching existing broker/OMS trades
 - `POST /v1/bots/{bot_name}/kill` to block new orders for a bot, cancel open SL orders, and request Upstox position exit by entry tag
 - `POST /v1/bots/{bot_name}/resume` to disable kill mode for a bot
 - Writes/updates PostgreSQL tables:
@@ -15,7 +16,7 @@
   - `trades`
   - `orders`
   - `trades.acct_id` links to `accounts.id`
-  - broker entry/SL ids are stored as one row per order in `orders`
+  - broker entry/SL ids and exchange order ids are stored as one row per order in `orders`
 - In `APP_MODE=production`:
   - uses `UPSTOX_API_BASE_URL`
   - places entry order via Upstox Orders API
@@ -41,6 +42,8 @@
 - `POST /v1/trades/{id}/modify`
 - `POST /v1/trades/{id}/square-off`
 - `GET /v1/trades/{id}`
+- `POST /v1/bots/{bot_name}/block-orders`
+- `GET /v1/bots/{bot_name}/block-orders`
 - `POST /v1/bots/{bot_name}/kill`
 - `POST /v1/bots/{bot_name}/resume`
 - `GET /v1/bots/{bot_name}/kill`
@@ -100,6 +103,25 @@ Trade creation also prepares the daily account row for the bot before storing th
 }
 ```
 
+Response includes the legacy ID arrays plus structured broker refs:
+
+```json
+{
+  "trade_id": "0f1e2d3c-4b5a-6789-9012-abcdefabcdef",
+  "status": "OPEN",
+  "entry_order_ids": ["250602010001234"],
+  "sl_order_ids": ["250602010001235"],
+  "entry_orders": [
+    {"order_id": "250602010001234", "exchange_order_id": "1300000025660919"}
+  ],
+  "sl_orders": [
+    {"order_id": "250602010001235", "exchange_order_id": "1300000025660920"}
+  ]
+}
+```
+
+In production, ordersystem places the entry/SL orders and then uses Upstox order-details to hydrate `exchange_order_id` best-effort. If Upstox has not assigned or returned it yet, the response still includes `order_id` and leaves `exchange_order_id` empty rather than retrying a placed order. Bot OMS clients persist these refs into their local order CSV (`entry_order_refs`, `sl_order_refs`) and JSON event logs (`entry_order_refs`, `sl_order_refs`, `entry_exchange_order_ids`, `sl_exchange_order_ids`).
+
 ### Modify Trade Request Example
 
 ```json
@@ -137,7 +159,23 @@ The strategy owns square-off timing and sends the latest LTP as `exit_price`.
 
 ### Kill Bot Request Example
 
-Kill mode is stored in `ordersystem`, so future `POST /v1/trades` calls for the same bot return `KILL mode enabled no orders to be accepted.` with `closed_trades` for the bot pod to sync into its local order CSV.
+Kill mode is stored in `ordersystem`, so future `POST /v1/trades` calls for the same bot return `Order intake blocked; no orders to be accepted.` with `closed_trades` for the bot pod to sync into its local order CSV.
+
+If you only want to stop accepting new orders without cancelling SL orders, exiting broker positions, or closing OMS trades:
+
+```bash
+curl -X POST 'http://localhost:8081/v1/bots/haemabot/block-orders' \
+  -H 'Content-Type: application/json' \
+  -d '{"reason":"manual order intake block"}'
+```
+
+The helper script wraps this call:
+
+```bash
+scripts/ordersystem_order_intake_control.sh haemabot block
+scripts/ordersystem_order_intake_control.sh haemabot status
+scripts/ordersystem_order_intake_control.sh haemabot resume
+```
 
 ```bash
 curl -X POST 'http://localhost:8081/v1/bots/nifty50_pcr_vwap_ema_orb/kill' \

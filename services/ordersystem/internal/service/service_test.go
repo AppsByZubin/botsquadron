@@ -9,6 +9,7 @@ import (
 
 	"github.com/AppsByZubin/botsquadron/services/ordersystem/internal/config"
 	"github.com/AppsByZubin/botsquadron/services/ordersystem/internal/model"
+	"github.com/AppsByZubin/botsquadron/services/ordersystem/internal/store"
 	"github.com/AppsByZubin/botsquadron/services/ordersystem/internal/upstox"
 )
 
@@ -411,6 +412,22 @@ func TestSLOrderQuantityRequiresOrderID(t *testing.T) {
 
 	if got := slOrderQuantity(trade, ""); got != 0 {
 		t.Fatalf("slOrderQuantity(empty order id) = %d, want 0", got)
+	}
+}
+
+func TestBuildOrderParamsCapturesExchangeOrderID(t *testing.T) {
+	t.Parallel()
+
+	orders := buildOrderParams(
+		[]model.OrderRef{{OrderID: "order-1", ExchangeOrderID: "exchange-1"}},
+		store.CreateOrderParams{OrderType: "entry"},
+	)
+
+	if len(orders) != 1 {
+		t.Fatalf("orders length = %d, want 1", len(orders))
+	}
+	if orders[0].OrderID != "order-1" || orders[0].ExchangeOrderID != "exchange-1" {
+		t.Fatalf("order params = %#v, want order/exchange ids", orders[0])
 	}
 }
 

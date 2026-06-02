@@ -52,6 +52,10 @@ func (f *fakeService) KillBot(context.Context, string, model.KillBotRequest) (mo
 	return model.BotKillSwitchResponse{}, nil
 }
 
+func (f *fakeService) BlockBotOrders(context.Context, string, model.BlockBotOrdersRequest) (model.BotKillSwitchResponse, error) {
+	return model.BotKillSwitchResponse{}, nil
+}
+
 func (f *fakeService) ResumeBot(context.Context, string, model.ResumeBotRequest) (model.BotKillSwitchResponse, error) {
 	return model.BotKillSwitchResponse{}, nil
 }

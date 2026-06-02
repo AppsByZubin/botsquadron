@@ -4,8 +4,10 @@ import "time"
 
 const (
 	KillModeStatus       = "KILL_MODE"
-	KillModeMessage      = "KILL mode enabled no orders to be accepted."
+	KillModeMessage      = "Order intake blocked; no orders to be accepted."
 	KillSwitchExitStatus = "KILL_SWITCH"
+	OrderBlockStatus     = "ORDER_BLOCKED"
+	OrderBlockMessage    = "Order intake blocked for bot; existing broker orders and OMS trades were not changed."
 )
 
 type CreateTradeRequest struct {
@@ -39,13 +41,20 @@ type CreateTradeRequest struct {
 }
 
 type CreateTradeResponse struct {
-	TradeID       string   `json:"trade_id"`
-	Status        string   `json:"status"`
-	EntryOrderIDs []string `json:"entry_order_ids,omitempty"`
-	SLOrderIDs    []string `json:"sl_order_ids,omitempty"`
-	Message       string   `json:"message,omitempty"`
-	ClosedTrades  []Trade  `json:"closed_trades,omitempty"`
-	ClosedOrders  []Trade  `json:"closed_orders,omitempty"`
+	TradeID       string     `json:"trade_id"`
+	Status        string     `json:"status"`
+	EntryOrderIDs []string   `json:"entry_order_ids,omitempty"`
+	SLOrderIDs    []string   `json:"sl_order_ids,omitempty"`
+	EntryOrders   []OrderRef `json:"entry_orders,omitempty"`
+	SLOrders      []OrderRef `json:"sl_orders,omitempty"`
+	Message       string     `json:"message,omitempty"`
+	ClosedTrades  []Trade    `json:"closed_trades,omitempty"`
+	ClosedOrders  []Trade    `json:"closed_orders,omitempty"`
+}
+
+type OrderRef struct {
+	OrderID         string `json:"order_id"`
+	ExchangeOrderID string `json:"exchange_order_id"`
 }
 
 type CreateAccountRequest struct {
@@ -66,6 +75,10 @@ type KillBotRequest struct {
 	Reason   string `json:"reason,omitempty"`
 	Segment  string `json:"segment,omitempty"`
 	Tag      string `json:"tag,omitempty"`
+}
+
+type BlockBotOrdersRequest struct {
+	Reason string `json:"reason,omitempty"`
 }
 
 type ResumeBotRequest struct {
@@ -170,6 +183,7 @@ type SquareOffTradeResponse struct {
 type Order struct {
 	ID              string     `json:"id"`
 	OrderID         string     `json:"order_id,omitempty"`
+	ExchangeOrderID string     `json:"exchange_order_id,omitempty"`
 	TradeID         string     `json:"trade_id,omitempty"`
 	InstrumentToken string     `json:"instrument_token,omitempty"`
 	OrderType       string     `json:"order_type"`

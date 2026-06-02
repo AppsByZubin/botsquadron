@@ -103,12 +103,18 @@ class MockOrderSystemClient(OrderSystemClient):
 
         trade_id = f"mock-{uuid.uuid4().hex[:12]}"
         entry_order_id = f"mock-entry-{uuid.uuid4().hex[:10]}"
+        entry_exchange_order_id = f"mock-exchange-entry-{uuid.uuid4().hex[:10]}"
         sl_order_id = f"mock-sl-{uuid.uuid4().hex[:10]}" if payload.get("sl_trigger") else ""
+        sl_exchange_order_id = f"mock-exchange-sl-{uuid.uuid4().hex[:10]}" if sl_order_id else ""
+        entry_orders = [{"order_id": entry_order_id, "exchange_order_id": entry_exchange_order_id}]
+        sl_orders = [{"order_id": sl_order_id, "exchange_order_id": sl_exchange_order_id}] if sl_order_id else []
         response = {
             "trade_id": trade_id,
             "account_id": self.account_id or self._local_account_id(),
             "entry_order_ids": [entry_order_id],
             "sl_order_ids": [sl_order_id] if sl_order_id else [],
+            "entry_orders": entry_orders,
+            "sl_orders": sl_orders,
             "status": constants.OPEN,
             "message": "mock trade created locally",
         }
@@ -121,9 +127,9 @@ class MockOrderSystemClient(OrderSystemClient):
         self._active_trade_by_symbol[str(symbol)] = trade_id
         self._remember_trade(local_row)
         self._upsert_local_trade(local_row)
-        self._log_local_event("MOCK_PLACE_ENTRY", local_row, ts=ts, extra={"order_id": entry_order_id})
+        self._log_local_event("MOCK_PLACE_ENTRY", local_row, ts=ts, extra={"order_id": entry_order_id, "exchange_order_id": entry_exchange_order_id})
         if sl_order_id:
-            self._log_local_event("MOCK_PLACE_SL", local_row, ts=ts, extra={"order_id": sl_order_id})
+            self._log_local_event("MOCK_PLACE_SL", local_row, ts=ts, extra={"order_id": sl_order_id, "exchange_order_id": sl_exchange_order_id})
         return response
 
     def modify_trade(

@@ -183,7 +183,7 @@ func TestClientPlaceOrderCapturesSlicedOrderIDs(t *testing.T) {
 		return &http.Response{
 			StatusCode: http.StatusOK,
 			Header:     make(http.Header),
-			Body:       io.NopCloser(strings.NewReader(`{"status":"success","data":[{"order_id":"order-1"},{"order_id":"order-2"}]}`)),
+			Body:       io.NopCloser(strings.NewReader(`{"status":"success","data":[{"order_id":"order-1","exchange_order_id":"exchange-1"},{"order_id":"order-2","exchange_order_id":"exchange-2"}]}`)),
 		}, nil
 	})}
 
@@ -203,6 +203,9 @@ func TestClientPlaceOrderCapturesSlicedOrderIDs(t *testing.T) {
 	}
 	if len(resp.OrderIDs) != 2 || resp.OrderIDs[0] != "order-1" || resp.OrderIDs[1] != "order-2" {
 		t.Fatalf("order ids = %#v, want [order-1 order-2]", resp.OrderIDs)
+	}
+	if len(resp.Orders) != 2 || resp.Orders[0].ExchangeOrderID != "exchange-1" || resp.Orders[1].ExchangeOrderID != "exchange-2" {
+		t.Fatalf("order refs = %#v, want exchange ids captured", resp.Orders)
 	}
 	if !strings.Contains(rawBody, `"trigger_price":0`) {
 		t.Fatalf("raw request body = %s, want trigger_price field preserved for zero values", rawBody)
@@ -401,7 +404,9 @@ func TestClientGetOrderStatusExtractsExecutionFields(t *testing.T) {
 				"instrument_token":"NSE_FO|123",
 				"product":"D",
 				"transaction_type":"BUY",
-				"order_type":"MARKET"
+				"order_type":"MARKET",
+				"order_id":"entry-123",
+				"exchange_order_id":"exchange-entry-123"
 			}}`)),
 		}, nil
 	})}
@@ -424,6 +429,9 @@ func TestClientGetOrderStatusExtractsExecutionFields(t *testing.T) {
 	}
 	if resp.InstrumentToken != "NSE_FO|123" || resp.Product != "D" || resp.TransactionType != "BUY" || resp.OrderType != "MARKET" {
 		t.Fatalf("execution fields = %#v", resp)
+	}
+	if resp.OrderID != "entry-123" || resp.ExchangeOrderID != "exchange-entry-123" {
+		t.Fatalf("order refs = %s/%s, want entry-123/exchange-entry-123", resp.OrderID, resp.ExchangeOrderID)
 	}
 }
 

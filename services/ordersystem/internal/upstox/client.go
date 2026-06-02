@@ -57,7 +57,13 @@ type PlaceOrderRequest struct {
 type PlaceOrderResult struct {
 	OrderID  string
 	OrderIDs []string
+	Orders   []OrderRef
 	RawData  json.RawMessage
+}
+
+type OrderRef struct {
+	OrderID         string
+	ExchangeOrderID string
 }
 
 type ModifyOrderRequest struct {
@@ -93,6 +99,7 @@ type ExitPositionsResult struct {
 
 type OrderStatus struct {
 	OrderID         string
+	ExchangeOrderID string
 	Status          string
 	AveragePrice    *float64
 	Price           *float64
@@ -234,12 +241,13 @@ func (c *Client) PlaceOrder(ctx context.Context, req PlaceOrderRequest) (PlaceOr
 		return PlaceOrderResult{}, fmt.Errorf("upstox place order non-success status: %s", status)
 	}
 
-	orderIDs := extractOrderIDs(data)
+	orders := extractOrderRefs(data)
+	orderIDs := orderIDsFromRefs(orders)
 	if len(orderIDs) == 0 {
 		return PlaceOrderResult{}, fmt.Errorf("upstox place order succeeded but order id missing")
 	}
 
-	return PlaceOrderResult{OrderID: orderIDs[0], OrderIDs: orderIDs, RawData: data}, nil
+	return PlaceOrderResult{OrderID: orderIDs[0], OrderIDs: orderIDs, Orders: orders, RawData: data}, nil
 }
 
 func (c *Client) ModifyOrder(ctx context.Context, req ModifyOrderRequest) (ModifyOrderResult, error) {
@@ -450,6 +458,14 @@ func (c *Client) ExitPositions(ctx context.Context, req ExitPositionsRequest) (E
 }
 
 func (c *Client) GetOrderStatus(ctx context.Context, orderID string) (OrderStatus, error) {
+	return c.getOrderStatus(ctx, orderID, false)
+}
+
+func (c *Client) GetOrderStatusFresh(ctx context.Context, orderID string) (OrderStatus, error) {
+	return c.getOrderStatus(ctx, orderID, true)
+}
+
+func (c *Client) getOrderStatus(ctx context.Context, orderID string, skipCache bool) (OrderStatus, error) {
 	if !c.Enabled() {
 		return OrderStatus{}, fmt.Errorf("upstox client is not configured")
 	}
@@ -462,6 +478,7 @@ func (c *Client) GetOrderStatus(ctx context.Context, orderID string) (OrderStatu
 		orderID:   orderID,
 		cacheKey:  "order-details:" + strings.TrimSpace(orderID),
 		operation: "order status",
+		skipCache: skipCache,
 	})
 	if err != nil {
 		return OrderStatus{}, err
@@ -473,7 +490,8 @@ func (c *Client) GetOrderStatus(ctx context.Context, orderID string) (OrderStatu
 	price := extractFloat(obj, "price", "order_price")
 
 	return OrderStatus{
-		OrderID:         orderID,
+		OrderID:         firstNonEmptyString(extractString(obj, "order_id", "orderId", "id"), orderID),
+		ExchangeOrderID: strings.TrimSpace(extractString(obj, "exchange_order_id", "exchangeOrderId")),
 		Status:          orderStatus,
 		AveragePrice:    avgPrice,
 		Price:           price,
@@ -604,6 +622,7 @@ type brokerGETRequest struct {
 	query     url.Values
 	cacheKey  string
 	operation string
+	skipCache bool
 }
 
 func newRequestGate(interval time.Duration) *requestGate {
@@ -694,8 +713,16 @@ func (c *Client) getBrokerData(ctx context.Context, req brokerGETRequest) (json.
 		req.cacheKey = req.operation + ":" + req.orderID
 	}
 
-	if data, ok, err := c.cachedBrokerData(req); ok || err != nil {
-		return data, err
+	if !req.skipCache {
+		if data, ok, err := c.cachedBrokerData(req); ok || err != nil {
+			return data, err
+		}
+	}
+
+	if req.skipCache {
+		if err := c.activeBrokerRateLimit(req.cacheKey, req.operation, req.orderID); err != nil {
+			return nil, err
+		}
 	}
 
 	if c.statusLimiter != nil {
@@ -737,6 +764,10 @@ func (c *Client) getBrokerData(ctx context.Context, req brokerGETRequest) (json.
 	}
 	if statusEnvelope != "" && !strings.EqualFold(statusEnvelope, "success") {
 		return nil, fmt.Errorf("upstox %s non-success status url=%s: %s", req.operation, requestURL, statusEnvelope)
+	}
+
+	if req.skipCache {
+		return cloneRawMessage(data), nil
 	}
 
 	c.rememberBrokerData(req.cacheKey, data)
@@ -901,30 +932,40 @@ func extractOrderID(data json.RawMessage) string {
 }
 
 func extractOrderIDs(data json.RawMessage) []string {
+	return orderIDsFromRefs(extractOrderRefs(data))
+}
+
+func extractOrderRefs(data json.RawMessage) []OrderRef {
 	if len(data) == 0 {
 		return nil
 	}
 
 	var obj map[string]any
 	if err := json.Unmarshal(data, &obj); err == nil && obj != nil {
-		return extractOrderIDsFromObject(obj)
+		return extractOrderRefsFromObject(obj)
 	}
 
 	var list []map[string]any
 	if err := json.Unmarshal(data, &list); err == nil {
-		orderIDs := make([]string, 0, len(list))
+		orders := make([]OrderRef, 0, len(list))
 		for _, item := range list {
-			orderIDs = appendOrderID(orderIDs, extractString(item, "order_id", "orderId", "id"))
+			orders = appendOrderRef(orders, OrderRef{
+				OrderID:         extractString(item, "order_id", "orderId", "id"),
+				ExchangeOrderID: extractString(item, "exchange_order_id", "exchangeOrderId"),
+			})
 		}
-		return orderIDs
+		return orders
 	}
 
 	return nil
 }
 
-func extractOrderIDsFromObject(obj map[string]any) []string {
-	orderIDs := make([]string, 0, 1)
-	orderIDs = appendOrderID(orderIDs, extractString(obj, "order_id", "orderId", "id"))
+func extractOrderRefsFromObject(obj map[string]any) []OrderRef {
+	orders := make([]OrderRef, 0, 1)
+	orders = appendOrderRef(orders, OrderRef{
+		OrderID:         extractString(obj, "order_id", "orderId", "id"),
+		ExchangeOrderID: extractString(obj, "exchange_order_id", "exchangeOrderId"),
+	})
 
 	for _, key := range []string{"order_ids", "orderIds", "ids"} {
 		raw, ok := obj[key]
@@ -935,30 +976,64 @@ func extractOrderIDsFromObject(obj map[string]any) []string {
 		case []any:
 			for _, value := range values {
 				if text, ok := value.(string); ok {
-					orderIDs = appendOrderID(orderIDs, text)
+					orders = appendOrderRef(orders, OrderRef{OrderID: text})
 				}
 			}
 		case []string:
 			for _, value := range values {
-				orderIDs = appendOrderID(orderIDs, value)
+				orders = appendOrderRef(orders, OrderRef{OrderID: value})
 			}
 		}
 	}
 
+	return orders
+}
+
+func appendOrderRef(orders []OrderRef, value OrderRef) []OrderRef {
+	value.OrderID = strings.TrimSpace(value.OrderID)
+	value.ExchangeOrderID = strings.TrimSpace(value.ExchangeOrderID)
+	if value.OrderID == "" {
+		return orders
+	}
+	for idx, existing := range orders {
+		if existing.OrderID == value.OrderID {
+			if orders[idx].ExchangeOrderID == "" && value.ExchangeOrderID != "" {
+				orders[idx].ExchangeOrderID = value.ExchangeOrderID
+			}
+			return orders
+		}
+	}
+	return append(orders, value)
+}
+
+func orderIDsFromRefs(orders []OrderRef) []string {
+	orderIDs := make([]string, 0, len(orders))
+	for _, order := range orders {
+		orderID := strings.TrimSpace(order.OrderID)
+		if orderID == "" {
+			continue
+		}
+		seen := false
+		for _, existing := range orderIDs {
+			if existing == orderID {
+				seen = true
+				break
+			}
+		}
+		if !seen {
+			orderIDs = append(orderIDs, orderID)
+		}
+	}
 	return orderIDs
 }
 
-func appendOrderID(orderIDs []string, value string) []string {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return orderIDs
-	}
-	for _, existing := range orderIDs {
-		if existing == value {
-			return orderIDs
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
 		}
 	}
-	return append(orderIDs, value)
+	return ""
 }
 
 func firstObject(data json.RawMessage) map[string]any {
