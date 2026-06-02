@@ -162,6 +162,8 @@ func (s *Service) CreateTrade(ctx context.Context, req model.CreateTradeRequest)
 	status := "OPEN"
 	entryOrderIDs := make([]string, 0, 1)
 	slOrderIDs := make([]string, 0, 1)
+	entryOrders := make([]model.OrderRef, 0, 1)
+	slOrders := make([]model.OrderRef, 0, 1)
 
 	if s.upstox == nil || !s.upstox.Enabled() {
 		return model.CreateTradeResponse{}, fmt.Errorf("%s mode is enabled but upstox client is not configured", mode)
@@ -184,7 +186,12 @@ func (s *Service) CreateTrade(ctx context.Context, req model.CreateTradeRequest)
 	if err != nil {
 		return model.CreateTradeResponse{}, fmt.Errorf("place entry order: %w", err)
 	}
-	entryOrderIDs = append(entryOrderIDs, entryResp.OrderIDs...)
+	entryOrders = orderRefsFromUpstox(entryResp.Orders)
+	if len(entryOrders) == 0 {
+		entryOrders = orderRefsFromIDs(entryResp.OrderIDs)
+	}
+	entryOrders = s.hydrateOrderExchangeIDs(ctx, entryOrders)
+	entryOrderIDs = orderIDsFromModelRefs(entryOrders)
 
 	if req.SLTrigger != nil && *req.SLTrigger > 0 {
 		slLimit := *req.SLTrigger
@@ -210,7 +217,12 @@ func (s *Service) CreateTrade(ctx context.Context, req model.CreateTradeRequest)
 		if err != nil {
 			return model.CreateTradeResponse{}, fmt.Errorf("place stoploss order: %w", err)
 		}
-		slOrderIDs = append(slOrderIDs, slResp.OrderIDs...)
+		slOrders = orderRefsFromUpstox(slResp.Orders)
+		if len(slOrders) == 0 {
+			slOrders = orderRefsFromIDs(slResp.OrderIDs)
+		}
+		slOrders = s.hydrateOrderExchangeIDs(ctx, slOrders)
+		slOrderIDs = orderIDsFromModelRefs(slOrders)
 	}
 
 	accountID, err := s.store.GetAccountIDForBotDate(ctx, req.BotName, req.CurrDate)
@@ -227,14 +239,14 @@ func (s *Service) CreateTrade(ctx context.Context, req model.CreateTradeRequest)
 	}
 
 	orders := make([]store.CreateOrderParams, 0, len(entryOrderIDs)+len(slOrderIDs)+2)
-	orders = append(orders, buildOrderParams(entryOrderIDs, store.CreateOrderParams{
+	orders = append(orders, buildOrderParams(entryOrders, store.CreateOrderParams{
 		InstrumentToken: req.InstrumentToken,
 		OrderType:       "entry",
 		EntryPrice:      req.EntryPrice,
 		Target:          req.Target,
 	})...)
 	if req.SLTrigger != nil || req.SLLimit != nil {
-		orders = append(orders, buildOrderParams(slOrderIDs, store.CreateOrderParams{
+		orders = append(orders, buildOrderParams(slOrders, store.CreateOrderParams{
 			InstrumentToken: req.InstrumentToken,
 			OrderType:       "sl",
 			Stoploss:        req.SLTrigger,
@@ -274,6 +286,8 @@ func (s *Service) CreateTrade(ctx context.Context, req model.CreateTradeRequest)
 		Status:        status,
 		EntryOrderIDs: entryOrderIDs,
 		SLOrderIDs:    slOrderIDs,
+		EntryOrders:   entryOrders,
+		SLOrders:      slOrders,
 		Message:       message,
 	}, nil
 }
@@ -397,6 +411,34 @@ func (s *Service) KillBot(ctx context.Context, botName string, req model.KillBot
 		response.Message = "kill switch enabled with broker errors"
 	}
 	return response, nil
+}
+
+func (s *Service) BlockBotOrders(ctx context.Context, botName string, req model.BlockBotOrdersRequest) (model.BotKillSwitchResponse, error) {
+	botName = strings.TrimSpace(botName)
+	if botName == "" {
+		return model.BotKillSwitchResponse{}, fmt.Errorf("bot_name is required")
+	}
+	if s.store == nil {
+		return model.BotKillSwitchResponse{}, fmt.Errorf("store is not configured")
+	}
+
+	reason := strings.TrimSpace(req.Reason)
+	if reason == "" {
+		reason = model.OrderBlockStatus
+	}
+	state, err := s.store.SetBotKillSwitch(ctx, botName, true, reason)
+	if err != nil {
+		return model.BotKillSwitchResponse{}, err
+	}
+
+	return model.BotKillSwitchResponse{
+		BotName:     state.BotName,
+		KillEnabled: state.KillEnabled,
+		Status:      model.OrderBlockStatus,
+		Message:     model.OrderBlockMessage,
+		Reason:      state.Reason,
+		UpdatedAt:   state.UpdatedAt,
+	}, nil
 }
 
 func (s *Service) ResumeBot(ctx context.Context, botName string, req model.ResumeBotRequest) (model.BotKillSwitchResponse, error) {
@@ -1354,25 +1396,103 @@ func (s *Service) persistModifiedTradeState(ctx context.Context, tradeID string,
 	return nil
 }
 
-func buildOrderParams(orderIDs []string, base store.CreateOrderParams) []store.CreateOrderParams {
-	if len(orderIDs) == 0 {
+func (s *Service) hydrateOrderExchangeIDs(ctx context.Context, orders []model.OrderRef) []model.OrderRef {
+	if len(orders) == 0 || !s.cfg.IsProduction() || s.upstox == nil || !s.upstox.Enabled() {
+		return orders
+	}
+
+	hydrateCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+
+	out := make([]model.OrderRef, 0, len(orders))
+	for _, order := range orders {
+		order.OrderID = strings.TrimSpace(order.OrderID)
+		order.ExchangeOrderID = strings.TrimSpace(order.ExchangeOrderID)
+		if order.OrderID == "" {
+			continue
+		}
+		if order.ExchangeOrderID == "" && hydrateCtx.Err() == nil {
+			statusResp, err := s.upstox.GetOrderStatusFresh(hydrateCtx, order.OrderID)
+			if err != nil {
+				log.Printf("hydrate exchange order id failed order_id=%s: %v", order.OrderID, err)
+			} else {
+				order.OrderID = firstNonEmpty(statusResp.OrderID, order.OrderID)
+				order.ExchangeOrderID = strings.TrimSpace(statusResp.ExchangeOrderID)
+			}
+		}
+		out = append(out, order)
+	}
+	return out
+}
+
+func buildOrderParams(orders []model.OrderRef, base store.CreateOrderParams) []store.CreateOrderParams {
+	if len(orders) == 0 {
 		return []store.CreateOrderParams{base}
 	}
 
-	orders := make([]store.CreateOrderParams, 0, len(orderIDs))
-	for _, orderID := range orderIDs {
-		orderID = strings.TrimSpace(orderID)
+	params := make([]store.CreateOrderParams, 0, len(orders))
+	for _, orderRef := range orders {
+		orderID := strings.TrimSpace(orderRef.OrderID)
 		if orderID == "" {
 			continue
 		}
 		order := base
 		order.OrderID = orderID
-		orders = append(orders, order)
+		order.ExchangeOrderID = strings.TrimSpace(orderRef.ExchangeOrderID)
+		params = append(params, order)
 	}
-	if len(orders) == 0 {
+	if len(params) == 0 {
 		return []store.CreateOrderParams{base}
 	}
-	return orders
+	return params
+}
+
+func orderRefsFromUpstox(orders []upstox.OrderRef) []model.OrderRef {
+	out := make([]model.OrderRef, 0, len(orders))
+	for _, order := range orders {
+		orderID := strings.TrimSpace(order.OrderID)
+		if orderID == "" {
+			continue
+		}
+		out = append(out, model.OrderRef{
+			OrderID:         orderID,
+			ExchangeOrderID: strings.TrimSpace(order.ExchangeOrderID),
+		})
+	}
+	return out
+}
+
+func orderRefsFromIDs(orderIDs []string) []model.OrderRef {
+	out := make([]model.OrderRef, 0, len(orderIDs))
+	for _, orderID := range orderIDs {
+		orderID = strings.TrimSpace(orderID)
+		if orderID == "" {
+			continue
+		}
+		out = append(out, model.OrderRef{OrderID: orderID})
+	}
+	return out
+}
+
+func orderIDsFromModelRefs(orders []model.OrderRef) []string {
+	out := make([]string, 0, len(orders))
+	for _, order := range orders {
+		orderID := strings.TrimSpace(order.OrderID)
+		if orderID == "" {
+			continue
+		}
+		seen := false
+		for _, existing := range out {
+			if existing == orderID {
+				seen = true
+				break
+			}
+		}
+		if !seen {
+			out = append(out, orderID)
+		}
+	}
+	return out
 }
 
 func float64Value(value *float64) float64 {

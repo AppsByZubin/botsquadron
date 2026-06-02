@@ -41,6 +41,10 @@ func (f fakeBusiness) KillBot(context.Context, string, model.KillBotRequest) (mo
 	return model.BotKillSwitchResponse{}, nil
 }
 
+func (f fakeBusiness) BlockBotOrders(context.Context, string, model.BlockBotOrdersRequest) (model.BotKillSwitchResponse, error) {
+	return model.BotKillSwitchResponse{Status: model.OrderBlockStatus, Message: model.OrderBlockMessage}, nil
+}
+
 func (f fakeBusiness) ResumeBot(context.Context, string, model.ResumeBotRequest) (model.BotKillSwitchResponse, error) {
 	return model.BotKillSwitchResponse{}, nil
 }
@@ -112,5 +116,26 @@ func TestHandleCreateTradeReturnsOKForKillMode(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), model.KillModeMessage) {
 		t.Fatalf("body = %s, want kill-mode message", rec.Body.String())
+	}
+}
+
+func TestHandleBlockBotOrders(t *testing.T) {
+	t.Parallel()
+
+	handler := New(fakeBusiness{}, 5*time.Second)
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/bots/bot-a/block-orders",
+		strings.NewReader(`{"reason":"manual pause"}`),
+	)
+	rec := httptest.NewRecorder()
+
+	handler.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), model.OrderBlockStatus) {
+		t.Fatalf("body = %s, want order block status", rec.Body.String())
 	}
 }

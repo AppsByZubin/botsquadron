@@ -52,6 +52,7 @@ type CreateTradeParams struct {
 
 type CreateOrderParams struct {
 	OrderID         string
+	ExchangeOrderID string
 	InstrumentToken string
 	OrderType       string
 	Qty             *int
@@ -453,6 +454,7 @@ func (s *Store) ensureOrdersSchema(ctx context.Context) error {
 CREATE TABLE IF NOT EXISTS %s (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     order_id TEXT,
+    exchange_order_id TEXT,
     trade_id UUID REFERENCES trades(id) ON DELETE CASCADE,
     instrument_token TEXT,
     order_type TEXT,
@@ -475,6 +477,12 @@ CREATE INDEX IF NOT EXISTS idx_orders_trade_type ON %s (trade_id, order_type);
 
 	if _, err := s.pool.Exec(ctx, fmt.Sprintf(`ALTER TABLE %s ADD COLUMN IF NOT EXISTS qty INTEGER`, ordersTableName)); err != nil {
 		return fmt.Errorf("ensure orders qty column: %w", err)
+	}
+	if _, err := s.pool.Exec(ctx, fmt.Sprintf(`ALTER TABLE %s ADD COLUMN IF NOT EXISTS exchange_order_id TEXT`, ordersTableName)); err != nil {
+		return fmt.Errorf("ensure orders exchange_order_id column: %w", err)
+	}
+	if _, err := s.pool.Exec(ctx, fmt.Sprintf(`CREATE INDEX IF NOT EXISTS idx_orders_exchange_order_id ON %s (exchange_order_id)`, ordersTableName)); err != nil {
+		return fmt.Errorf("ensure orders exchange_order_id index: %w", err)
 	}
 
 	hasEntryOrderIDs, err := s.columnExists(ctx, s.tradesTable, "entry_order_ids")
@@ -956,6 +964,7 @@ func insertOrderTx(ctx context.Context, tx pgx.Tx, tradeID string, params Create
 	_, err := tx.Exec(ctx, fmt.Sprintf(`
 INSERT INTO %s (
     order_id,
+    exchange_order_id,
     trade_id,
     instrument_token,
     order_type,
@@ -969,9 +978,10 @@ INSERT INTO %s (
     exit_time,
     brokerage
 ) VALUES (
-    $1,$2::uuid,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13
+    $1,$2,$3::uuid,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14
 )`, ordersTableName),
 		nullIfEmpty(params.OrderID),
+		nullIfEmpty(params.ExchangeOrderID),
 		tradeID,
 		nullIfEmpty(params.InstrumentToken),
 		strings.ToLower(strings.TrimSpace(params.OrderType)),
@@ -1145,6 +1155,7 @@ func (s *Store) listOrdersByTradeID(ctx context.Context, tradeID string) ([]mode
 SELECT
     id::text,
     COALESCE(order_id, ''),
+    COALESCE(exchange_order_id, ''),
     COALESCE(trade_id::text, ''),
     COALESCE(instrument_token, ''),
     COALESCE(order_type, ''),
@@ -1172,6 +1183,7 @@ ORDER BY order_type, id`, ordersTableName), strings.TrimSpace(tradeID))
 		if err := rows.Scan(
 			&order.ID,
 			&order.OrderID,
+			&order.ExchangeOrderID,
 			&order.TradeID,
 			&order.InstrumentToken,
 			&order.OrderType,

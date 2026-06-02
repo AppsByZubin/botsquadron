@@ -27,6 +27,7 @@ type Business interface {
 	GetTradeByID(context.Context, string) (model.Trade, error)
 	RefreshTradeBrokerStatus(context.Context, string) (model.Trade, error)
 	KillBot(context.Context, string, model.KillBotRequest) (model.BotKillSwitchResponse, error)
+	BlockBotOrders(context.Context, string, model.BlockBotOrdersRequest) (model.BotKillSwitchResponse, error)
 	ResumeBot(context.Context, string, model.ResumeBotRequest) (model.BotKillSwitchResponse, error)
 	GetBotKillSwitch(context.Context, string) (model.BotKillSwitchResponse, error)
 	ModifyTrade(context.Context, string, model.ModifyTradeRequest) (model.ModifyTradeResponse, error)
@@ -52,7 +53,9 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("POST /v1/trades/{id}/refresh", h.handleRefreshTradeBrokerStatus)
 	mux.HandleFunc("GET /v1/trades/{id}", h.handleGetTradeByID)
 	mux.HandleFunc("POST /v1/bots/{bot_name}/kill", h.handleKillBot)
+	mux.HandleFunc("POST /v1/bots/{bot_name}/block-orders", h.handleBlockBotOrders)
 	mux.HandleFunc("POST /v1/bots/{bot_name}/resume", h.handleResumeBot)
+	mux.HandleFunc("GET /v1/bots/{bot_name}/block-orders", h.handleGetBotKillSwitch)
 	mux.HandleFunc("GET /v1/bots/{bot_name}/kill", h.handleGetBotKillSwitch)
 	return mux
 }
@@ -122,6 +125,39 @@ func (h *Handler) handleKillBot(w http.ResponseWriter, r *http.Request) {
 		statusCode = http.StatusMultiStatus
 	}
 	writeJSON(w, statusCode, resp)
+}
+
+func (h *Handler) handleBlockBotOrders(w http.ResponseWriter, r *http.Request) {
+	botName := strings.TrimSpace(r.PathValue("bot_name"))
+	if botName == "" {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "bot_name is required"})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), h.requestTimeout)
+	defer cancel()
+
+	defer r.Body.Close()
+	var req model.BlockBotOrdersRequest
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid request body: " + err.Error()})
+		return
+	}
+
+	resp, err := h.business.BlockBotOrders(ctx, botName, req)
+	if err != nil {
+		statusCode := http.StatusInternalServerError
+		lowerErr := strings.ToLower(err.Error())
+		if strings.Contains(lowerErr, "required") || strings.Contains(lowerErr, "must be") {
+			statusCode = http.StatusBadRequest
+		}
+		writeJSON(w, statusCode, errorResponse{Error: err.Error()})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (h *Handler) handleResumeBot(w http.ResponseWriter, r *http.Request) {

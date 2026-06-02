@@ -15,6 +15,7 @@ type Service interface {
 	GetTradeByID(context.Context, string) (model.Trade, error)
 	RefreshTradeBrokerStatus(context.Context, string) (model.Trade, error)
 	KillBot(context.Context, string, model.KillBotRequest) (model.BotKillSwitchResponse, error)
+	BlockBotOrders(context.Context, string, model.BlockBotOrdersRequest) (model.BotKillSwitchResponse, error)
 	ResumeBot(context.Context, string, model.ResumeBotRequest) (model.BotKillSwitchResponse, error)
 	GetBotKillSwitch(context.Context, string) (model.BotKillSwitchResponse, error)
 	ModifyTrade(context.Context, string, model.ModifyTradeRequest) (model.ModifyTradeResponse, error)
@@ -63,6 +64,10 @@ func (b *Business) RefreshTradeBrokerStatus(ctx context.Context, tradeID string)
 
 func (b *Business) KillBot(ctx context.Context, botName string, req model.KillBotRequest) (model.BotKillSwitchResponse, error) {
 	return b.svc.KillBot(ctx, botName, req)
+}
+
+func (b *Business) BlockBotOrders(ctx context.Context, botName string, req model.BlockBotOrdersRequest) (model.BotKillSwitchResponse, error) {
+	return b.svc.BlockBotOrders(ctx, botName, req)
 }
 
 func (b *Business) ResumeBot(ctx context.Context, botName string, req model.ResumeBotRequest) (model.BotKillSwitchResponse, error) {
