@@ -1909,6 +1909,15 @@ class BbVwapEmaStrategy:
             )
             max_atr_for_contract = float(sp.get("max_atr_for_contract", self.params.get("max_atr_for_contract", 20)))
             min_atr_for_contract = float(sp.get("min_atr_for_contract", self.params.get("min_atr_for_contract", 10)))
+            trailing_factor = float(
+                sp.get(
+                    "trailing-factor",
+                    sp.get(
+                        "trailing_factor",
+                        self.params.get("trailing-factor", self.params.get("trailing_factor", 2.0)),
+                    ),
+                )
+            )
 
             option_atr = self.atr5_engine.get_atr(chosen["instrument_key"])
             target = None
@@ -1920,11 +1929,11 @@ class BbVwapEmaStrategy:
                 atr_to_use = option_atr
                 target = entry_price + (atr_target_mult * option_atr)
                 sl_trigger = entry_price - (atr_sl_mult * option_atr)
-                start_trail_after = float((option_atr*2) / entry_price)
 
                 if option_atr > max_atr_for_contract:
-                    start_trail_after = float(max_atr_for_contract / entry_price)
                     atr_to_use = max_atr_for_contract
+
+                start_trail_after = float((atr_to_use * trailing_factor) / entry_price)
 
                 if option_atr < min_atr_for_contract:
                     sl_trigger = entry_price - (atr_sl_mult * min_atr_for_contract)
@@ -2004,7 +2013,8 @@ class BbVwapEmaStrategy:
                 f"Target(PU): {target:.2f}, SL_trig(PU): {sl_trigger:.2f}, "
                 f"SL_lim(PU): {sl_limit:.2f}, TrailOn: {trailing_enabled}, TrailDist: {trail_points:.2f}, "
                 f"TrailStartAfterPts: {(entry_price + (entry_price * start_trail_after)):.2f} "
-                f"start_trail_after: {start_trail_after}, RiskMode: {risk_mode}, OptionATR: {option_atr}"
+                f"start_trail_after: {start_trail_after}, RiskMode: {risk_mode}, "
+                f"OptionATR: {option_atr}, TrailingFactor: {trailing_factor}"
             )
 
             if trade_id:

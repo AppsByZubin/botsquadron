@@ -1692,15 +1692,26 @@ class PCRVwmaEmaOrbStrategy:
             atr_sl_mult = float(sp.get("orb_atr_sl_mult", 1.1))
             max_atr_for_contract = float(sp.get("max_atr_for_contract", 20))
             min_atr_for_contract = float(sp.get("min_atr_for_contract", 10))
+            trailing_factor = float(
+                sp.get(
+                    "trailing-factor",
+                    sp.get(
+                        "trailing_factor",
+                        self.params.get("trailing-factor", self.params.get("trailing_factor", 2.0)),
+                    ),
+                )
+            )
             
             if use_option_atr_risk and option_atr is not None and option_atr > 0:
 
+                atr_to_use = option_atr
                 target = entry_price + (atr_target_mult * option_atr)
                 sl_trigger = entry_price - (atr_sl_mult * option_atr)
-                start_trail_after = float(option_atr / entry_price)
                 
                 if option_atr > max_atr_for_contract:
-                    start_trail_after = float(max_atr_for_contract / entry_price)
+                    atr_to_use = max_atr_for_contract
+
+                start_trail_after = float((atr_to_use * trailing_factor) / entry_price)
                 
                 if option_atr < min_atr_for_contract:
                     sl_trigger = entry_price - (atr_sl_mult * min_atr_for_contract)
@@ -1748,7 +1759,7 @@ class PCRVwmaEmaOrbStrategy:
                 trail_points = option_atr
                 trail_points = max(trail_points, TICK)  # at least 1 tick
 
-            if option_atr > max_atr_for_contract:
+            if option_atr is not None and option_atr > max_atr_for_contract:
                 trail_points = max_atr_for_contract
 
             self._order_container["start_trail_after"] = start_trail_after
@@ -1774,7 +1785,7 @@ class PCRVwmaEmaOrbStrategy:
                 f"Target(PU): {target:.2f}, SL_trig(PU): {sl_trigger:.2f}, "
                 f"SL_lim(PU): {sl_limit:.2f}, TrailOn: {trailing_enabled}, TrailDist: {trail_points:.2f}, "
                 f"TrailStartAfterPts: {(entry_price + (entry_price*start_trail_after)):.2f}, "
-                f"RiskMode: {risk_mode}, OptionATR: {option_atr}"
+                f"RiskMode: {risk_mode}, OptionATR: {option_atr}, TrailingFactor: {trailing_factor}"
             )
 
             if trade_id:
