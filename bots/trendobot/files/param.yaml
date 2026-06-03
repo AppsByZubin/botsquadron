@@ -14,6 +14,7 @@ strategy-parameters:
 
   adx_threshold: 21
 
+  trailing-stop: true
   break-even-point: 3
 
   sl-limit-gap: 1.0

@@ -2332,6 +2332,8 @@ class VwmaEmaStStrategy:
             if sl_limit >= sl_trigger:
                 sl_limit = self._round_to_tick(sl_trigger - tick, tick, "FLOOR")
             target = self._round_to_tick(float(target), tick, "CEIL")
+            trailing_enabled = self._coerce_bool(sp.get("trailing-stop", sp.get("trailing_stop", True)), True)
+            trail_points = option_atr if trailing_enabled else None
 
             description = f"{self._order_container['side']} {self._order_container['instrument_symbol']} entry={entry_price:.2f}"
 
@@ -2343,6 +2345,7 @@ class VwmaEmaStStrategy:
                 sl_trigger=sl_trigger,
                 sl_limit=sl_limit,
                 target=target,
+                trail_points=trail_points,
                 description=description,
                 ts=ts,
             )
@@ -2350,7 +2353,8 @@ class VwmaEmaStStrategy:
             logger.info(
                 f"OrderInfo TradeID: {trade_id}, Entry(PU): {entry_price:.2f}, Qty: {qty}, "
                 f"Target(PU): {target:.2f}, SL_trig(PU): {sl_trigger:.2f}, "
-                f"SL_lim(PU): {sl_limit:.2f}, RiskMode: atr_fixed_sl, OptionATR: {option_atr}"
+                f"SL_lim(PU): {sl_limit:.2f}, TrailOn: {trailing_enabled}, "
+                f"TrailAnchorATR: {option_atr:.2f}, RiskMode: atr_fixed_sl, OptionATR: {option_atr}"
             )
 
             if trade_id:

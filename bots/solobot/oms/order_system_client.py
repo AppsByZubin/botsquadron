@@ -1449,6 +1449,10 @@ class OrderSystemClient:
         current_sl = _to_float(trade.get("stoploss"), 0.0)
         current_limit = _to_float(_first_value(trade.get("sl_limit"), trade.get("_sl_limit")), 0.0)
         start_after = _to_float(trade.get("start_trail_after"), 0.0)
+        trail_anchor = _to_float(
+            _first_value(trade.get("spot_trail_anchor"), trade.get("_spot_trail_anchor")),
+            0.0,
+        ) or entry
         side = str(trade.get("side") or constants.BUY).upper()
 
         if entry <= 0 or trail_points <= 0:
@@ -1457,6 +1461,8 @@ class OrderSystemClient:
         if side == constants.SELL:
             start_price = entry - _start_after_points(entry, start_after)
             if not force and price > start_price:
+                return None
+            if not force and trail_anchor > 0 and price > trail_anchor - trail_points:
                 return None
             new_sl = self._round_price(price + trail_points, "FLOOR")
             if force and current_sl > 0 and current_sl > new_sl:
@@ -1471,6 +1477,8 @@ class OrderSystemClient:
 
         start_price = entry + _start_after_points(entry, start_after)
         if not force and price < start_price:
+            return None
+        if not force and trail_anchor > 0 and price < trail_anchor + trail_points:
             return None
         new_sl = self._round_price(price - trail_points, "CEIL")
         if force and current_sl > 0 and current_sl > new_sl:
