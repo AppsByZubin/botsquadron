@@ -220,7 +220,6 @@ class BbVwapEmaStrategy:
         self._today_realized_pnl: float = 0.0
         self._today_realized_pnl_trade_ids = set()
         self.order_maneger = order_manager
-
         # In-memory trade state machine used by _trade_processing():
         # None -> WAITING -> OPEN -> cleared.
         self._order_container = {
