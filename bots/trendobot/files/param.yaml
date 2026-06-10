@@ -31,17 +31,15 @@ strategy-parameters:
   trade_within_day_open_limits: False
   ltp_open_max_distance_points: 210
 
-  up_rsi_low: 52
-  up_rsi_high: 73
-  up_angle_ema: 60
-  up_angle_vwma: 30
-  up_angle_rsi_ma: 30
+  vwap_source: "hlc3"
+  vwap_bands_calc_mode: "Standard Deviation"
+  vwap_band_mult_1: 1.0
+  vwap_band_mult_2: 2.0
+  vwap_band_mult_3: 3.0
+
+  up_angle_ema: 40
   
-  dn_rsi_low: 27
-  dn_rsi_high: 48
-  dn_angle_ema: -60
-  dn_angle_vwma: -30
-  dn_angle_rsi_ma: -30
+  dn_angle_ema: -40
 
   lot-size:
     small: 6

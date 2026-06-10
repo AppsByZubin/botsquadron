@@ -408,12 +408,12 @@ async def nifty50_engine(strategy, mode, param_data):
         
         # init bot
         strategy_key = str(strategy or "").strip().lower()
-        vwma_ema_st_key = str(constants.VWMA_EMA_ST).strip().lower()
+        vwap_ema_st_key = str(constants.VWAP_EMA_ST).strip().lower()
 
         strategy_cls = None
-        if strategy_key == vwma_ema_st_key:
-            from index.nifty50.strategy import VwmaEmaStStrategy
-            strategy_cls = VwmaEmaStStrategy
+        if strategy_key == vwap_ema_st_key:
+            from index.nifty50.strategy import VwapEmaStStrategy
+            strategy_cls = VwapEmaStStrategy
         
         if strategy_cls is None:
             logger.error(f"Unsupported strategy: {strategy}. Exiting.")

@@ -4,6 +4,7 @@ import os
 import yaml
 import pandas as pd
 import math
+from collections import deque
 from threading import RLock
 from zoneinfo import ZoneInfo
 import common.constants as constants
@@ -23,17 +24,18 @@ from utils.generic_utils import (
 
 ist = ZoneInfo("Asia/Kolkata")
 
-logger = logger.create_logger("VwmaEmaStStrategyLogger")
+logger = logger.create_logger("VwapEmaStStrategyLogger")
 
 
-class VwmaEmaStStrategy:
+class VwapEmaStStrategy:
     """
-    Spot-only VWMA/EMA/Supertrend intraday strategy.
+    Spot-only VWAP/EMA/Supertrend intraday strategy.
 
     Flow:
     1) Build index candles from ticks.
-    2) Compute EMA, RSI-MA, ATR, ADX, 1-minute/5-minute Supertrend and price-action context.
-    3) Delegate live trade lifecycle to order manager.
+    2) Compute session VWAP bands, EMA, ATR, ADX, 1-minute Supertrend and price-action context.
+    3) Enter on the GarageForBots-style VWAP band + EMA + Supertrend setup.
+    4) Delegate live trade lifecycle to order manager.
     """
     def __init__(
         self,
@@ -73,6 +75,7 @@ class VwmaEmaStStrategy:
         self._last_indicator_row = -1
         self._fast_vwap_day: Optional[str] = None
         self._fast_cum_pv = 0.0
+        self._fast_cum_pv2 = 0.0
         self._fast_cum_vol = 0.0
         self._candle_lock = RLock()
 
@@ -126,6 +129,7 @@ class VwmaEmaStStrategy:
             sp.get("enable_trading_engine", self.params.get("enable_trading_engine", True)),
             True,
         )
+        self.adx_value_queue = deque(maxlen=3)
 
         self._trader_sentiment = ht.get("trader-sentiment", constants.SIDEWAYS)
         self._daily_sentiment = ht.get("daily", ht.get("trader-sentiment", constants.SIDEWAYS))
@@ -140,16 +144,20 @@ class VwmaEmaStStrategy:
             "low": pd.Series(dtype="float64"),
             "close": pd.Series(dtype="float64"),
             "fut_volume": pd.Series(dtype="float64"),
-            "vwma_25": pd.Series(dtype="float64"),
+            "vwap_source": pd.Series(dtype="float64"),
             "vwap": pd.Series(dtype="float64"),
+            "vwap_stdev": pd.Series(dtype="float64"),
+            "vwap_band_basis": pd.Series(dtype="float64"),
+            "vwap_upper_band_1": pd.Series(dtype="float64"),
+            "vwap_lower_band_1": pd.Series(dtype="float64"),
+            "vwap_upper_band_2": pd.Series(dtype="float64"),
+            "vwap_lower_band_2": pd.Series(dtype="float64"),
+            "vwap_upper_band_3": pd.Series(dtype="float64"),
+            "vwap_lower_band_3": pd.Series(dtype="float64"),
             "ema_9": pd.Series(dtype="float64"),
             "atr_14": pd.Series(dtype="float64"),
             "adx_14": pd.Series(dtype="float64"),
-            "rsi_7": pd.Series(dtype="float64"),
-            "rsi_ma_14": pd.Series(dtype="float64"),
             "angle_ema_9": pd.Series(dtype="float64"),
-            "angle_vwma_25": pd.Series(dtype="float64"),
-            "angle_rsi_ma_14": pd.Series(dtype="float64"),
             "st_atr_10": pd.Series(dtype="float64"),
             "st_upperbound": pd.Series(dtype="float64"),
             "st_lowerbound": pd.Series(dtype="float64"),
@@ -158,12 +166,6 @@ class VwmaEmaStStrategy:
             "st_phase": pd.Series(dtype="object"),
             "st_turn_green": pd.Series(dtype="bool"),
             "st_turn_red": pd.Series(dtype="bool"),
-            "st_5min_time": pd.Series(dtype="datetime64[ns]"),
-            "supertrend_5min": pd.Series(dtype="float64"),
-            "st_5min_direction": pd.Series(dtype="float64"),
-            "st_5min_phase": pd.Series(dtype="object"),
-            "st_5min_turn_green": pd.Series(dtype="bool"),
-            "st_5min_turn_red": pd.Series(dtype="bool"),
 
             "candle_range": pd.Series(dtype="float64"),
             "volatile_count":pd.Series(dtype="float64"),
@@ -176,7 +178,6 @@ class VwmaEmaStStrategy:
             "is_bearish_thrust": pd.Series(dtype="bool"),
             "is_bullish_thrust":pd.Series(dtype="bool")
         })
-        self.df_index_5min = self._empty_5min_index_frame()
 
         self._max_order_counter = int(sp.get("trade-per-day", sp.get("trade_per_day", 2)) or 2)
         self._order_counter = 0
@@ -642,7 +643,7 @@ class VwmaEmaStStrategy:
         return None
 
     def on_ws_reconnected(self):
-        logger.info("WebSocket reconnected; vwma_ema_st strategy state preserved.")
+        logger.info("WebSocket reconnected; vwap_ema_st strategy state preserved.")
 
     # ------------------------------------------------------------------
     # WS message handler (called by engine)
@@ -983,31 +984,6 @@ class VwmaEmaStStrategy:
         numeric = pd.to_numeric(series, errors="coerce").astype(float)
         return numeric.ewm(span=int(length), adjust=False, min_periods=int(length)).mean()
 
-    @staticmethod
-    def _calculate_wma(series: pd.Series, length: int) -> pd.Series:
-        length = int(length)
-        numeric = pd.to_numeric(series, errors="coerce").astype(float)
-        weights = np.arange(1, length + 1, dtype="float64")
-        weight_sum = float(weights.sum())
-        return numeric.rolling(window=length, min_periods=length).apply(
-            lambda values: float(np.dot(values, weights) / weight_sum),
-            raw=True,
-        )
-
-    def _calculate_rsi(self, length: int = 7) -> pd.Series:
-        close = pd.to_numeric(self.df_index["close"], errors="coerce").astype(float)
-        delta = close.diff()
-        gain = delta.clip(lower=0.0)
-        loss = (-delta).clip(lower=0.0)
-        avg_gain = self._wilder_rma(gain, length)
-        avg_loss = self._wilder_rma(loss, length)
-        rs = avg_gain / avg_loss.replace(0, np.nan)
-        rsi = 100.0 - (100.0 / (1.0 + rs))
-        rsi = rsi.mask((avg_loss == 0) & (avg_gain > 0), 100.0)
-        rsi = rsi.mask((avg_gain == 0) & (avg_loss > 0), 0.0)
-        rsi = rsi.mask((avg_gain == 0) & (avg_loss == 0), 50.0)
-        return rsi.replace([np.inf, -np.inf], np.nan)
-
     def _calculate_atr(self, length: int = 14) -> pd.Series:
         high = pd.to_numeric(self.df_index["high"], errors="coerce").astype(float)
         low = pd.to_numeric(self.df_index["low"], errors="coerce").astype(float)
@@ -1115,157 +1091,12 @@ class VwmaEmaStStrategy:
             }
         )
 
-    @staticmethod
-    def _empty_5min_index_frame() -> pd.DataFrame:
-        return pd.DataFrame({
-            "time": pd.Series(dtype="datetime64[ns]"),
-            "available_time": pd.Series(dtype="datetime64[ns]"),
-            "open": pd.Series(dtype="float64"),
-            "high": pd.Series(dtype="float64"),
-            "low": pd.Series(dtype="float64"),
-            "close": pd.Series(dtype="float64"),
-            "candle_count": pd.Series(dtype="int64"),
-            "st_atr_10": pd.Series(dtype="float64"),
-            "st_upperbound": pd.Series(dtype="float64"),
-            "st_lowerbound": pd.Series(dtype="float64"),
-            "supertrend": pd.Series(dtype="float64"),
-            "st_direction": pd.Series(dtype="float64"),
-            "st_phase": pd.Series(dtype="object"),
-            "st_turn_green": pd.Series(dtype="bool"),
-            "st_turn_red": pd.Series(dtype="bool"),
-        })
-
-    def _reset_5min_indicator_columns(self) -> None:
-        if self.df_index is None:
-            return
-
-        self.df_index["st_5min_time"] = pd.Series(pd.NaT, index=self.df_index.index, dtype="datetime64[ns]")
-        self.df_index["supertrend_5min"] = pd.Series(np.nan, index=self.df_index.index, dtype="float64")
-        self.df_index["st_5min_direction"] = pd.Series(np.nan, index=self.df_index.index, dtype="float64")
-        self.df_index["st_5min_phase"] = pd.Series(None, index=self.df_index.index, dtype="object")
-        self.df_index["st_5min_turn_green"] = pd.Series(False, index=self.df_index.index, dtype="bool")
-        self.df_index["st_5min_turn_red"] = pd.Series(False, index=self.df_index.index, dtype="bool")
-
-    def _sync_5min_supertrend_to_index(self) -> None:
-        self._reset_5min_indicator_columns()
-        if self.df_index is None or self.df_index.empty or self.df_index_5min is None or self.df_index_5min.empty:
-            return
-
-        left = pd.DataFrame({
-            "_idx": self.df_index.index,
-            "time": pd.to_datetime(self.df_index["time"], errors="coerce"),
-        }).dropna(subset=["time"])
-        if left.empty:
-            return
-
-        right = self.df_index_5min[[
-            "available_time",
-            "time",
-            "supertrend",
-            "st_direction",
-            "st_phase",
-            "st_turn_green",
-            "st_turn_red",
-        ]].copy()
-        right["available_time"] = pd.to_datetime(right["available_time"], errors="coerce")
-        right["time"] = pd.to_datetime(right["time"], errors="coerce")
-        right = right.dropna(subset=["available_time"]).sort_values("available_time")
-        if right.empty:
-            return
-
-        right = right.rename(columns={
-            "available_time": "time",
-            "time": "st_5min_time",
-            "supertrend": "supertrend_5min",
-            "st_direction": "st_5min_direction",
-            "st_phase": "st_5min_phase",
-            "st_turn_green": "st_5min_turn_green",
-            "st_turn_red": "st_5min_turn_red",
-        })
-        merged = pd.merge_asof(
-            left.sort_values("time"),
-            right,
-            on="time",
-            direction="backward",
-        ).set_index("_idx")
-
-        for col in [
-            "st_5min_time",
-            "supertrend_5min",
-            "st_5min_direction",
-            "st_5min_phase",
-            "st_5min_turn_green",
-            "st_5min_turn_red",
-        ]:
-            if col in merged:
-                if col in {"st_5min_turn_green", "st_5min_turn_red"}:
-                    values = merged[col].map(
-                        lambda value: bool(value) if pd.notna(value) else False
-                    ).to_numpy(dtype=bool)
-                else:
-                    values = merged[col].to_numpy()
-                self.df_index.loc[merged.index, col] = values
-
-    def _apply_5min_supertrend(self, atr_period: int, factor: float) -> None:
-        self.df_index_5min = self._empty_5min_index_frame()
-        self._reset_5min_indicator_columns()
-        if self.df_index is None or self.df_index.empty:
-            return
-
-        df_src = self.df_index[["time", "open", "high", "low", "close"]].copy()
-        df_src["time"] = pd.to_datetime(df_src["time"], errors="coerce")
-        for col in ["open", "high", "low", "close"]:
-            df_src[col] = pd.to_numeric(df_src[col], errors="coerce")
-        df_src = df_src.dropna(subset=["time", "open", "high", "low", "close"]).sort_values("time")
-        if df_src.empty:
-            return
-
-        df_src["bucket"] = df_src["time"].dt.floor("5min")
-        df_5min = (
-            df_src.groupby("bucket", sort=True)
-            .agg(
-                open=("open", "first"),
-                high=("high", "max"),
-                low=("low", "min"),
-                close=("close", "last"),
-                candle_count=("close", "size"),
-            )
-            .reset_index()
-            .rename(columns={"bucket": "time"})
-        )
-        latest_minute = df_src["time"].max().floor("min")
-        df_5min["available_time"] = df_5min["time"] + pd.Timedelta(minutes=4)
-        df_5min = df_5min[df_5min["available_time"] <= latest_minute].reset_index(drop=True)
-        if df_5min.empty:
-            return
-
-        st_5min = self._calculate_supertrend(
-            high=df_5min["high"],
-            low=df_5min["low"],
-            close=df_5min["close"],
-            atr_period=atr_period,
-            factor=factor,
-        )
-        for col in ["st_atr_10", "st_upperbound", "st_lowerbound", "supertrend", "st_direction"]:
-            df_5min[col] = pd.Series(st_5min[col].to_numpy(), index=df_5min.index, dtype="float64")
-
-        st_direction = df_5min["st_direction"]
-        prev_st_direction = st_direction.shift(1)
-        df_5min["st_phase"] = np.select(
-            [st_direction < 0, st_direction > 0],
-            ["green", "red"],
-            default=None,
-        )
-        df_5min["st_turn_green"] = (st_direction < 0) & (prev_st_direction > 0)
-        df_5min["st_turn_red"] = (st_direction > 0) & (prev_st_direction < 0)
-        self.df_index_5min = df_5min
-        self._sync_5min_supertrend_to_index()
-
     def _reset_fast_indicator_state_from_frame(self) -> None:
         if self.df_index is None or self.df_index.empty:
             self._last_indicator_row = -1
             self._fast_vwap_day = None
             self._fast_cum_pv = 0.0
+            self._fast_cum_pv2 = 0.0
             self._fast_cum_vol = 0.0
             return
 
@@ -1273,18 +1104,25 @@ class VwmaEmaStStrategy:
         minute_key = self.df_index["time"].astype(str).str.slice(0, 16)
         day_key = str(minute_key.iloc[-1])[:10]
         same_day = minute_key.str.slice(0, 10) == day_key
-        close = pd.to_numeric(self.df_index["close"], errors="coerce")
+        source_raw = self.df_index["vwap_source"] if "vwap_source" in self.df_index.columns else self.df_index["close"]
+        source = pd.to_numeric(source_raw, errors="coerce")
+        if source.isna().all():
+            source = pd.to_numeric(self.df_index["close"], errors="coerce")
         volume = pd.to_numeric(self.df_index["fut_volume"], errors="coerce")
-        pv = (close * volume).where(same_day)
+        pv = (source * volume).where(same_day)
+        pv2 = ((source ** 2) * volume).where(same_day)
         self._fast_vwap_day = day_key
         self._fast_cum_pv = float(pv.sum(skipna=True))
+        self._fast_cum_pv2 = float(pv2.sum(skipna=True))
         self._fast_cum_vol = float(volume.where(same_day).sum(skipna=True))
         self._last_indicator_row = last_idx
 
     def _apply_indicators(self):
         """
-        Applies hybrid VWMA/EMA/Supertrend indicators using spot price and
-        Nifty future volume.
+        Applies hybrid indicators using spot price and Nifty future volume:
+        - Session VWAP with bands
+        - EMA 9, ATR 14, ADX 14
+        - Supertrend on 1-minute candles
         """
         if self.df_index.empty:
             return
@@ -1320,27 +1158,78 @@ class VwmaEmaStStrategy:
         for col in ["open", "high", "low", "close", "volume"]:
             df_merged[col] = pd.to_numeric(df_merged[col], errors="coerce")
         df_merged["volume"] = df_merged["volume"].fillna(0.0)
+        df_merged["volume"] = df_merged["volume"].mask(df_merged["volume"] <= 0, 1.0)
         df_merged["date"] = df_merged["time"].dt.date
-        df_merged["pv"] = df_merged["close"] * df_merged["volume"]
+
+        source_name = str(sp.get("vwap_source", "hlc3") or "hlc3").strip().lower().replace(" ", "")
+        if source_name == "open":
+            df_merged["vwap_source"] = df_merged["open"]
+        elif source_name == "high":
+            df_merged["vwap_source"] = df_merged["high"]
+        elif source_name == "low":
+            df_merged["vwap_source"] = df_merged["low"]
+        elif source_name == "close":
+            df_merged["vwap_source"] = df_merged["close"]
+        elif source_name == "hl2":
+            df_merged["vwap_source"] = (df_merged["high"] + df_merged["low"]) / 2.0
+        elif source_name == "ohlc4":
+            df_merged["vwap_source"] = (
+                df_merged["open"] + df_merged["high"] + df_merged["low"] + df_merged["close"]
+            ) / 4.0
+        else:
+            df_merged["vwap_source"] = (df_merged["high"] + df_merged["low"] + df_merged["close"]) / 3.0
+
+        df_merged["pv"] = df_merged["vwap_source"] * df_merged["volume"]
+        df_merged["pv2"] = (df_merged["vwap_source"] ** 2) * df_merged["volume"]
         df_merged["cum_pv"] = df_merged.groupby("date")["pv"].cumsum()
         df_merged["cum_vol"] = df_merged.groupby("date")["volume"].cumsum()
+        df_merged["cum_pv2"] = df_merged.groupby("date")["pv2"].cumsum()
+        df_merged["vwap"] = df_merged["cum_pv"] / df_merged["cum_vol"].replace(0.0, np.nan)
+        variance = (df_merged["cum_pv2"] / df_merged["cum_vol"].replace(0.0, np.nan)) - (df_merged["vwap"] ** 2)
+        df_merged["vwap_stdev"] = np.sqrt(np.maximum(variance, 0.0))
+
+        calc_mode = str(
+            sp.get("vwap_bands_calc_mode", sp.get("vwap_band_calc_mode", "Standard Deviation"))
+            or "Standard Deviation"
+        ).strip().lower()
+        if calc_mode == "percentage":
+            df_merged["vwap_band_basis"] = df_merged["vwap"] * 0.01
+        else:
+            df_merged["vwap_band_basis"] = df_merged["vwap_stdev"]
+
+        band_mult_1 = safe_float(
+            sp.get("bandMult_1", sp.get("vwap_band_mult_1", sp.get("band_mult_1", 1.0)))
+        )
+        band_mult_2 = safe_float(
+            sp.get("bandMult_2", sp.get("vwap_band_mult_2", sp.get("band_mult_2", 2.0)))
+        )
+        band_mult_3 = safe_float(
+            sp.get("bandMult_3", sp.get("vwap_band_mult_3", sp.get("band_mult_3", 3.0)))
+        )
+        band_mult_1 = 1.0 if band_mult_1 is None else band_mult_1
+        band_mult_2 = 2.0 if band_mult_2 is None else band_mult_2
+        band_mult_3 = 3.0 if band_mult_3 is None else band_mult_3
+
+        df_merged["vwap_upper_band_1"] = df_merged["vwap"] + df_merged["vwap_band_basis"] * band_mult_1
+        df_merged["vwap_lower_band_1"] = df_merged["vwap"] - df_merged["vwap_band_basis"] * band_mult_1
+        df_merged["vwap_upper_band_2"] = df_merged["vwap"] + df_merged["vwap_band_basis"] * band_mult_2
+        df_merged["vwap_lower_band_2"] = df_merged["vwap"] - df_merged["vwap_band_basis"] * band_mult_2
+        df_merged["vwap_upper_band_3"] = df_merged["vwap"] + df_merged["vwap_band_basis"] * band_mult_3
+        df_merged["vwap_lower_band_3"] = df_merged["vwap"] - df_merged["vwap_band_basis"] * band_mult_3
 
         row_index = df_merged["_row_index"].to_numpy()
-        self.df_index.loc[row_index, "vwap"] = (
-            df_merged["cum_pv"] / df_merged["cum_vol"].replace(0, np.nan)
-        ).to_numpy(dtype="float64")
+        self.df_index.loc[row_index, "vwap_source"] = df_merged["vwap_source"].to_numpy(dtype="float64")
+        self.df_index.loc[row_index, "vwap"] = df_merged["vwap"].to_numpy(dtype="float64")
+        self.df_index.loc[row_index, "vwap_stdev"] = df_merged["vwap_stdev"].to_numpy(dtype="float64")
+        self.df_index.loc[row_index, "vwap_band_basis"] = df_merged["vwap_band_basis"].to_numpy(dtype="float64")
+        for idx_num in [1, 2, 3]:
+            self.df_index.loc[row_index, f"vwap_upper_band_{idx_num}"] = df_merged[f"vwap_upper_band_{idx_num}"].to_numpy(dtype="float64")
+            self.df_index.loc[row_index, f"vwap_lower_band_{idx_num}"] = df_merged[f"vwap_lower_band_{idx_num}"].to_numpy(dtype="float64")
         self.df_index.loc[row_index, "fut_volume"] = df_merged["volume"].to_numpy(dtype="float64")
 
         latest_time = self.df_index["time"].iloc[-1] if not self.df_index.empty else None
         latest_volume = df_merged["volume"].iloc[-1] if not df_merged.empty else None
         logger.info(f"Current Future index minute:{latest_time} , Finalizing index volume: {latest_volume}")
-
-        vwma_len = max(1, int(sp.get("vwma_len", 25) or 25))
-        roll_pv = df_merged["pv"].rolling(window=vwma_len, min_periods=1).sum()
-        roll_vol = df_merged["volume"].rolling(window=vwma_len, min_periods=1).sum()
-        self.df_index.loc[row_index, "vwma_25"] = (
-            roll_pv / roll_vol.replace(0, np.nan)
-        ).to_numpy(dtype="float64")
 
         high = pd.to_numeric(self.df_index["high"], errors="coerce")
         low = pd.to_numeric(self.df_index["low"], errors="coerce")
@@ -1358,20 +1247,12 @@ class VwmaEmaStStrategy:
         if len(self.df_index) >= 14:
             st_atr_period = int(sp.get("supertrend_atr_period", 10) or 10)
             st_factor = float(sp.get("supertrend_factor", 3) or 3)
-            st_5min_atr_period = int(sp.get("supertrend_5min_atr_period", st_atr_period) or st_atr_period)
-            st_5min_factor = float(sp.get("supertrend_5min_factor", st_factor) or st_factor)
 
             self.df_index["ema_9"] = self._calculate_ema(close, length=9)
-            self.df_index["rsi_7"] = self._calculate_rsi(length=7)
-            self.df_index["rsi_ma_14"] = self.df_index["rsi_7"].rolling(window=14, min_periods=14).mean()
 
             slope_ema = (self.df_index["ema_9"].astype(float) - self.df_index["ema_9"].shift(self._slope_window).astype(float)) / self._slope_window
-            slope_vwma = (self.df_index["vwma_25"].astype(float) - self.df_index["vwma_25"].shift(self._slope_window).astype(float)) / self._slope_window
-            slope_rsi_ma = (self.df_index["rsi_ma_14"].astype(float) - self.df_index["rsi_ma_14"].shift(self._slope_window).astype(float)) / self._slope_window
 
             self.df_index["angle_ema_9"] = np.degrees(np.arctan(np.clip(slope_ema, -10, 10)))
-            self.df_index["angle_vwma_25"] = np.degrees(np.arctan(np.clip(slope_vwma, -10, 10)))
-            self.df_index["angle_rsi_ma_14"] = np.degrees(np.arctan(np.clip(slope_rsi_ma, -10, 10)))
 
             self.df_index["atr_14"] = self._calculate_atr(length=14)
             adx_14 = talib.ADX(
@@ -1381,6 +1262,9 @@ class VwmaEmaStStrategy:
                 timeperiod=14,
             )
             self.df_index["adx_14"] = pd.Series(np.asarray(adx_14, dtype="float64"), index=self.df_index.index)
+            latest_adx_14 = safe_float(self.df_index["adx_14"].iloc[-1])
+            if latest_adx_14 is not None:
+                self.adx_value_queue.append(latest_adx_14)
 
             st = self._calculate_supertrend(
                 high=high,
@@ -1401,7 +1285,6 @@ class VwmaEmaStStrategy:
             )
             self.df_index["st_turn_green"] = (st_direction < 0) & (prev_st_direction > 0)
             self.df_index["st_turn_red"] = (st_direction > 0) & (prev_st_direction < 0)
-            self._apply_5min_supertrend(st_5min_atr_period, st_5min_factor)
 
             self.check_price_action(safe_float(self.df_index["atr_14"].iloc[-1]))
 
@@ -1466,8 +1349,8 @@ class VwmaEmaStStrategy:
     def _trading_engine_active(self):
         """
         Entry engine for new positions.
-        Applies warm-up, volatility, VWMA/EMA, RSI-MA and Supertrend filters
-        before switching order state to WAITING.
+        Applies warm-up, volatility, VWAP-band, EMA, ADX and Supertrend filters
+        before switching the order state to WAITING.
         """
         try:
             if not self.enable_trading_engine:
@@ -1493,7 +1376,10 @@ class VwmaEmaStStrategy:
             atr_14 = safe_float(latest.get('atr_14'))
             if atr_14 is None:
                 return
-            if atr_14 < 7:
+            min_atr_14 = safe_float(sp.get("min_atr_14", self.params.get("min_atr_14", 6)))
+            if min_atr_14 is None:
+                min_atr_14 = 6.0
+            if atr_14 < min_atr_14:
                 logger.debug(f"ATR range is low {atr_14}")
                 return
 
@@ -1508,17 +1394,38 @@ class VwmaEmaStStrategy:
             if self._is_daily_loss_limit_active(ref_ts):
                 return
 
-            rsi_ma_14_val = latest.get('rsi_ma_14', np.nan)
-            previous_rsi_ma_14_val = self.df_index.iloc[-2].get('rsi_ma_14', np.nan)
-            if pd.isna(rsi_ma_14_val) or pd.isna(previous_rsi_ma_14_val):
+            ema_9 = safe_float(latest.get('ema_9', np.nan))
+            vwap_session = safe_float(latest.get('vwap'))
+            vwap_upper_band_1 = safe_float(latest.get('vwap_upper_band_1'))
+            vwap_lower_band_1 = safe_float(latest.get('vwap_lower_band_1'))
+            vwap_upper_band_2 = safe_float(latest.get('vwap_upper_band_2'))
+            vwap_lower_band_2 = safe_float(latest.get('vwap_lower_band_2'))
+            vwap_upper_band_3 = safe_float(latest.get('vwap_upper_band_3'))
+            vwap_lower_band_3 = safe_float(latest.get('vwap_lower_band_3'))
+            angle_ema_9 = safe_float(latest.get('angle_ema_9', np.nan))
+            if (
+                ema_9 is None
+                or vwap_session is None
+                or vwap_upper_band_1 is None
+                or vwap_lower_band_1 is None
+                or vwap_upper_band_2 is None
+                or vwap_lower_band_2 is None
+                or vwap_upper_band_3 is None
+                or vwap_lower_band_3 is None
+                or angle_ema_9 is None
+            ):
                 return
-            rsi_ma_14 = math.ceil(float(rsi_ma_14_val))
-            previous_rsi_ma_14 = math.ceil(float(previous_rsi_ma_14_val))
-            ema_9 = float(latest.get('ema_9', np.nan))
-            vma_25 = float(latest.get('vwma_25', np.nan))
-            angle_ema_9 = float(latest.get('angle_ema_9', np.nan))
-            angle_vwma_25 = float(latest.get('angle_vwma_25', np.nan))
-            angle_rsi_ma_14 = float(latest.get('angle_rsi_ma_14', np.nan))
+
+            adx_14 = safe_float(latest.get('adx_14'))
+            if adx_14 is None or len(self.adx_value_queue) < 3:
+                logger.debug(
+                    f"ADX data insufficient for trend strength evaluation: "
+                    f"adx_14={adx_14}, adx_queue_len={len(self.adx_value_queue)}"
+                )
+                return
+            adx_values = list(self.adx_value_queue)
+            adx_is_rising = adx_values[0] < adx_values[1] < adx_values[2]
+
             is_bearish_thrust = self._indicator_flag_is_true(latest.get('is_bearish_thrust', False))
             is_bullish_thrust = self._indicator_flag_is_true(latest.get('is_bullish_thrust', False))
             future_volume = safe_float(latest.get('fut_volume', np.nan))
@@ -1529,73 +1436,42 @@ class VwmaEmaStStrategy:
             st_phase = self._resolve_st_phase(latest)
             st_turn_green = self._indicator_flag_is_true(latest.get('st_turn_green', False))
             st_turn_red = self._indicator_flag_is_true(latest.get('st_turn_red', False))
-            supertrend_5min = safe_float(latest.get("supertrend_5min", np.nan))
-            st_5min_direction = safe_float(latest.get("st_5min_direction", np.nan))
-            st_5min_phase_raw = latest.get("st_5min_phase")
-            st_5min_phase = (
-                str(st_5min_phase_raw).strip().lower()
-                if st_5min_phase_raw is not None and not pd.isna(st_5min_phase_raw)
-                else ""
-            )
-            if st_5min_phase not in {"green", "red"}:
-                if st_5min_direction is not None and st_5min_direction < 0:
-                    st_5min_phase = "green"
-                elif st_5min_direction is not None and st_5min_direction > 0:
-                    st_5min_phase = "red"
-                else:
-                    st_5min_phase = None
-            st_5min_time = latest.get("st_5min_time")
-            st_5min_turn_green = self._indicator_flag_is_true(latest.get("st_5min_turn_green", False))
-            st_5min_turn_red = self._indicator_flag_is_true(latest.get("st_5min_turn_red", False))
-            if supertrend_5min is None or st_5min_direction is None or st_5min_phase is None:
-                logger.debug("5-minute Supertrend not ready for entry direction gate")
-                return
 
-            up_angle_ema = float(sp.get("up_angle_ema", self.params.get("up_angle_ema", 50)))
-            up_angle_vwma = float(sp.get("up_angle_vwma", self.params.get("up_angle_vwma", 20)))
-            up_angle_rsi_ma = float(sp.get("up_angle_rsi_ma", self.params.get("up_angle_rsi_ma", 20)))
+            up_angle_ema = float(sp.get("up_angle_ema", self.params.get("up_angle_ema", 40)))
+            adx_threshold = float(sp.get("adx_threshold", self.params.get("adx_threshold", 20)))
 
-            dn_angle_ema = float(sp.get("dn_angle_ema", self.params.get("dn_angle_ema", -50)))
-            dn_angle_vwma = float(sp.get("dn_angle_vwma", self.params.get("dn_angle_vwma", -20)))
-            dn_angle_rsi_ma = float(sp.get("dn_angle_rsi_ma", self.params.get("dn_angle_rsi_ma", -20)))
+            dn_angle_ema = float(sp.get("dn_angle_ema", self.params.get("dn_angle_ema", -40)))
             orb_enabled = False
             orb_side = None
 
             logger.debug(
-                f"Engine check rsi_ma={rsi_ma_14}/{previous_rsi_ma_14}, ema={ema_9}, vwma={vma_25}, "
-                f"angle_ema={angle_ema_9}, angle_vwma={angle_vwma_25}, angle_rsi_ma={angle_rsi_ma_14}, "
+                f"Engine check ema={ema_9}, "
+                f"vwap={vwap_session}, vwap_band_1={vwap_lower_band_1}/{vwap_upper_band_1}, "
+                f"vwap_band_2={vwap_lower_band_2}/{vwap_upper_band_2}, "
+                f"vwap_band_3={vwap_lower_band_3}/{vwap_upper_band_3}, "
+                f"adx={adx_14}, adx_queue={adx_values}, adx_is_rising={adx_is_rising}, "
+                f"angle_ema={angle_ema_9}, "
                 f"future_volume={future_volume}, "
                 f"supertrend={supertrend}, st_direction={st_direction}, "
                 f"st_phase={st_phase}, "
                 f"st_turn_green={st_turn_green}, st_turn_red={st_turn_red}, "
-                f"st_5min_time={st_5min_time}, supertrend_5min={supertrend_5min}, "
-                f"st_5min_direction={st_5min_direction}, st_5min_phase={st_5min_phase}, "
-                f"st_5min_turn_green={st_5min_turn_green}, st_5min_turn_red={st_5min_turn_red}, "
                 f"orb_side={orb_side}, bullish_thrust={is_bullish_thrust}, bearish_thrust={is_bearish_thrust}, "
                 f"current_candle_range={safe_float(self.df_index.iloc[-1].get('candle_range', np.nan))}"
             )
 
             call_setup = (
-                (angle_rsi_ma_14 > up_angle_rsi_ma)
-                and (ema_9 > vma_25)
+                (supertrend < vwap_lower_band_1)
                 and (angle_ema_9 > up_angle_ema)
-                and (angle_vwma_25 > up_angle_vwma)
                 and (st_phase == "green")
                 and (st_direction < 0)
-                and (st_5min_phase == "green")
-                and (st_5min_direction < 0)
                 and ((not orb_enabled) or (orb_side == constants.CALL))
             )
 
             put_setup = (
-                (angle_rsi_ma_14 < dn_angle_rsi_ma)
-                and (ema_9 < vma_25)
+                (supertrend > vwap_upper_band_1)
                 and (angle_ema_9 < dn_angle_ema)
-                and (angle_vwma_25 < dn_angle_vwma)
                 and (st_phase == "red")
                 and (st_direction > 0)
-                and (st_5min_phase == "red")
-                and (st_5min_direction > 0)
                 and ((not orb_enabled) or (orb_side == constants.PUT))
             )
 
@@ -1605,6 +1481,15 @@ class VwmaEmaStStrategy:
                 lot = self._calculate_lot_size(constants.CALL, is_bullish_thrust, is_bearish_thrust)
                 if lot <= 0:
                     return
+
+                if adx_14 > adx_threshold and adx_is_rising:
+                    lot += 1
+
+                if supertrend < vwap_lower_band_2:
+                    lot += 1
+
+                if supertrend < vwap_lower_band_3:
+                    lot += 2
 
                 self._order_container["side"] = constants.CALL
                 self._order_container["status"] = constants.WAITING
@@ -1616,6 +1501,15 @@ class VwmaEmaStStrategy:
                 lot = self._calculate_lot_size(constants.PUT, is_bullish_thrust, is_bearish_thrust)
                 if lot <= 0:
                     return
+
+                if adx_14 > adx_threshold and adx_is_rising:
+                    lot += 1
+
+                if supertrend > vwap_upper_band_2:
+                    lot += 1
+
+                if supertrend > vwap_upper_band_3:
+                    lot += 2
 
                 self._order_container["side"] = constants.PUT
                 self._order_container["status"] = constants.WAITING
@@ -1977,20 +1871,20 @@ class VwmaEmaStStrategy:
             if self._daily_sentiment == constants.BULLISH and is_bullish_thrust == True:
                 return large
             elif  self._daily_sentiment == constants.BULLISH:
-                return large
-            elif self._daily_sentiment == constants.SIDEWAYS:
                 return medium
-            elif self._daily_sentiment == constants.BEARISH:
+            elif self._daily_sentiment == constants.SIDEWAYS:
                 return small
+            elif self._daily_sentiment == constants.BEARISH:
+                return 0
         elif side == constants.PUT:
             if self._daily_sentiment == constants.BEARISH and is_bearish_thrust == True:
                 return large
             elif  self._daily_sentiment == constants.BEARISH:
-                return large
-            elif self._daily_sentiment == constants.SIDEWAYS:
                 return medium
-            elif self._daily_sentiment == constants.BULLISH:
+            elif self._daily_sentiment == constants.SIDEWAYS:
                 return small
+            elif self._daily_sentiment == constants.BULLISH:
+                return 0
 
         return small
     
@@ -2311,7 +2205,7 @@ class VwmaEmaStStrategy:
             sl_trigger = None
             option_atr = self.atr5_engine.get_atr(chosen["instrument_key"])
 
-            atr_target_mult = float(sp.get("orb_atr_target_mult", sp.get("atr_target_mult", 10)))
+            atr_target_mult = float(sp.get("orb_atr_target_mult", sp.get("atr_target_mult", 20)))
             atr_sl_mult = float(sp.get("orb_atr_sl_mult", sp.get("atr_sl_mult", 4)))
 
             if option_atr is None or option_atr <= 0:

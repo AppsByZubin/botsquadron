@@ -1,7 +1,7 @@
 # Trendobot
 
 Trendobot is a Python trading bot focused on NIFTY 50 option strategies inside
-BotSquadron. The current live engine routes `nifty50` through the `vwma_ema_st`
+BotSquadron. The current live engine routes `nifty50` through the `vwap_ema_st`
 strategy, subscribes to ticks through NATS/marketfeeder, and manages trades
 through the shared ordersystem client.
 
@@ -14,7 +14,7 @@ real capital.
 - Subscribes to marketfeeder ticks over NATS.
 - Builds NIFTY 50 index and futures candles from live ticks.
 - Selects relevant option contracts around ATM/ITM strikes.
-- Runs the VWMA/EMA/Supertrend strategy.
+- Runs the VWAP/EMA/Supertrend strategy.
 - Places and manages orders through the BotSquadron ordersystem client.
 - Writes order logs, event logs, and daily PnL outputs under `files/execution_results/`.
 - Keeps local OMS ledger copies for mock/debugging.
@@ -100,19 +100,19 @@ export ORDERSYSTEM_BASE_URL="http://localhost:8081"
 Mock mode:
 
 ```bash
-python3 main.py -i nifty50 -s vwma_ema_st -l mock
+python3 main.py -i nifty50 -s vwap_ema_st -l mock
 ```
 
 Sandbox mode:
 
 ```bash
-python3 main.py -i nifty50 -s vwma_ema_st -l sandbox
+python3 main.py -i nifty50 -s vwap_ema_st -l sandbox
 ```
 
 Production mode:
 
 ```bash
-python3 main.py -i nifty50 -s vwma_ema_st -l production
+python3 main.py -i nifty50 -s vwap_ema_st -l production
 ```
 
 Valid execution modes are:
@@ -123,7 +123,7 @@ Valid execution modes are:
 
 Valid strategy currently wired through the NIFTY 50 engine:
 
-- `vwma_ema_st`
+- `vwap_ema_st`
 
 ## Output Files
 
@@ -142,11 +142,11 @@ Typical outputs:
 - `order_status_log.csv`
 - `daily_pnl.csv`
 
-## VWMA/EMA/Supertrend Strategy Notes
+## VWAP/EMA/Supertrend Strategy Notes
 
-The `vwma_ema_st` strategy:
+The `vwap_ema_st` strategy:
 
-- Uses VWMA, EMA, RSI moving average, ATR, and Supertrend filters.
+- Uses session VWAP bands, EMA, ATR, ADX, and 1-minute Supertrend filters.
 - Enters CALL/PUT option trades based on directional setup and configured bias.
 - Normalizes marketfeeder messages before candle building and trade processing.
 - Manages open trades through the configured ordersystem client.
@@ -156,7 +156,7 @@ The `vwma_ema_st` strategy:
 Compile a changed file:
 
 ```bash
-python3 -X pycache_prefix=/tmp/codex-pyc -m py_compile index/nifty50/strategy/vwma_ema_st.py
+python3 -X pycache_prefix=/tmp/codex-pyc -m py_compile index/nifty50/strategy/vwap_ema_st.py
 ```
 
 Run a quick import/compile sweep as needed before live use.

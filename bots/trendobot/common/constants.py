@@ -141,7 +141,7 @@ SMA_SHORT = 5
 SMA_CROSSOVER = "sma_crossover"
 RSI_EMA_ANGLE = "rsi_ema_angle"
 PCR_VWAP_EMA = "pcr_vwap_ema"
-VWMA_EMA_ST = "vwma_ema_st"
+VWAP_EMA_ST = "vwap_ema_st"
 
 BUY = "BUY"
 SELL = "SELL"

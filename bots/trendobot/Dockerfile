@@ -48,4 +48,4 @@ RUN mkdir -p \
 USER app
 
 ENTRYPOINT ["python", "bots/trendobot/main.py"]
-CMD ["--instruments", "nifty50", "--strategy", "vwma_ema_st", "--level", "mock"]
+CMD ["--instruments", "nifty50", "--strategy", "vwap_ema_st", "--level", "mock"]
