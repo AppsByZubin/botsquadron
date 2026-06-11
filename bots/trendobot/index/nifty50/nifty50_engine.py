@@ -409,12 +409,18 @@ async def nifty50_engine(strategy, mode, param_data):
         # init bot
         strategy_key = str(strategy or "").strip().lower()
         vwap_ema_st_key = str(constants.VWAP_EMA_ST).strip().lower()
+        # Accept common typo/alias 'vwma_ema_st' in addition to the canonical 'vwap_ema_st'
+        vwma_ema_st_alias = "vwma_ema_st"
 
         strategy_cls = None
-        if strategy_key == vwap_ema_st_key:
+        if strategy_key in (vwap_ema_st_key, vwma_ema_st_alias):
+            if strategy_key == vwma_ema_st_alias:
+                logger.warning(
+                    "Strategy alias 'vwma_ema_st' used; canonical name is 'vwap_ema_st'."
+                )
             from index.nifty50.strategy import VwapEmaStStrategy
             strategy_cls = VwapEmaStStrategy
-        
+
         if strategy_cls is None:
             logger.error(f"Unsupported strategy: {strategy}. Exiting.")
             sys.exit(constants.FAIL_CODE)

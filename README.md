@@ -129,7 +129,7 @@ python -m index.orchestrator nifty50 sma production
 
 ```bash
 cd bots/trendobot
-python main.py --instruments nifty50 --strategy vwma_ema_st --level mock
+python main.py --instruments nifty50 --strategy vwap_ema_st --level mock
 ```
 
 ### Running haemabot
