@@ -12,7 +12,10 @@
 
 from logger import create_logger
 import common.constants as constants
-import pandas_ta as ta
+try:
+    import pandas_ta as ta
+except ModuleNotFoundError:
+    import pandas_ta_classic as ta
 import numpy as np
 import talib
 

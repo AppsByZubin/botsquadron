@@ -5,7 +5,7 @@ matplotlib
 nats-py
 numpy
 pandas
-pandas_ta
+pandas-ta-classic==0.6.20
 pyarrow
 PyYAML
 requests==2.32.3
