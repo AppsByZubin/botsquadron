@@ -1,0 +1,1 @@
+"""Fibobot trading bot package."""

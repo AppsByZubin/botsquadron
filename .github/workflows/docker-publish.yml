@@ -44,6 +44,9 @@ jobs:
           - service: firebot
             context: .
             dockerfile: bots/firebot/Dockerfile
+          - service: fibobot
+            context: .
+            dockerfile: bots/fibobot/Dockerfile
 
     steps:
       - name: Checkout botsquadron
@@ -183,6 +186,10 @@ jobs:
           if "firebot" in data:
               data["firebot"]["image"]["repository"] = repo
               data["firebot"]["image"]["tag"] = f"firebot-{tag}"
+
+          if "fibobot" in data:
+              data["fibobot"]["image"]["repository"] = repo
+              data["fibobot"]["image"]["tag"] = f"fibobot-{tag}"
 
           with path.open("w") as f:
               yaml.dump(data, f)

@@ -1,4 +1,4 @@
-.PHONY: build build-ordersystem docker-build docker-build-ordersystem docker-build-solobot docker-build-trendobot docker-build-haemabot docker-build-firebot docker-build-all deploy-nats deploy-marketfeeder deploy-all clean test-nats install-python-deps install-trendobot-deps install-haemabot-deps install-firebot-deps
+.PHONY: build build-ordersystem docker-build docker-build-ordersystem docker-build-solobot docker-build-trendobot docker-build-haemabot docker-build-firebot docker-build-fibobot docker-build-all deploy-nats deploy-marketfeeder deploy-all clean test-nats install-python-deps install-trendobot-deps install-haemabot-deps install-firebot-deps install-fibobot-deps
 
 # Build the Go binary
 build:
@@ -32,8 +32,12 @@ docker-build-haemabot:
 docker-build-firebot:
 	docker build -f bots/firebot/Dockerfile -t firebot:latest .
 
+# Build the fibobot Docker image from the repo root so its runtime paths stay stable
+docker-build-fibobot:
+	docker build -f bots/fibobot/Dockerfile -t fibobot:latest .
+
 # Build every runtime image
-docker-build-all: docker-build docker-build-ordersystem docker-build-solobot docker-build-trendobot docker-build-haemabot docker-build-firebot
+docker-build-all: docker-build docker-build-ordersystem docker-build-solobot docker-build-trendobot docker-build-haemabot docker-build-firebot docker-build-fibobot
 
 # Install Python dependencies
 install-python-deps:
@@ -50,6 +54,10 @@ install-haemabot-deps:
 # Install firebot Python dependencies
 install-firebot-deps:
 	cd bots/firebot && pip3 install -r requirements.txt
+
+# Install fibobot Python dependencies
+install-fibobot-deps:
+	cd bots/fibobot && pip3 install -r requirements.txt
 
 # Test NATS communication
 test-nats: install-python-deps
@@ -78,3 +86,4 @@ clean:
 	docker rmi trendobot:latest --force
 	docker rmi haemabot:latest --force
 	docker rmi firebot:latest --force
+	docker rmi fibobot:latest --force

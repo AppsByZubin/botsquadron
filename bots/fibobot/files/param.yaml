@@ -1,0 +1,58 @@
+strategy-parameters:
+  trade-per-day: 1
+  max-open-trades: 1
+  skip-execution: false
+  skip-execution-dates: []
+
+  enable_trading_engine: true
+  signal_tf_min: 5
+  ema_fast: 9
+  ema_slow: 21
+  atr_len: 13
+  atr_mult: 2.718
+  vol_sma_len: 89
+  vol_spike_threshold: 4.669
+  min_vol_mult: 1.0
+  disable_volume_filter: false
+  avoid_exhaustion_entry: true
+  avoid_high_volatility_entry: false
+  allow_breakout_entries: true
+  allow_pullback_entries: true
+
+  use_upstox_previous_ohlc: true
+  require_upstox_previous_ohlc: true
+  previous_ohlc_lookback_days: 10
+
+  option_atr_period: 5
+  use_option_atr_risk: true
+  require_option_atr: false
+  atr_target_mult: 10
+  atr_sl_mult: 3
+  trailing-stop: true
+  trailing-stop-distance: 10.0
+  trail-start-after-points: 0.1
+  sl-limit-gap: 0.5
+  tick-size: 0.05
+
+  take-profit: 0.30
+  stop-loss: 0.20
+  itm_strike_range: 200
+
+  trade_expiry: "2026-06-16"
+  pcr_expiry: "2026-06-16"
+
+  lot-size:
+    small: 1
+    medium: 1
+    large: 1
+
+  trade-window:
+    start: "09:20"
+    end: "15:15"
+
+historical-trends: &historical_trends
+  weekly: "sideways"
+  daily: "sideways"
+  trader-sentiment: "sideways"
+
+historical-trend: *historical_trends
