@@ -417,11 +417,15 @@ async def nifty50_engine(strategy, mode, param_data):
         # init bot
         strategy_key = str(strategy or "").strip().lower()
         hm_ema_adx_key = str(constants.HM_EMA_ADX).strip().lower()
+        hm_ema_adx_v2_key = str(constants.HM_EMA_ADX_V2).strip().lower()
 
         strategy_cls = None
         if strategy_key == hm_ema_adx_key:
             from index.nifty50.strategy import HmEmaAdxStrategy
             strategy_cls = HmEmaAdxStrategy
+        elif strategy_key == hm_ema_adx_v2_key:
+            from index.nifty50.strategy import HmEmaAdxV2Strategy
+            strategy_cls = HmEmaAdxV2Strategy
         
         if strategy_cls is None:
             logger.error(f"Unsupported strategy: {strategy}. Exiting.")

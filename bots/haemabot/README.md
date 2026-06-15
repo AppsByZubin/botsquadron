@@ -1,13 +1,13 @@
 # Haemabot
 
-Haemabot is the NIFTY 50 options bot using the `hm_ema_adx` strategy ported from
-the standalone `haemabot` repository.
+Haemabot is the NIFTY 50 options bot using the `hm_ema_adx` and `hm_ema_adx_v2`
+strategies ported from the standalone `haemabot` repository.
 
 ## Run Locally
 
 ```bash
 cd bots/haemabot
-python main.py --instruments nifty50 --strategy hm_ema_adx --level mock
+python main.py --instruments nifty50 --strategy hm_ema_adx_v2 --level mock
 ```
 
 ## Runtime Wiring

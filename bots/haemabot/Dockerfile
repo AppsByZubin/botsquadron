@@ -48,4 +48,4 @@ RUN mkdir -p \
 USER app
 
 ENTRYPOINT ["python", "bots/haemabot/main.py"]
-CMD ["--instruments", "nifty50", "--strategy", "hm_ema_adx", "--level", "mock"]
+CMD ["--instruments", "nifty50", "--strategy", "hm_ema_adx_v2", "--level", "mock"]

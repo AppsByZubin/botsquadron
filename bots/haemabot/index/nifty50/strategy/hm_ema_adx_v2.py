@@ -27,18 +27,20 @@ from utils.generic_utils import (
 
 ist = ZoneInfo("Asia/Kolkata")
 
-logger = logger.create_logger("HmEmaAdxStrategyLogger")
+logger = logger.create_logger("HmEmaAdxV2StrategyLogger")
 
 
-class HmEmaAdxStrategy:
+class HmEmaAdxV2Strategy:
     """
-    Spot-only EMA + ADX intraday strategy.
+    Spot-only EMA + ADX intraday strategy using 5-minute index candles.
 
     Flow:
-    1) Build index candles from ticks.
+    1) Build 5-minute index candles from ticks.
     2) Compute EMA, RSI-MA, ATR, ADX and price-action context.
     3) Delegate live trade lifecycle to order manager.
     """
+    INDEX_CANDLE_INTERVAL_MINUTES = 5
+
     def __init__(
         self,
         current_date=None,
@@ -63,6 +65,8 @@ class HmEmaAdxStrategy:
         self.future_minutes_processed = future_minutes_processed or {}
         self.curr_index_candle = None
         self.curr_index_minute = None
+        self.curr_index_bucket_minute = None
+        self._index_candle_finalized_since_engine_check = False
         self.curr_fut_candle = None
         self.curr_fut_minute = None
         self.last_fut_bar: Optional[Dict] = None
@@ -472,8 +476,10 @@ class HmEmaAdxStrategy:
                 return df[["time", "open", "high", "low", "close", "volume", "oi"]]
             return df[["time", "open", "high", "low", "close"]]
 
-        df_i = build_df(index_candles, include_volume=False)
-        df_f = build_df(fut_candles, include_volume=True)
+        df_i_raw = build_df(index_candles, include_volume=False)
+        df_f_raw = build_df(fut_candles, include_volume=True)
+        df_i, partial_i = self._bucketize_intraday_frame(df_i_raw, include_volume=False)
+        df_f, partial_f = self._bucketize_intraday_frame(df_f_raw, include_volume=True)
 
         if not df_i.empty:
             first_row = df_i.iloc[0]
@@ -486,15 +492,62 @@ class HmEmaAdxStrategy:
             for minute_key in df_i["time"].astype(str):
                 self.index_minutes_processed[minute_key] = True
 
+        if not partial_i.empty:
+            row = partial_i.iloc[-1].to_dict()
+            self.curr_index_bucket_minute = str(row.get("time") or "")
+            self.curr_index_candle = {
+                "time": self.curr_index_bucket_minute,
+                "open": safe_float(row.get("open")),
+                "high": safe_float(row.get("high")),
+                "low": safe_float(row.get("low")),
+                "close": safe_float(row.get("close")),
+            }
+
         if not df_f.empty:
             self.df_index_future = pd.concat([self.df_index_future, df_f], ignore_index=True)
             self.last_fut_bar = df_f.iloc[-1].to_dict()
             for minute_key in df_f["time"].astype(str):
                 self.future_minutes_processed[minute_key] = True
 
+        if not partial_f.empty:
+            row = partial_f.iloc[-1].to_dict()
+            self.curr_fut_minute = str(row.get("time") or "")
+            self.curr_fut_candle = row
+
         self._refresh_merged_dataframe()
         if not df_i.empty:
             self._apply_indicators_and_engine()
+
+    def _index_bucket_key(self, minute_key: str) -> str:
+        dt_obj = datetime.strptime(str(minute_key), "%Y-%m-%d %H:%M")
+        bucket_minute = (
+            dt_obj.minute // self.INDEX_CANDLE_INTERVAL_MINUTES
+        ) * self.INDEX_CANDLE_INTERVAL_MINUTES
+        return dt_obj.replace(minute=bucket_minute).strftime("%Y-%m-%d %H:%M")
+
+    def _bucketize_intraday_frame(self, df: pd.DataFrame, include_volume: bool) -> tuple[pd.DataFrame, pd.DataFrame]:
+        if df is None or df.empty:
+            return pd.DataFrame(), pd.DataFrame()
+
+        work = df.copy()
+        work["bucket"] = work["time"].apply(self._index_bucket_key)
+        agg = {
+            "time": ("bucket", "first"),
+            "open": ("open", "first"),
+            "high": ("high", "max"),
+            "low": ("low", "min"),
+            "close": ("close", "last"),
+            "minute_count": ("time", "nunique"),
+        }
+        if include_volume:
+            agg["volume"] = ("volume", "sum")
+            agg["oi"] = ("oi", "last")
+
+        grouped = work.groupby("bucket", sort=True).agg(**agg).reset_index(drop=True)
+        complete_mask = pd.to_numeric(grouped["minute_count"], errors="coerce").fillna(0) >= self.INDEX_CANDLE_INTERVAL_MINUTES
+        complete = grouped.loc[complete_mask].drop(columns=["minute_count"], errors="ignore").reset_index(drop=True)
+        partial = grouped.loc[~complete_mask].drop(columns=["minute_count"], errors="ignore").reset_index(drop=True)
+        return complete, partial
 
     def _populate_index_future_data(self):
         if self.index_fur_key is not None:
@@ -599,12 +652,12 @@ class HmEmaAdxStrategy:
 
         logger.error(f"Parameter file not found. Checked paths: {candidate_paths}")
         sys.exit(constants.FAIL_CODE)
-    
+
     def _get_index_fut_path(self):
         # Check if 'data-sources' exists in parameters
         if self.params and 'data-sources' in self.params:
             sources_dict = self.params['data-sources']
-            
+
             # Check directly if 'nifty-volume' is a key in the sources dictionary
             if 'nifty-volume' in sources_dict:
                 return sources_dict['nifty-volume'] # Access the value by its key
@@ -614,7 +667,7 @@ class HmEmaAdxStrategy:
         # Check if 'data-sources' exists in parameters
         if self.params and 'data-sources' in self.params:
             sources_dict = self.params['data-sources']
-            
+
             # Check directly if 'nifty-future' is a key in the sources dictionary
             if 'nifty-future' in sources_dict:
                 return sources_dict['nifty-future'] # Access the value by its key
@@ -696,7 +749,7 @@ class HmEmaAdxStrategy:
         return None
 
     def on_ws_reconnected(self):
-        logger.info("WebSocket reconnected; hm_ema_adx strategy state preserved.")
+        logger.info("WebSocket reconnected; hm_ema_adx_v2 strategy state preserved.")
 
     def get_subscription_instruments(self) -> List[str]:
         instruments: List[str] = []
@@ -916,27 +969,31 @@ class HmEmaAdxStrategy:
             self._try_make_merged_bar()
 
     def _handle_fut_tick(self, minute_key: str, ltp: float) -> None:
-        """Build 1-minute OHLC for FUT using ltp."""
+        """Build 5-minute OHLC for FUT using ltp."""
         try:
             with self._candle_lock:
                 if minute_key is None:
                     return
                 minute_key = str(minute_key)
+                try:
+                    bucket_key = self._index_bucket_key(minute_key)
+                except Exception:
+                    bucket_key = minute_key
 
                 ltp_f = safe_float(ltp)
                 if ltp_f is None or ltp_f <= 0:
                     return
 
-                if self.curr_fut_minute != minute_key:
+                if self.curr_fut_minute != bucket_key:
                     if self.curr_fut_candle is not None:
                         try:
                             self._finalize_fut_candle()
                         except Exception as e:
                             logger.error(f"Error in _finalize_fut_candle: {e}")
 
-                    self.curr_fut_minute = minute_key
+                    self.curr_fut_minute = bucket_key
                     self.curr_fut_candle = {
-                        "time": minute_key,
+                        "time": bucket_key,
                         "open": ltp_f,
                         "high": ltp_f,
                         "low": ltp_f,
@@ -957,25 +1014,29 @@ class HmEmaAdxStrategy:
             logger.error(f"Error in _handle_fut_tick: {e}")
 
     def _handle_index_tick(self, minute_key: str, ltp: float):
-        """Aggregate spot ticks into 1-minute OHLC candles."""
+        """Aggregate spot ticks into 5-minute OHLC candles."""
         with self._candle_lock:
-            # New minute?
-            if self.curr_index_minute is None or minute_key != self.curr_index_minute:
-                # finalize previous candle if exists
+            try:
+                bucket_key = self._index_bucket_key(minute_key)
+            except Exception:
+                bucket_key = minute_key
+
+            self.curr_index_minute = minute_key
+
+            if self.curr_index_bucket_minute is None or bucket_key != self.curr_index_bucket_minute:
                 if self.curr_index_candle is not None:
                     self._finalize_index_candle()
 
-                # start new candle
-                self.curr_index_minute = minute_key
+                self.curr_index_bucket_minute = bucket_key
                 self.curr_index_candle = {
-                    "time": minute_key,
+                    "time": bucket_key,
                     "open": ltp,
                     "high": ltp,
                     "low": ltp,
                     "close": ltp,
                 }
                 # Compute day gap from first observed tick/candle open for the day.
-                day_key = self._extract_day_key(minute_key)
+                day_key = self._extract_day_key(bucket_key)
                 if day_key and self._gap_day != day_key:
                     self._update_gap_stats(self.curr_index_candle)
             else:
@@ -985,7 +1046,7 @@ class HmEmaAdxStrategy:
                 c["high"] = max(c["high"], ltp)
                 c["low"] = min(c["low"], ltp)
                 c["close"] = ltp
-    
+
 
     def _finalize_index_candle(self):
         """Persist completed candle and run dependent analytics."""
@@ -999,6 +1060,7 @@ class HmEmaAdxStrategy:
             logger.info(f"Current minute:{self.curr_index_minute}, Finalizing index candle: {c}")
             self.df_index = pd.concat([self.df_index, pd.DataFrame([c])], ignore_index=True)
             self.last_index_bar = c
+            self._index_candle_finalized_since_engine_check = True
             self._try_make_merged_bar()
 
             if self.index_fur_key is None:
@@ -1132,28 +1194,28 @@ class HmEmaAdxStrategy:
         # 1. Breakout context from recent structure + volatility
         # -------------------------------------------------------
         # Find the Highest High and Lowest Low of the PREVIOUS 'window' candles
-        # We use .shift(1) because we want to compare the CURRENT candle against the PAST, 
+        # We use .shift(1) because we want to compare the CURRENT candle against the PAST,
         # not include the current candle in the calculation.
-        
+
         # 1. Calculate Candle Range (High - Low)
         self.df_index['candle_range'] = self.df_index['high'] - self.df_index['low']
-        
+
         # 2. Volatility Filter: Count candles with Range > 7 in the rolling window
         # We use .shift(1) to check the 'setup' candles before the current one.
         # (range > 7) gives True/False (1/0). Rolling sum counts them.
         self.df_index['volatile_count'] = (self.df_index['candle_range'] > 8).astype(int).shift(1).rolling(window=4).sum()
-        
+
         # The condition: Count must be >= 2
         self.df_index['is_volatile'] = self.df_index['volatile_count'] >= 2
 
         # 3. Find Resistance (Max High) and Support (Min Low) of previous 'window' candles
         self.df_index['recent_high_max'] = self.df_index['high'].shift(1).rolling(window=4).max()
         self.df_index['recent_low_min'] = self.df_index['low'].shift(1).rolling(window=4).min()
-        
+
         # 4. Generate Signals (Breakout + Volatility Confirmation)
         # Higher High: Breakout AND Volatile Context
         self.df_index['is_hh'] = (self.df_index['high'] > self.df_index['recent_high_max']) & self.df_index['is_volatile']
-        
+
         # Lower Low: Breakdown AND Volatile Context
         self.df_index['is_ll'] = (self.df_index['low'] < self.df_index['recent_low_min']) & self.df_index['is_volatile']
 
@@ -1228,48 +1290,48 @@ class HmEmaAdxStrategy:
         # 1. Basic Candle Properties
         is_red = self.df_index['close'] < self.df_index['open']
         is_green = self.df_index['close'] > self.df_index['open']
-        
+
         # Stepping Logic
         prev_low = self.df_index['low'].shift(1)
         prev_high = self.df_index['high'].shift(1)
-        
+
         making_lower_low = self.df_index['low'] < prev_low
         making_higher_high = self.df_index['high'] > prev_high
-        
+
         # 2. Calculate Ranges
         curr_range = self.df_index['high'] - self.df_index['low']
         prev_range = curr_range.shift(1)
-        
+
         # 3. Strength Filters
         # A. Minimum 'Pulse' Check: Both candles should be > 3 (Optional, keeps quality high)
         is_alive = (curr_range > 3) & (prev_range > 3)
-        
+
         # B. THE "BIG BOSS" CANDLE: One of them MUST be > 10 points
         atr_threshold = safe_float(atr)
         if atr_threshold is None or np.isnan(atr_threshold):
             atr_threshold = 10.0
         has_major_move = (curr_range > atr_threshold) | (prev_range > atr_threshold)
-        
+
         # Final Strength Condition
         is_valid_setup = is_alive & has_major_move
 
         # ----------------------------------------------------------------
         # 4. PATTERN RECOGNITION
         # ----------------------------------------------------------------
-        
+
         # BEARISH THRUST (Red + Red + Stepping Down + Big Candle in mix)
         self.df_index['is_bearish_thrust'] = (
-            is_red & 
-            is_red.shift(1) & 
-            making_lower_low & 
+            is_red &
+            is_red.shift(1) &
+            making_lower_low &
             is_valid_setup
         )
-        
+
         # BULLISH THRUST (Green + Green + Stepping Up + Big Candle in mix)
         self.df_index['is_bullish_thrust'] = (
-            is_green & 
-            is_green.shift(1) & 
-            making_higher_high & 
+            is_green &
+            is_green.shift(1) &
+            making_higher_high &
             is_valid_setup
         )
 
@@ -1281,6 +1343,10 @@ class HmEmaAdxStrategy:
         before switching order state to WAITING.
         """
         try:
+            if not self._index_candle_finalized_since_engine_check:
+                return
+            self._index_candle_finalized_since_engine_check = False
+
             if not self.enable_trading_engine:
                 return
 
@@ -1290,6 +1356,13 @@ class HmEmaAdxStrategy:
             self._last_engine_revision = current_revision
 
             if len(self.df_index) < 30:
+                return
+
+            if len(self.df_index) <= 27 and self.current_date in ["20260120"]:
+                return
+            if len(self.df_index) <= 28 and self.current_date in ["20260121"]:
+                return
+            if len(self.df_index) <= 90 and self.current_date in ["20260216"]:
                 return
 
             sp = (self.params.get("strategy-parameters") or {}) if isinstance(self.params, dict) else {}
@@ -1346,12 +1419,12 @@ class HmEmaAdxStrategy:
             adx_threshold = float(sp.get("adx_threshold", 25))
             up_rsi_low = int(sp.get("up_rsi_low", self.params.get("up_rsi_low", 52)))
             up_rsi_high = int(sp.get("up_rsi_high", self.params.get("up_rsi_high", 73)))
-            up_angle_ema = float(sp.get("up_angle_ema", self.params.get("up_angle_ema", 50)))
+            up_angle_ema = float(sp.get("up_angle_ema", self.params.get("up_angle_ema", 30)))
             up_angle_rsi_ma = float(sp.get("up_angle_rsi_ma", self.params.get("up_angle_rsi_ma", 20)))
 
             dn_rsi_low = int(sp.get("dn_rsi_low", self.params.get("dn_rsi_low", 27)))
             dn_rsi_high = int(sp.get("dn_rsi_high", self.params.get("dn_rsi_high", 48)))
-            dn_angle_ema = float(sp.get("dn_angle_ema", self.params.get("dn_angle_ema", -50)))
+            dn_angle_ema = float(sp.get("dn_angle_ema", self.params.get("dn_angle_ema", -30)))
             dn_angle_rsi_ma = float(sp.get("dn_angle_rsi_ma", self.params.get("dn_angle_rsi_ma", -20)))
 
             if self._coerce_bool(sp.get("trade_within_day_open_limits"), False):
@@ -1372,23 +1445,13 @@ class HmEmaAdxStrategy:
                 f"hm_ema={hm_ema_3}, hm_wma={hm_wma_21}, hm_signal={hm_signal}, "
                 f"current_candle_range={safe_float(latest.get('candle_range', np.nan))}"
             )
-            
+
             call_setup = (
-                (angle_rsi_ma_14 > up_angle_rsi_ma)
-                and (up_rsi_low < previous_rsi_ma_14 < rsi_ma_14 < up_rsi_high)
-                and ((not require_price_ema_alignment) or (close_price > ema_9))
-                and (angle_ema_9 > up_angle_ema)
-                and (adx_14 > adx_threshold and adx_14 > previous_adx_14)
-                and ((not enable_hm_filter) or (hm_signal == "bullish"))
+                (not enable_hm_filter) or (hm_signal == "bullish")
             )
 
             put_setup = (
-                (angle_rsi_ma_14 < dn_angle_rsi_ma)
-                and (dn_rsi_low < rsi_ma_14 < previous_rsi_ma_14 < dn_rsi_high)
-                and ((not require_price_ema_alignment) or (close_price < ema_9))
-                and (angle_ema_9 < dn_angle_ema)
-                and (adx_14 > adx_threshold and adx_14 > previous_adx_14)
-                and ((not enable_hm_filter) or (hm_signal == "bearish"))
+                (not enable_hm_filter) or (hm_signal == "bearish")
             )
 
             logger.debug(f"condition check call_setup:{call_setup}, put_setup:{put_setup}")
@@ -1397,7 +1460,7 @@ class HmEmaAdxStrategy:
                 lot = self._calculate_lot_size(constants.CALL, is_bullish_thrust, is_bearish_thrust)
                 if lot <= 0:
                     return
-                
+
                 self._order_container["side"] = constants.CALL
                 self._order_container["status"] = constants.WAITING
                 self._order_container["lot"] = int(lot)
@@ -1409,14 +1472,14 @@ class HmEmaAdxStrategy:
                 lot = self._calculate_lot_size(constants.PUT, is_bullish_thrust, is_bearish_thrust)
                 if lot <= 0:
                     return
-                
+
                 self._order_container["side"] = constants.PUT
                 self._order_container["status"] = constants.WAITING
                 self._order_container["lot"] = int(lot)
                 self._order_container["force_trail_lock"] = False
                 logger.info(f"Order intent set side={constants.PUT}, lot={lot}, status={constants.WAITING}")
                 return
-        
+
         except Exception as e:
             logger.error(f"An error occurred in _trading_engine_active: {e}", exc_info=True)
             return
@@ -1612,7 +1675,7 @@ class HmEmaAdxStrategy:
                 return small
 
         return small
-    
+
     def _round_to_tick(self, x: float, tick: float, mode: str) -> float:
         x = float(x); tick = float(tick)
         if tick <= 0:
