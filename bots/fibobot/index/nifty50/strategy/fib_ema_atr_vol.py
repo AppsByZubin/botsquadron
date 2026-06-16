@@ -59,6 +59,16 @@ class FibEmaAtrVolStrategy:
         self.uptox_client = uptox_client
         self.previous_day_trend = previous_day_trend
         self.selected_contracts = selected_contracts or {}
+        nifty_fut = (
+            self.selected_contracts.get("Nifty_Future")
+            if isinstance(self.selected_contracts, dict)
+            else None
+        )
+        self.index_fur_key = (
+            str(nifty_fut.get("instrument_key") or "").strip()
+            if isinstance(nifty_fut, dict)
+            else None
+        ) or None
         self.index_minutes_processed = index_minutes_processed or {}
         self.future_minutes_processed = future_minutes_processed or {}
         self.order_maneger = order_manager
@@ -127,6 +137,10 @@ class FibEmaAtrVolStrategy:
         self.curr_index_bucket: Optional[str] = None
         self.curr_index_minute: Optional[str] = None
         self._bucket_volume_by_minute: Dict[str, float] = {}
+        self._future_volume_by_bucket: Dict[str, float] = {}
+        self._fut_vol_minute: Optional[str] = None
+        self._fut_vol_start_vtt: Optional[float] = None
+        self._fut_vol_last_vtt: Optional[float] = None
         self.last_index_bar: Optional[Dict[str, Any]] = None
         self._present_atm_price = None
         self._order_container = self._default_order_container()
@@ -275,6 +289,10 @@ class FibEmaAtrVolStrategy:
 
         for item in feed_response:
             instrument_key = item.get("instrument_key")
+            if self.index_fur_key is not None and instrument_key == self.index_fur_key:
+                self._handle_future_tick(item)
+                continue
+
             if instrument_key == constants.NIFTY50_SYMBOL:
                 ltp = safe_float(item.get("ltp"))
                 ltt = safe_float(item.get("ltt")) or safe_float(item.get("ts_epoch_ms"))
@@ -289,9 +307,13 @@ class FibEmaAtrVolStrategy:
 
         self._trade_processing(feed_response)
 
-    def _initialize_from_intraday_candles(self, index_candles, _future_candles=None) -> None:
+    def _initialize_from_intraday_candles(self, index_candles, future_candles=None) -> None:
         if not index_candles:
             return
+
+        self._future_volume_by_bucket.update(
+            self._future_volume_by_bucket_from_candles(future_candles)
+        )
 
         rows = []
         for candle in index_candles:
@@ -356,6 +378,8 @@ class FibEmaAtrVolStrategy:
                 "minute_count": grouped["minute"].nunique(),
             }
         ).reset_index(drop=True)
+        if self._future_volume_by_bucket:
+            boot_all["volume"] = boot_all["time"].map(self._future_volume_by_bucket).fillna(boot_all["volume"])
 
         if boot_all.empty:
             return
@@ -390,7 +414,11 @@ class FibEmaAtrVolStrategy:
                 "high": safe_float(row.get("high")),
                 "low": safe_float(row.get("low")),
                 "close": safe_float(row.get("close")),
-                "volume": safe_float(row.get("volume")) or 0.0,
+                "volume": (
+                    safe_float(self._future_volume_by_bucket.get(bucket_key))
+                    or safe_float(row.get("volume"))
+                    or 0.0
+                ),
             }
 
     def _handle_index_tick(self, ts_ms: float, ltp: float, volume: float = 0.0) -> None:
@@ -412,7 +440,7 @@ class FibEmaAtrVolStrategy:
                 "high": ltp,
                 "low": ltp,
                 "close": ltp,
-                "volume": 0.0,
+                "volume": self._future_volume_by_bucket.get(bucket_key, 0.0),
             }
             self._roll_day_if_needed(bucket_key)
         else:
@@ -423,13 +451,17 @@ class FibEmaAtrVolStrategy:
             candle["low"] = min(float(candle["low"]), ltp)
             candle["close"] = ltp
 
-        self._update_current_bucket_volume(minute_key, volume)
+        if bucket_key in self._future_volume_by_bucket:
+            self._apply_future_volume_to_current_candle(bucket_key)
+        else:
+            self._update_current_bucket_volume(minute_key, volume)
 
     def _finalize_index_candle(self) -> None:
         candle = self.curr_index_candle
         if candle is None:
             return
 
+        self._apply_future_volume_to_candle(candle)
         logger.info(f"Finalizing {self.signal_tf_min}m index candle: {candle}")
         self._update_session_ohlc(candle)
         self.df_index = pd.concat([self.df_index, pd.DataFrame([candle])], ignore_index=True)
@@ -1187,6 +1219,60 @@ class FibEmaAtrVolStrategy:
             return
         self.atr5_engine.on_tick(instrument_key, ltp, ts)
 
+    def _handle_future_tick(self, item: Dict[str, Any]) -> None:
+        ltt = safe_float(item.get("ltt")) or safe_float(item.get("ts_epoch_ms"))
+        vtt = safe_float(item.get("vtt"))
+        if ltt is None or vtt is None:
+            return
+
+        tick_dt = datetime.fromtimestamp(float(ltt) / 1000, ist).replace(second=0, microsecond=0)
+        minute_key = tick_dt.strftime("%Y-%m-%d %H:%M")
+        finished_minute, finished_volume = self._update_1m_future_volume_from_vtt(minute_key, vtt)
+        if finished_minute is not None:
+            self._add_future_minute_volume(finished_minute, float(finished_volume or 0.0))
+
+    def _update_1m_future_volume_from_vtt(self, minute_key: str, vtt_now: float):
+        if self._fut_vol_minute is None:
+            self._fut_vol_minute = minute_key
+            self._fut_vol_start_vtt = vtt_now
+            self._fut_vol_last_vtt = vtt_now
+            return None, None
+
+        if self._fut_vol_last_vtt is not None and vtt_now < float(self._fut_vol_last_vtt):
+            self._fut_vol_minute = minute_key
+            self._fut_vol_start_vtt = vtt_now
+            self._fut_vol_last_vtt = vtt_now
+            return None, None
+
+        if minute_key == self._fut_vol_minute:
+            self._fut_vol_last_vtt = vtt_now
+            return None, None
+
+        finished_minute = self._fut_vol_minute
+        finished_volume = max(
+            float(self._fut_vol_last_vtt or vtt_now)
+            - float(self._fut_vol_start_vtt or vtt_now),
+            0.0,
+        )
+
+        self._fut_vol_minute = minute_key
+        self._fut_vol_start_vtt = vtt_now
+        self._fut_vol_last_vtt = vtt_now
+
+        return finished_minute, finished_volume
+
+    def _add_future_minute_volume(self, minute_key: str, volume: float) -> None:
+        bucket_key = self._bucket_key_from_minute_key(minute_key)
+        if bucket_key is None:
+            return
+
+        self._future_volume_by_bucket[bucket_key] = self._future_volume_by_bucket.get(bucket_key, 0.0) + max(
+            float(volume or 0.0),
+            0.0,
+        )
+        self._apply_future_volume_to_current_candle(bucket_key)
+        self._apply_future_volume_to_finalized_index_row(bucket_key)
+
     def _update_current_bucket_volume(self, minute_key: str, volume: float) -> None:
         if self.curr_index_candle is None:
             return
@@ -1198,6 +1284,83 @@ class FibEmaAtrVolStrategy:
         self.curr_index_candle["volume"] = float(self.curr_index_candle.get("volume") or 0.0) + (
             volume - previous
         )
+
+    def _apply_future_volume_to_current_candle(self, bucket_key: str) -> None:
+        if self.curr_index_candle is None or self.curr_index_candle.get("time") != bucket_key:
+            return
+        self._apply_future_volume_to_candle(self.curr_index_candle)
+
+    def _apply_future_volume_to_candle(self, candle: Dict[str, Any]) -> None:
+        bucket_key = str(candle.get("time") or "")
+        future_volume = safe_float(self._future_volume_by_bucket.get(bucket_key))
+        if future_volume is not None:
+            candle["volume"] = max(float(future_volume), 0.0)
+
+    def _apply_future_volume_to_finalized_index_row(self, bucket_key: str) -> None:
+        if self.df_index.empty or "time" not in self.df_index.columns:
+            return
+        future_volume = safe_float(self._future_volume_by_bucket.get(bucket_key))
+        if future_volume is None:
+            return
+        matched = self.df_index.index[self.df_index["time"].astype(str) == str(bucket_key)]
+        if len(matched) == 0:
+            return
+        idx = matched[-1]
+        current_volume = safe_float(self.df_index.at[idx, "volume"]) or 0.0
+        if float(future_volume) <= current_volume:
+            return
+        self.df_index.at[idx, "volume"] = float(future_volume)
+        self._apply_indicators()
+        self.last_index_bar = self.df_index.iloc[-1].to_dict()
+
+    def _future_volume_by_bucket_from_candles(self, future_candles) -> Dict[str, float]:
+        volume_by_bucket: Dict[str, float] = {}
+        if not future_candles:
+            return volume_by_bucket
+
+        for candle in future_candles:
+            if isinstance(candle, (list, tuple)) and len(candle) >= 6:
+                raw_time = candle[0]
+                volume = candle[5]
+            elif isinstance(candle, dict):
+                raw_time = candle.get("time") or candle.get("datetime") or candle.get("date")
+                volume = candle.get("volume", 0.0)
+            else:
+                continue
+
+            ts = pd.to_datetime(raw_time, errors="coerce")
+            if pd.isna(ts):
+                continue
+            if ts.tzinfo is None:
+                ts = ts.tz_localize(ist)
+            else:
+                ts = ts.tz_convert(ist)
+            minute_key = ts.strftime("%Y-%m-%d %H:%M")
+            self.future_minutes_processed[minute_key] = True
+            bucket_key = self._bucket_key_from_minute_key(minute_key)
+            if bucket_key is None:
+                continue
+            volume_by_bucket[bucket_key] = volume_by_bucket.get(bucket_key, 0.0) + max(
+                float(safe_float(volume) or 0.0),
+                0.0,
+            )
+
+        return volume_by_bucket
+
+    def _bucket_key_from_minute_key(self, minute_key: str) -> Optional[str]:
+        ts = pd.to_datetime(minute_key, errors="coerce")
+        if pd.isna(ts):
+            return None
+        if ts.tzinfo is None:
+            ts = ts.tz_localize(ist)
+        else:
+            ts = ts.tz_convert(ist)
+        bucket_dt = ts.to_pydatetime().replace(
+            minute=(ts.minute // self.signal_tf_min) * self.signal_tf_min,
+            second=0,
+            microsecond=0,
+        )
+        return bucket_dt.strftime("%Y-%m-%d %H:%M")
 
     def _extract_index_volume(self, item: Dict[str, Any]) -> float:
         for key in ("one_min_volume", "volume", "vol"):
