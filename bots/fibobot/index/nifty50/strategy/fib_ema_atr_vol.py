@@ -366,6 +366,7 @@ class FibEmaAtrVolStrategy:
             return
 
         df = pd.DataFrame(rows).sort_values("minute")
+        last_minute_by_bucket = df.groupby("bucket", sort=True)["minute"].max().to_dict()
         grouped = df.groupby("bucket", sort=True)
         boot_all = pd.DataFrame(
             {
@@ -407,7 +408,7 @@ class FibEmaAtrVolStrategy:
             row = partial.iloc[-1].to_dict()
             bucket_key = str(row.get("time") or "")
             self.curr_index_bucket = bucket_key
-            self.curr_index_minute = bucket_key
+            self.curr_index_minute = str(last_minute_by_bucket.get(bucket_key, bucket_key))
             self.curr_index_candle = {
                 "time": bucket_key,
                 "open": safe_float(row.get("open")),
@@ -426,7 +427,7 @@ class FibEmaAtrVolStrategy:
         minute_key = tick_dt.strftime("%Y-%m-%d %H:%M")
         bucket_dt = tick_dt.replace(minute=(tick_dt.minute // self.signal_tf_min) * self.signal_tf_min)
         bucket_key = bucket_dt.strftime("%Y-%m-%d %H:%M")
-        self.curr_index_minute = bucket_key
+        self.curr_index_minute = minute_key
 
         if self.curr_index_bucket is None or bucket_key != self.curr_index_bucket:
             if self.curr_index_candle is not None:
@@ -462,7 +463,7 @@ class FibEmaAtrVolStrategy:
             return
 
         self._apply_future_volume_to_candle(candle)
-        logger.info(f"Finalizing {self.signal_tf_min}m index candle: {candle}")
+        logger.info(f"Current minute:{self.curr_index_minute}, Finalizing {self.signal_tf_min}m index candle: {candle}")
         self._update_session_ohlc(candle)
         self.df_index = pd.concat([self.df_index, pd.DataFrame([candle])], ignore_index=True)
         self._apply_indicators()
