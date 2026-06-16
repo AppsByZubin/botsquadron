@@ -20,9 +20,7 @@ TRENDOBOT_DIR = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(TRENDOBOT_DIR))
 
 from logger import create_logger
-from index.orchestrator import orchestrator
 from common import constants
-from utils.s3_upload_utils import upload_trade_artifacts_to_s3
 
 logger = create_logger("TrendBotMain")
 
@@ -47,6 +45,13 @@ if __name__ == "__main__":
 
     logger.info(f"Received instruments: {instruments}")
     logger.info(f"Mode: {mode}")
+
+    if mode == constants.REST:
+        logger.info("Rest mode enabled; exiting without starting orchestrator.")
+        sys.exit(0)
+
+    from index.orchestrator import orchestrator
+    from utils.s3_upload_utils import upload_trade_artifacts_to_s3
 
     did_run = orchestrator(instruments, strategy, mode=mode)
     if did_run is False:

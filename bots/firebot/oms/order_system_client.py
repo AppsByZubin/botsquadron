@@ -1709,9 +1709,9 @@ def _default_events_json(mode: str) -> str:
 
 def initialize_local_ledgers_for_modes(modes: Optional[List[str]] = None) -> Dict[str, Dict[str, str]]:
     initialized: Dict[str, Dict[str, str]] = {}
-    for raw_mode in modes or list(constants.EXECUTION_MODES):
+    for raw_mode in modes or list(constants.TRADING_EXECUTION_MODES):
         mode = constants.normalize_execution_mode(raw_mode)
-        if mode not in constants.EXECUTION_MODES:
+        if mode not in constants.TRADING_EXECUTION_MODES:
             raise ValueError(f"unsupported execution mode for ledger initialization: {raw_mode}")
 
         paths = {

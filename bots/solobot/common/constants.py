@@ -87,7 +87,9 @@ DO_S3_DEFAULT_PREFIX = "index-bucket-holder/trades"
 SANDBOX = "sandbox"
 MOCK="mock"
 PRODUCTION="production"
-EXECUTION_MODES = (MOCK, SANDBOX, PRODUCTION)
+REST = "rest"
+TRADING_EXECUTION_MODES = (MOCK, SANDBOX, PRODUCTION)
+EXECUTION_MODES = (REST, *TRADING_EXECUTION_MODES)
 
 
 def normalize_execution_mode(mode):

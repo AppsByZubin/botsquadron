@@ -30,7 +30,7 @@ def orchestrator(instruments, strategy, mode=None):
         f"Starting fibobot orchestrator for instruments: {instruments}, strategy: {strategy}, mode: {mode}"
     )
 
-    ledger_paths = initialize_local_ledgers_for_modes(list(constants.EXECUTION_MODES))
+    ledger_paths = initialize_local_ledgers_for_modes(list(constants.TRADING_EXECUTION_MODES))
     logger.info(
         f"Initialized local OMS ledgers under {constants.FIBOBOT_EXECUTION_RESULTS_DIR} "
         f"for modes: {', '.join(ledger_paths.keys())}"
