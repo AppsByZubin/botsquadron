@@ -13,8 +13,11 @@ import (
 )
 
 type fakeBusiness struct {
-	modifyErr  error
-	createResp model.CreateTradeResponse
+	modifyErr     error
+	createResp    model.CreateTradeResponse
+	blockBotName  *string
+	resumeBotName *string
+	statusBotName *string
 }
 
 func (f fakeBusiness) CreateAccount(context.Context, model.CreateAccountRequest) (model.AccountResponse, error) {
@@ -41,16 +44,25 @@ func (f fakeBusiness) KillBot(context.Context, string, model.KillBotRequest) (mo
 	return model.BotKillSwitchResponse{}, nil
 }
 
-func (f fakeBusiness) BlockBotOrders(context.Context, string, model.BlockBotOrdersRequest) (model.BotKillSwitchResponse, error) {
-	return model.BotKillSwitchResponse{Status: model.OrderBlockStatus, Message: model.OrderBlockMessage}, nil
+func (f fakeBusiness) BlockBotOrders(_ context.Context, botName string, _ model.BlockBotOrdersRequest) (model.BotKillSwitchResponse, error) {
+	if f.blockBotName != nil {
+		*f.blockBotName = botName
+	}
+	return model.BotKillSwitchResponse{BotName: botName, Status: model.OrderBlockStatus, Message: model.OrderBlockMessage}, nil
 }
 
-func (f fakeBusiness) ResumeBot(context.Context, string, model.ResumeBotRequest) (model.BotKillSwitchResponse, error) {
-	return model.BotKillSwitchResponse{}, nil
+func (f fakeBusiness) ResumeBot(_ context.Context, botName string, _ model.ResumeBotRequest) (model.BotKillSwitchResponse, error) {
+	if f.resumeBotName != nil {
+		*f.resumeBotName = botName
+	}
+	return model.BotKillSwitchResponse{BotName: botName, Status: "RESUMED"}, nil
 }
 
-func (f fakeBusiness) GetBotKillSwitch(context.Context, string) (model.BotKillSwitchResponse, error) {
-	return model.BotKillSwitchResponse{}, nil
+func (f fakeBusiness) GetBotKillSwitch(_ context.Context, botName string) (model.BotKillSwitchResponse, error) {
+	if f.statusBotName != nil {
+		*f.statusBotName = botName
+	}
+	return model.BotKillSwitchResponse{BotName: botName}, nil
 }
 
 func (f fakeBusiness) ModifyTrade(context.Context, string, model.ModifyTradeRequest) (model.ModifyTradeResponse, error) {
@@ -137,5 +149,68 @@ func TestHandleBlockBotOrders(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), model.OrderBlockStatus) {
 		t.Fatalf("body = %s, want order block status", rec.Body.String())
+	}
+}
+
+func TestHandleFibobotOrderIntakeRoutes(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		method    string
+		path      string
+		body      string
+		captureFn func(*fakeBusiness, *string)
+	}{
+		{
+			name:   "block",
+			method: http.MethodPost,
+			path:   "/v1/bots/fibobot/block-orders",
+			body:   `{"reason":"manual pause"}`,
+			captureFn: func(f *fakeBusiness, got *string) {
+				f.blockBotName = got
+			},
+		},
+		{
+			name:   "status",
+			method: http.MethodGet,
+			path:   "/v1/bots/fibobot/block-orders",
+			captureFn: func(f *fakeBusiness, got *string) {
+				f.statusBotName = got
+			},
+		},
+		{
+			name:   "resume",
+			method: http.MethodPost,
+			path:   "/v1/bots/fibobot/resume",
+			body:   `{"reason":"resume order intake"}`,
+			captureFn: func(f *fakeBusiness, got *string) {
+				f.resumeBotName = got
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			gotBotName := ""
+			fake := fakeBusiness{}
+			tt.captureFn(&fake, &gotBotName)
+			handler := New(fake, 5*time.Second)
+
+			req := httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body))
+			rec := httptest.NewRecorder()
+
+			handler.Routes().ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+			}
+			if gotBotName != "fibobot" {
+				t.Fatalf("botName = %q, want fibobot", gotBotName)
+			}
+		})
 	}
 }

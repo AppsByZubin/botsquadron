@@ -175,6 +175,9 @@ The helper script wraps this call:
 scripts/ordersystem_order_intake_control.sh haemabot block
 scripts/ordersystem_order_intake_control.sh haemabot status
 scripts/ordersystem_order_intake_control.sh haemabot resume
+scripts/ordersystem_order_intake_control.sh fibobot block
+scripts/ordersystem_order_intake_control.sh fibobot status
+scripts/ordersystem_order_intake_control.sh fibobot resume
 ```
 
 ```bash

@@ -14,6 +14,9 @@ Usage:
 Examples:
   $0 haemabot
   $0 firebot block
+  $0 fibobot block
+  $0 fibobot status
+  $0 fibobot resume
   $0 haemabot status
   $0 haemabot resume
 
