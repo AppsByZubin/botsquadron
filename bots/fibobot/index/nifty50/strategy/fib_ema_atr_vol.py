@@ -11,6 +11,7 @@ import yaml
 
 import common.constants as constants
 import logger
+from index.nifty50.nifty_utils import get_nifty_option_instruments
 from technicals.atr.atr_for_ticks import AtrEngine
 from utils.generic_utils import safe_float
 
@@ -402,6 +403,8 @@ class FibEmaAtrVolStrategy:
             signal_event = self._evaluate_latest_signal()
             if signal_event is not None:
                 self._set_order_intent(signal_event)
+            else:
+                self._log_latest_signal_decision()
             self.last_index_bar = self.df_index.iloc[-1].to_dict()
 
         if not partial.empty:
@@ -470,6 +473,8 @@ class FibEmaAtrVolStrategy:
         signal_event = self._evaluate_latest_signal()
         if signal_event is not None:
             self._set_order_intent(signal_event)
+        else:
+            self._log_latest_signal_decision()
         self.last_index_bar = self.df_index.iloc[-1].to_dict()
         self.curr_index_candle = None
 
@@ -606,10 +611,10 @@ class FibEmaAtrVolStrategy:
         trend_down = ema_fast < ema_slow
 
         has_volume = volume > 0 and (pd.to_numeric(self.df_index["volume"], errors="coerce").fillna(0.0) > 0).any()
-        if self.disable_volume_filter or not has_volume:
+        if self.disable_volume_filter or not has_volume or vol_sma is None:
             volume_ok = True
         else:
-            volume_ok = vol_sma is not None and volume >= (vol_sma * self.min_vol_mult)
+            volume_ok = volume >= (vol_sma * self.min_vol_mult)
 
         exhaustion_volume = bool(latest.get("exhaustion_volume"))
         exhaustion_ok = (not self.avoid_exhaustion_entry) or (not exhaustion_volume)
@@ -731,6 +736,20 @@ class FibEmaAtrVolStrategy:
         self.signals.append(signal_event)
         logger.info(f"FIB/EMA/ATR/VOL signal candidate: {signal_event}")
         return signal_event
+
+    def _log_latest_signal_decision(self) -> None:
+        if self.df_index.empty:
+            return
+
+        latest = self.df_index.iloc[-1]
+        logger.debug(
+            f"FIB/EMA/ATR/VOL no signal: time={latest.get('time')}, "
+            f"reason={latest.get('reason')}, close={safe_float(latest.get('close'))}, "
+            f"ema_fast={safe_float(latest.get('ema_fast'))}, ema_slow={safe_float(latest.get('ema_slow'))}, "
+            f"volume={safe_float(latest.get('volume'))}, vol_sma={safe_float(latest.get('vol_sma'))}, "
+            f"pp={safe_float(latest.get('pp'))}, r1={safe_float(latest.get('r1'))}, "
+            f"s1={safe_float(latest.get('s1'))}"
+        )
 
     def _restore_open_order_container_from_ordersystem(self) -> None:
         if self.order_maneger is None or not hasattr(self.order_maneger, "get_account_details"):
@@ -953,26 +972,46 @@ class FibEmaAtrVolStrategy:
 
     def _punch_waiting_order(self, feed_response) -> None:
         if self.last_index_bar is None:
+            logger.debug("Waiting order not punched; last_index_bar is unavailable.")
             return
 
         sp = self._strategy_params()
         side = self._order_container.get("side")
+        index_price = float(self.last_index_bar["close"])
         itm_range = self._coerce_float(sp.get("itm_strike_range"), 200.0, minimum=0.0)
         dict_itm = self._get_itm_contracts(
             side,
-            float(self.last_index_bar["close"]),
+            index_price,
             itm_range,
         )
+        if not dict_itm and self._refresh_selected_contracts(index_price):
+            dict_itm = self._get_itm_contracts(
+                side,
+                index_price,
+                itm_range,
+            )
         if not dict_itm:
+            logger.warning(
+                f"Waiting order not punched; no ITM contracts for side={side}, "
+                f"index_price={index_price}, itm_range={itm_range}, "
+                f"selected_strikes={self._selected_contract_strike_summary()}"
+            )
             return
 
         chosen = self._choose_contract(feed_response, dict_itm)
         if chosen is None:
+            logger.debug(
+                f"Waiting order not punched yet; no subscribed tick in feed for side={side}, "
+                f"candidate_count={len(dict_itm)}, feed_count={len(feed_response)}"
+            )
             return
 
         instrument_key = chosen.get("instrument_key")
         ltp = safe_float(chosen.get("ltp"))
         if instrument_key not in dict_itm or ltp is None:
+            logger.warning(
+                f"Waiting order not punched; invalid chosen contract instrument_key={instrument_key}, ltp={ltp}."
+            )
             return
 
         contract = dict_itm[instrument_key]
@@ -993,6 +1032,10 @@ class FibEmaAtrVolStrategy:
             sp=sp,
         )
         if target is None or sl_trigger is None or trail_points is None:
+            logger.warning(
+                f"Waiting order not punched; risk prices unavailable for instrument_key={instrument_key}, "
+                f"entry_price={entry_price}, option_atr={option_atr}, require_option_atr={require_option_atr}."
+            )
             self._clear_waiting_order_intent()
             return
 
@@ -1044,6 +1087,78 @@ class FibEmaAtrVolStrategy:
             self._order_container["force_trail_lock"] = False
             self._order_counter += 1
             logger.info(f"{self._order_container}")
+        else:
+            logger.warning(
+                f"Order manager did not return trade_id; clearing waiting intent for "
+                f"instrument_key={instrument_key}, symbol={self._order_container.get('instrument_symbol')}."
+            )
+            self._clear_waiting_order_intent()
+
+    def _refresh_selected_contracts(self, index_price: float) -> bool:
+        spot_price = safe_float(index_price)
+        if spot_price is None or spot_price <= 0:
+            return False
+
+        sp = self._strategy_params()
+        expiry = sp.get("trade_expiry") or self.expiry_date
+        if not expiry:
+            logger.warning("Unable to refresh fibobot option contracts; trade expiry is unavailable.")
+            return False
+
+        atm_price = int(round(float(spot_price) / 50) * 50)
+        old_keys = set(self.get_subscription_instruments())
+        future_contract = (
+            self.selected_contracts.get("Nifty_Future")
+            if isinstance(self.selected_contracts, dict)
+            else None
+        )
+
+        try:
+            refreshed = get_nifty_option_instruments(atm_price, expiry)
+        except Exception as exc:
+            logger.warning(
+                f"Unable to refresh fibobot option contracts for atm={atm_price}, expiry={expiry}: {exc}"
+            )
+            return False
+
+        if not isinstance(refreshed, dict) or not refreshed:
+            logger.warning(
+                f"Unable to refresh fibobot option contracts; empty response for atm={atm_price}, expiry={expiry}."
+            )
+            return False
+
+        if isinstance(future_contract, dict):
+            refreshed["Nifty_Future"] = future_contract
+
+        self.selected_contracts = refreshed
+        self.expiry_date = expiry
+        if isinstance(future_contract, dict):
+            self.index_fur_key = str(future_contract.get("instrument_key") or "").strip() or None
+
+        new_keys = set(self.get_subscription_instruments())
+        logger.info(
+            f"Refreshed fibobot option contracts using atm={atm_price}, spot={spot_price}, expiry={expiry}; "
+            f"subscription_keys_before={len(old_keys)}, after={len(new_keys)}, "
+            f"selected_strikes={self._selected_contract_strike_summary()}"
+        )
+        return new_keys != old_keys
+
+    def _selected_contract_strike_summary(self) -> str:
+        if not isinstance(self.selected_contracts, dict):
+            return "none"
+
+        strikes = []
+        for strike_price in self.selected_contracts.keys():
+            if strike_price == "Nifty_Future":
+                continue
+            strike = safe_float(strike_price)
+            if strike is not None:
+                strikes.append(float(strike))
+
+        if not strikes:
+            return "none"
+
+        return f"{min(strikes):.0f}-{max(strikes):.0f} ({len(strikes)} strikes)"
 
     def _trail_open_order(self, feed_response) -> None:
         latest_ltp = None

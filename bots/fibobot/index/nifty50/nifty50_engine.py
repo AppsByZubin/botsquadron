@@ -546,6 +546,50 @@ async def nifty50_engine(strategy, mode, param_data):
         # Subscribe to tick data
         tick_shape_state = {"flat_logged": False, "first_tick_logged": False}
 
+        async def refresh_strategy_subscription(reason):
+            nonlocal instrument_keys, instrument_keys_set, instrument_data, watchdog_instrument_data
+
+            if not hasattr(bot, "get_subscription_instruments") or not callable(getattr(bot, "get_subscription_instruments")):
+                return
+
+            try:
+                next_keys = bot.get_subscription_instruments()
+            except Exception as exc:
+                logger.warning(f"Failed to refresh strategy subscription instruments: {exc}")
+                return
+
+            if not isinstance(next_keys, list) or not next_keys:
+                return
+
+            order_container = getattr(bot, "_order_container", None)
+            if isinstance(order_container, dict) and order_container.get("instrument_key"):
+                next_keys.append(order_container["instrument_key"])
+
+            next_keys = list(dict.fromkeys(next_keys))
+            next_keys_set = set(next_keys)
+            if next_keys_set == instrument_keys_set:
+                return
+
+            added = sorted(next_keys_set - instrument_keys_set)
+            removed = sorted(instrument_keys_set - next_keys_set)
+            instrument_keys = next_keys
+            instrument_keys_set = next_keys_set
+            instrument_data = {
+                "bot_id": bot_id,
+                "instrument_keys": instrument_keys,
+                "action": "subscribe",
+            }
+            watchdog_instrument_data = {
+                **instrument_data,
+                "force_reconnect": True,
+            }
+
+            await _publish_marketfeeder_subscription(nc, instrument_data)
+            logger.info(
+                f"Updated marketfeeder subscription after {reason}: "
+                f"{len(instrument_keys)} instruments, added={added}, removed={removed}"
+            )
+
         async def tick_data_handler(msg):
             try:
                 payload = json.loads(msg.data.decode())
@@ -570,6 +614,7 @@ async def nifty50_engine(strategy, mode, param_data):
                             "Received flat marketfeeder ticks; normalizing to strategy feed envelope"
                         )
                     bot.on_ws_message(normalized_message)
+                    await refresh_strategy_subscription("strategy instrument update")
                     return
 
                 # Treat own flat non-feed payloads as heartbeat-only messages.

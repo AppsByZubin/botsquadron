@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo
 import common.constants as constants
 import logger
 from typing import Any, Dict, List, Optional
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 import numpy as np
 import talib
 from technicals.atr.atr_for_ticks import AtrEngine
@@ -194,9 +194,11 @@ class HmEmaAdxV2Strategy:
             "instrument_symbol":None,
             "status": None,
             "ltp": None,
+            "entry_price": None,
             "lot": None,
             "max_gamma": None,
             "start_trail_after": None,
+            "trade_create_time": None,
             "force_trail_lock": False
         }
         self._trade_end_time=None
@@ -318,9 +320,11 @@ class HmEmaAdxV2Strategy:
             "instrument_symbol": instrument_symbol,
             "status": constants.OPEN,
             "ltp": ltp,
+            "entry_price": safe_float(trade.get("entry_price")),
             "lot": int(qty) if qty is not None and qty > 0 else None,
             "max_gamma": None,
             "start_trail_after": safe_float(trade.get("start_trail_after")),
+            "trade_create_time": trade.get("timestamp") or trade.get("entry_time") or trade.get("created_at"),
             "force_trail_lock": False,
         })
         logger.info(f"Restored OPEN trade from ordersystem into _order_container: {self._order_container}")
@@ -1707,31 +1711,49 @@ class HmEmaAdxV2Strategy:
         self.index_adx = safe_float(latest.get("adx_14"))
         self.index_prev_adx = safe_float(previous.get("adx_14"))
 
-    def _should_force_trail_open_order(self) -> bool:
+    def _should_force_trail_open_order(
+        self,
+        latest_ltp: Optional[float] = None,
+        ts: Optional[datetime] = None,
+    ) -> bool:
         if self._order_container.get("status") != constants.OPEN:
             return False
         if self._coerce_bool(self._order_container.get("force_trail_lock"), False):
             return False
 
-        sp = (self.params.get("strategy-parameters") or {}) if isinstance(self.params, dict) else {}
-        min_atr_14 = safe_float(sp.get("min_atr_14", 9.0))
-        adx_threshold = safe_float(sp.get("adx_threshold", 25))
+        return self._is_stale_losing_open_order(latest_ltp, ts)
 
-        if self.index_atr is not None and min_atr_14 is not None and self.index_atr < min_atr_14:
-            logger.info(f"Force trailing: index ATR {self.index_atr:.2f} is below threshold {min_atr_14:.2f}.")
-            return True
-        if self.index_adx is not None and adx_threshold is not None and self.index_adx < adx_threshold:
-            logger.info(f"Force trailing: index ADX {self.index_adx:.2f} is below threshold {adx_threshold:.2f}.")
-            return True
-        if (
-            self.index_adx is not None
-            and self.index_prev_adx is not None
-            and (self.index_adx + 0.5) < self.index_prev_adx
-        ):
-            logger.info(f"Force trailing: index ADX {self.index_adx:.2f} is decreasing from {self.index_prev_adx:.2f}.")
-            return True
+    def _is_stale_losing_open_order(
+        self,
+        latest_ltp: Optional[float],
+        ts: Optional[datetime],
+    ) -> bool:
+        entry_price = safe_float(self._order_container.get("entry_price"))
+        current_ltp = safe_float(latest_ltp)
+        if entry_price is None or current_ltp is None or current_ltp >= entry_price:
+            return False
 
-        return False
+        trade_create_time = self._normalize_trade_time(self._order_container.get("trade_create_time"))
+        current_time = self._normalize_trade_time(ts)
+        if trade_create_time is None or current_time is None:
+            return False
+
+        return current_time >= trade_create_time + timedelta(minutes=30)
+
+    def _normalize_trade_time(self, value: Any) -> Optional[datetime]:
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            dt_obj = value
+        else:
+            parsed = pd.to_datetime(value, errors="coerce")
+            if pd.isna(parsed):
+                return None
+            dt_obj = parsed.to_pydatetime()
+
+        if dt_obj.tzinfo is None:
+            return dt_obj.replace(tzinfo=ist)
+        return dt_obj.astimezone(ist)
 
     def _get_itm_contracts(self, side: str, index_price: float, itm_range: float) -> Dict[str, Dict[str, Any]]:
         output: Dict[str, Dict[str, Any]] = {}
@@ -2036,6 +2058,8 @@ class HmEmaAdxV2Strategy:
             if trade_id:
                 self._order_container["trade_id"] = trade_id
                 self._order_container["status"] = constants.OPEN
+                self._order_container["entry_price"] = entry_price
+                self._order_container["trade_create_time"] = ts
                 self._order_container["force_trail_lock"] = False
                 self._order_counter += 1
                 logger.info(f"{self._order_container}")
@@ -2056,7 +2080,7 @@ class HmEmaAdxV2Strategy:
                     break
 
             if latest_ltp is not None and ts is not None:
-                force_trail = self._should_force_trail_open_order()
+                force_trail = self._should_force_trail_open_order(latest_ltp, ts)
                 tick_result = self.order_maneger.on_tick(
                     symbol=self._order_container["instrument_symbol"],
                     o=latest_ltp, h=latest_ltp, l=latest_ltp, c=latest_ltp,
