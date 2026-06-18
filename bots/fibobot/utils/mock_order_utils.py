@@ -122,16 +122,21 @@ class MockOrderSystem:
                         if order["max_price"] is None or ltp > order["max_price"]:
                             order["max_price"] = ltp
                             new_sl = ltp - self.tsl_buffer
+                            min_trailing_sl = float(order["entry_price"]) + 3
+                            if new_sl < min_trailing_sl:
+                                new_sl = min_trailing_sl
                             if new_sl > sl:
                                 order["stoploss"] = new_sl
-                                logger.info(f"[TSL] BUY {symbol} | New SL = {new_sl}")
+                                next_anchor = ltp + self.tsl_buffer
+                                logger.info(f"[TSL] BUY {symbol} | New SL = {new_sl} | Next anchor = {next_anchor}")
                     else:
                         if order["min_price"] is None or ltp < order["min_price"]:
                             order["min_price"] = ltp
                             new_sl = ltp + self.tsl_buffer
                             if new_sl < sl:
                                 order["stoploss"] = new_sl
-                                logger.info(f"[TSL] SELL {symbol} | New SL = {new_sl}")
+                                next_anchor = ltp - self.tsl_buffer
+                                logger.info(f"[TSL] SELL {symbol} | New SL = {new_sl} | Next anchor = {next_anchor}")
 
                 # Exit checks
                 if side == "BUY":

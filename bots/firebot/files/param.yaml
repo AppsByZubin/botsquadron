@@ -17,6 +17,7 @@ strategy-parameters:
   trailing-stop: true
   trailing-stop-distance: 10  # SL trails by 10 points once trailing starts
   trail-start-after-points: 0.1 # start trailing only after +5 points move
+  trailing-factor: 1.5
 
   break-even-point: 3
 
@@ -33,6 +34,12 @@ strategy-parameters:
 
   trade_within_day_open_limits: False
   ltp_open_max_distance_points: 210
+
+  vwap_source: "hlc3"
+  vwap_bands_calc_mode: "Standard Deviation"
+  vwap_band_mult_1: 1.0
+  vwap_band_mult_2: 2.0
+  vwap_band_mult_3: 3.0
 
   up_rsi_low: 52
   up_rsi_high: 73

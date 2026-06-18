@@ -178,7 +178,16 @@ class BbVwapEmaStrategy:
             "volume_fut": pd.Series(dtype="float64"),
             "hlc3": pd.Series(dtype="float64"),
             "candle_length": pd.Series(dtype="float64"),
+            "vwap_source": pd.Series(dtype="float64"),
             "vwap": pd.Series(dtype="float64"),
+            "vwap_stdev": pd.Series(dtype="float64"),
+            "vwap_band_basis": pd.Series(dtype="float64"),
+            "vwap_upper_band_1": pd.Series(dtype="float64"),
+            "vwap_lower_band_1": pd.Series(dtype="float64"),
+            "vwap_upper_band_2": pd.Series(dtype="float64"),
+            "vwap_lower_band_2": pd.Series(dtype="float64"),
+            "vwap_upper_band_3": pd.Series(dtype="float64"),
+            "vwap_lower_band_3": pd.Series(dtype="float64"),
             "ema_9": pd.Series(dtype="float64"),
             "bb_source": pd.Series(dtype="float64"),
             "bb_basis": pd.Series(dtype="float64"),
@@ -1208,9 +1217,10 @@ class BbVwapEmaStrategy:
         minute_key = self.df_index["time"].astype(str).str.slice(0, 16)
         day_key = str(minute_key.iloc[-1])[:10]
         same_day = minute_key.str.slice(0, 10) == day_key
-        hlc3 = pd.to_numeric(self.df_index["hlc3"], errors="coerce")
+        vwap_source_col = "vwap_source" if "vwap_source" in self.df_index.columns else "hlc3"
+        vwap_source = pd.to_numeric(self.df_index[vwap_source_col], errors="coerce")
         volume = pd.to_numeric(self.df_index["fut_volume"], errors="coerce")
-        pv = (hlc3 * volume).where(same_day)
+        pv = (vwap_source * volume).where(same_day)
         self._fast_vwap_day = day_key
         self._fast_cum_pv = float(pv.sum(skipna=True))
         self._fast_cum_vol = float(volume.where(same_day).sum(skipna=True))
@@ -1259,10 +1269,29 @@ class BbVwapEmaStrategy:
         trade_day = self.df_index["time"].dt.strftime("%Y-%m-%d")
         hlc3 = (high + low + close) / 3.0
         candle_length = high - low
-        pv = hlc3 * volume
+        sp = (self.params.get("strategy-parameters") or {}) if isinstance(self.params, dict) else {}
+        vwap_source_name = str(sp.get("vwap_source", "hlc3") or "hlc3")
+        vwap_source = self._bb_source_from_series(open_, high, low, close, vwap_source_name)
+        pv = vwap_source * volume
+        pv2 = (vwap_source ** 2) * volume
         cum_pv = pv.groupby(trade_day).cumsum()
         cum_vol = volume.groupby(trade_day).cumsum()
+        cum_pv2 = pv2.groupby(trade_day).cumsum()
         vwap = cum_pv / cum_vol.replace(0.0, np.nan)
+        variance = (cum_pv2 / cum_vol.replace(0.0, np.nan)) - (vwap ** 2)
+        vwap_stdev = pd.Series(np.sqrt(np.maximum(variance, 0.0)), index=self.df_index.index)
+        calc_mode = str(
+            sp.get("vwap_bands_calc_mode", sp.get("vwap_band_calc_mode", "Standard Deviation"))
+            or "Standard Deviation"
+        ).strip().lower()
+        if calc_mode == "percentage":
+            vwap_band_basis = vwap * 0.01
+        else:
+            vwap_band_basis = vwap_stdev
+
+        vwap_band_mult_1 = self._coerce_float(sp.get("vwap_band_mult_1", sp.get("bandMult_1")), 1.0, minimum=0.0)
+        vwap_band_mult_2 = self._coerce_float(sp.get("vwap_band_mult_2", sp.get("bandMult_2")), 2.0, minimum=0.0)
+        vwap_band_mult_3 = self._coerce_float(sp.get("vwap_band_mult_3", sp.get("bandMult_3")), 3.0, minimum=0.0)
 
         ema = self._calculate_ema(close, length=self.ema_length)
         bb_source = self._bb_source_from_series(open_, high, low, close, self.bb_source_name)
@@ -1288,7 +1317,13 @@ class BbVwapEmaStrategy:
         self.df_index["hlc3"] = hlc3.to_numpy()
         self.df_index["candle_length"] = candle_length.to_numpy()
         self.df_index["candle_range"] = candle_length.to_numpy()
+        self.df_index["vwap_source"] = vwap_source.to_numpy()
         self.df_index["vwap"] = vwap.to_numpy()
+        self.df_index["vwap_stdev"] = vwap_stdev.to_numpy()
+        self.df_index["vwap_band_basis"] = vwap_band_basis.to_numpy()
+        for idx, mult in [(1, vwap_band_mult_1), (2, vwap_band_mult_2), (3, vwap_band_mult_3)]:
+            self.df_index[f"vwap_upper_band_{idx}"] = (vwap + (vwap_band_basis * mult)).to_numpy()
+            self.df_index[f"vwap_lower_band_{idx}"] = (vwap - (vwap_band_basis * mult)).to_numpy()
         self.df_index["ema_9"] = ema.to_numpy()
         self.df_index["bb_source"] = bb_source.to_numpy()
         self.df_index["bb_basis"] = bb_basis.to_numpy()
@@ -1710,6 +1745,36 @@ class BbVwapEmaStrategy:
             return math.ceil(n) * tick
         return round(n) * tick
 
+    def _latest_vwap_band_1_width(self) -> Optional[float]:
+        if self.df_index is None or self.df_index.empty:
+            return None
+
+        latest = self.df_index.iloc[-1]
+        upper = safe_float(latest.get("vwap_upper_band_1"))
+        lower = safe_float(latest.get("vwap_lower_band_1"))
+        if upper is None or lower is None:
+            return None
+        return abs(float(upper) - float(lower))
+
+    @staticmethod
+    def _vwap_width_trailing_factor(width: Optional[float], default_factor: float) -> float:
+        fallback = safe_float(default_factor)
+        if fallback is None or fallback <= 0:
+            fallback = 1.0
+        if width is None:
+            return float(fallback)
+
+        width = float(width)
+        if width < 100:
+            return 1.0
+        if 100 < width < 130:
+            return 1.5
+        if 150 < width < 200:
+            return 2.0
+        if width > 200:
+            return 2.5
+        return float(fallback)
+
     # ------------------------------------------------------------------
     # Order processing (WAITING -> OPEN -> EOD)
     # ------------------------------------------------------------------
@@ -1913,10 +1978,12 @@ class BbVwapEmaStrategy:
                     "trailing-factor",
                     sp.get(
                         "trailing_factor",
-                        self.params.get("trailing-factor", self.params.get("trailing_factor", 2.0)),
+                        self.params.get("trailing-factor", self.params.get("trailing_factor", 1.0)),
                     ),
                 )
             )
+            vwap_band_width = self._latest_vwap_band_1_width()
+            trailing_factor = self._vwap_width_trailing_factor(vwap_band_width, trailing_factor)
 
             option_atr = self.atr5_engine.get_atr(chosen["instrument_key"])
             target = None
@@ -1932,7 +1999,7 @@ class BbVwapEmaStrategy:
                 if option_atr > max_atr_for_contract:
                     atr_to_use = max_atr_for_contract
 
-                start_trail_after = float((atr_to_use * trailing_factor) / entry_price)
+                start_trail_after = float((option_atr * trailing_factor) / entry_price)
 
                 if option_atr < min_atr_for_contract:
                     sl_trigger = entry_price - (atr_sl_mult * min_atr_for_contract)
@@ -2013,7 +2080,7 @@ class BbVwapEmaStrategy:
                 f"SL_lim(PU): {sl_limit:.2f}, TrailOn: {trailing_enabled}, TrailDist: {trail_points:.2f}, "
                 f"TrailStartAfterPts: {(entry_price + (entry_price * start_trail_after)):.2f} "
                 f"start_trail_after: {start_trail_after}, RiskMode: {risk_mode}, "
-                f"OptionATR: {option_atr}, TrailingFactor: {trailing_factor}"
+                f"OptionATR: {option_atr}, VwapBandWidth: {vwap_band_width}, TrailingFactor: {trailing_factor}"
             )
 
             if trade_id:

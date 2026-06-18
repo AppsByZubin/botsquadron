@@ -794,13 +794,14 @@ class OrderSystemClient:
             return trade
 
         log.info(
-            "Trailing SL update trade_id=%s symbol=%s price=%.2f stoploss=%.2f sl_limit=%.2f force=%s",
+            "Trailing SL update trade_id=%s symbol=%s price=%.2f stoploss=%.2f sl_limit=%.2f force=%s next_anchor=%.2f",
             resolved_trade_id,
             symbol,
             price,
             update["stoploss"],
             update.get("sl_limit", 0.0),
             force_trail,
+            update.get("next_trail_anchor", 0.0),
         )
         try:
             modify_response = self.modify_trade(
@@ -1527,6 +1528,7 @@ class OrderSystemClient:
             return {
                 "stoploss": new_sl,
                 "sl_limit": self._round_price(new_sl + gap, "CEIL"),
+                "next_trail_anchor": self._round_price(price - trail_points, "FLOOR"),
             }
 
         start_price = entry + _start_after_points(entry, start_after)
@@ -1535,6 +1537,10 @@ class OrderSystemClient:
         if not force and trail_anchor > 0 and price < trail_anchor + trail_points:
             return None
         new_sl = self._round_price(price - trail_points, "CEIL")
+        if not force:
+            min_trailing_sl = self._round_price(entry + 3.0, "CEIL")
+            if new_sl < min_trailing_sl:
+                new_sl = min_trailing_sl
         if force and current_sl > 0 and current_sl > new_sl:
             return None
         if current_sl > 0 and new_sl <= current_sl + self.tick_size:
@@ -1543,7 +1549,11 @@ class OrderSystemClient:
         sl_limit = self._round_price(new_sl - gap, "FLOOR")
         if sl_limit >= new_sl:
             sl_limit = self._round_price(new_sl - self.tick_size, "FLOOR")
-        return {"stoploss": new_sl, "sl_limit": sl_limit}
+        return {
+            "stoploss": new_sl,
+            "sl_limit": sl_limit,
+            "next_trail_anchor": self._round_price(price + trail_points, "CEIL"),
+        }
 
     def _round_price(self, value: float, mode: str) -> float:
         tick = self.tick_size if self.tick_size > 0 else 0.05
