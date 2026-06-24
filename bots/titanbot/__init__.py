@@ -1,0 +1,1 @@
+"""Titanbot trading bot package."""

@@ -44,6 +44,9 @@ jobs:
           - service: firebot
             context: .
             dockerfile: bots/firebot/Dockerfile
+          - service: titanbot
+            context: .
+            dockerfile: bots/titanbot/Dockerfile
           - service: fibobot
             context: .
             dockerfile: bots/fibobot/Dockerfile
@@ -186,6 +189,10 @@ jobs:
           if "firebot" in data:
               data["firebot"]["image"]["repository"] = repo
               data["firebot"]["image"]["tag"] = f"firebot-{tag}"
+
+          if "titanbot" in data:
+              data["titanbot"]["image"]["repository"] = repo
+              data["titanbot"]["image"]["tag"] = f"titanbot-{tag}"
 
           if "fibobot" in data:
               data["fibobot"]["image"]["repository"] = repo

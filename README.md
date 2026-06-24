@@ -1,6 +1,6 @@
 # BotSquadron - Trading Bot Platform
 
-BotSquadron is a distributed trading bot platform that uses NATS for communication between trading bots (solobot, trendobot, haemabot, firebot, fibobot) and market data feeders (marketfeeder).
+BotSquadron is a distributed trading bot platform that uses NATS for communication between trading bots (solobot, trendobot, haemabot, firebot, titanbot, fibobot) and market data feeders (marketfeeder).
 
 ## Architecture
 
@@ -10,16 +10,17 @@ BotSquadron is a distributed trading bot platform that uses NATS for communicati
 2. **trendobot** (Python): Trading bot that implements the production VWMA/EMA/Supertrend strategy
 3. **haemabot** (Python): NIFTY 50 options bot that uses the `hm_ema_adx` strategy
 4. **firebot** (Python): Replica of haemabot using the `bb_vwap_ema` strategy, ready for customization
-5. **fibobot** (Python): NIFTY 50 options bot using the `fib_ema_atr_vol` Fibonacci pivot strategy
-6. **ordersystem** (Go): HTTP OMS that stores trades in PostgreSQL, places Upstox orders in sandbox/production, and polls SL status in production
-7. **marketfeeder** (Go): Market data feeder that connects to Upstox **v3** websockets
-8. **NATS**: Message broker for communication between components
+5. **titanbot** (Python): NIFTY 50 options bot using the `timeseries_trend` multi-timeframe EMA-angle strategy
+6. **fibobot** (Python): NIFTY 50 options bot using the `fib_ema_atr_vol` Fibonacci pivot strategy
+7. **ordersystem** (Go): HTTP OMS that stores trades in PostgreSQL, places Upstox orders in sandbox/production, and polls SL status in production
+8. **marketfeeder** (Go): Market data feeder that connects to Upstox **v3** websockets
+9. **NATS**: Message broker for communication between components
 
 ### Communication Flow
 
 ```
-solobot/trendobot/haemabot/firebot/fibobot -> ordersystem -> PostgreSQL
-solobot/trendobot/haemabot/firebot/fibobot -> NATS -> marketfeeder -> Upstox WebSocket -> NATS -> solobot/trendobot/haemabot/firebot/fibobot
+solobot/trendobot/haemabot/firebot/titanbot/fibobot -> ordersystem -> PostgreSQL
+solobot/trendobot/haemabot/firebot/titanbot/fibobot -> NATS -> marketfeeder -> Upstox WebSocket -> NATS -> solobot/trendobot/haemabot/firebot/titanbot/fibobot
 ordersystem (sandbox/production mode) → Upstox Orders API
 ```
 
@@ -151,6 +152,15 @@ python main.py --instruments nifty50 --strategy bb_vwap_ema --level mock
 
 Firebot is a renamed copy of haemabot. It loads params from `FIREBOT_PARAM_YAML`, `FIREBOT_PARAM_FILE`, or `files/param.yaml`, routes orders through the platform ordersystem client, and consumes market ticks through NATS/marketfeeder.
 
+### Running titanbot
+
+```bash
+cd bots/titanbot
+python main.py --instruments nifty50 --strategy timeseries_trend --level mock
+```
+
+Titanbot loads params from `TITANBOT_PARAM_YAML`, `TITANBOT_PARAM_FILE`, or `files/param.yaml`, routes orders through the platform ordersystem client, and consumes market ticks through NATS/marketfeeder.
+
 ### Running fibobot
 
 ```bash
@@ -268,8 +278,8 @@ Useful overrides:
 NAMESPACE=botspace
 TARGET_DATE=DD-MM-YYYY
 ORDERSYSTEM_POD=<ordersystem-pod-name>
-BOT_WORKLOAD_PATTERN='solobot|trendobot|haemabot|hemabot|firebot|fibobot'
-BOT_POD_PATTERN='solobot|trendobot|haemabot|hemabot|firebot|fibobot'
+BOT_WORKLOAD_PATTERN='solobot|trendobot|haemabot|hemabot|firebot|titanbot|fibobot'
+BOT_POD_PATTERN='solobot|trendobot|haemabot|hemabot|firebot|titanbot|fibobot'
 RESUME_BOTS=0
 ```
 
@@ -277,7 +287,7 @@ RESUME_BOTS=0
 
 ### Adding New Bots
 
-1. Create or update an engine under the relevant bot package, such as `bots/solobot/index/`, `bots/trendobot/index/`, `bots/haemabot/index/`, `bots/firebot/index/`, or `bots/fibobot/index/`
+1. Create or update an engine under the relevant bot package, such as `bots/solobot/index/`, `bots/trendobot/index/`, `bots/haemabot/index/`, `bots/firebot/index/`, `bots/titanbot/index/`, or `bots/fibobot/index/`
 2. Implement the NATS communication pattern
 3. Update the orchestrator to route to your new engine
 
