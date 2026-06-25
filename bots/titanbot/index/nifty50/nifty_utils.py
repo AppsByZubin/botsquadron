@@ -114,33 +114,38 @@ def get_nifty_historical_data_previous_day(upstox, instrument_key):
     except Exception as e:
         raise Exception(f"Failed to fetch historical data: {e}")
 
-def get_instrument_intraday_data(upstox, instrument_key):
+def get_instrument_intraday_data(upstox, instrument_key, interval="1"):
     """
     Args:
     - upstox: upstox client instance
     - instrument_key: Instrument key for Nifty 50
+    - interval: Intraday candle interval in minutes
             
     Notes:
     - fetch intraday candles data from market open for a given instrument key.
     """
     try:
-
-        # Calculate the time difference between 9:15 AM and the current time in minutes
-        market_open_time = Timestamp.now().replace(hour=9, minute=15, second=0, microsecond=0)
-        current_time = Timestamp.now()
-
-        interval = int((current_time - market_open_time).total_seconds() / 60)
+        interval = str(interval)
+        logger.info(
+            f"Calling get_intraday_data for instrument_key={instrument_key}, "
+            f"unit=minutes, interval={interval}"
+        )
         intraday_data = upstox.get_intraday_data(
             instrument_key,
             "minutes",
-            "1"
+            interval
         )
 
         if intraday_data.status != constants.SUCCESS:
             logger.error(f"Failed to fetch historical data: {intraday_data.data}")
             raise Exception("intraday data fetch failed")
         
-        return intraday_data.data.candles
+        candles = intraday_data.data.candles or []
+        logger.info(
+            f"Fetched {len(candles)} intraday candles for instrument_key={instrument_key}, "
+            f"interval={interval}"
+        )
+        return candles
     
     except Exception as e:
         raise Exception(f"Failed to fetch historical data from market open: {e}")

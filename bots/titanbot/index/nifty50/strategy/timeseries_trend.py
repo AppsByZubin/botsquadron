@@ -42,6 +42,8 @@ class TimeseriesTrendStrategy:
         index_minutes_processed: Optional[Dict[str, bool]] = None,
         future_minutes_processed: Optional[Dict[str, bool]] = None,
         intraday_index_candles=None,
+        intraday_index_5m_candles=None,
+        intraday_index_10m_candles=None,
         intraday_future_candles=None,
         option_exipry_date: Optional[str] = None,
         option_seq_file=None,
@@ -166,10 +168,17 @@ class TimeseriesTrendStrategy:
         self.df_index = self._empty_index_frame()
         self.df_index_5m = self._empty_timeframe_frame()
         self.df_index_10m = self._empty_timeframe_frame()
-        if intraday_index_candles is not None or intraday_future_candles is not None:
+        if (
+            intraday_index_candles is not None
+            or intraday_index_5m_candles is not None
+            or intraday_index_10m_candles is not None
+            or intraday_future_candles is not None
+        ):
             self._initialize_from_intraday_candles(
                 intraday_index_candles,
                 intraday_future_candles,
+                intraday_index_5m_candles,
+                intraday_index_10m_candles,
             )
         self._restore_open_order_container_from_ordersystem()
 
@@ -1136,7 +1145,13 @@ class TimeseriesTrendStrategy:
     # ------------------------------------------------------------------
     # Candle building and indicator calculation
     # ------------------------------------------------------------------
-    def _initialize_from_intraday_candles(self, index_candles, future_candles=None) -> None:
+    def _initialize_from_intraday_candles(
+        self,
+        index_candles,
+        future_candles=None,
+        index_5m_candles=None,
+        index_10m_candles=None,
+    ) -> None:
         def build_df(candles, include_volume: bool) -> pd.DataFrame:
             if not candles:
                 return pd.DataFrame()
@@ -1191,6 +1206,18 @@ class TimeseriesTrendStrategy:
                 df["oi"] = pd.to_numeric(df["oi"], errors="coerce")
             return df
 
+        def build_timeframe_df(candles) -> pd.DataFrame:
+            df = build_df(candles, include_volume=False)
+            if df.empty:
+                return self._empty_timeframe_frame()
+
+            close = pd.to_numeric(df["close"], errors="coerce")
+            ema = self._ema(close)
+            angle = self._ema_angle(ema)
+            df["ema"] = ema.to_numpy()
+            df["angle_ema"] = angle.to_numpy()
+            return df[["time", "open", "high", "low", "close", "volume", "ema", "angle_ema"]]
+
         df_index = build_df(index_candles, include_volume=False)
         if not df_index.empty:
             self.df_index = pd.concat([self.df_index, df_index], ignore_index=True)
@@ -1200,6 +1227,20 @@ class TimeseriesTrendStrategy:
             self.last_index_bar = self.df_index.iloc[-1].to_dict()
             self._mark_indicators_dirty(0)
             self._apply_indicators_if_dirty()
+
+        df_index_5m = build_timeframe_df(index_5m_candles)
+        if not df_index_5m.empty:
+            self.df_index_5m = df_index_5m
+            if not self.df_index.empty:
+                self._map_timeframe_values(5, self.df_index_5m)
+
+        df_index_10m = build_timeframe_df(index_10m_candles)
+        if not df_index_10m.empty:
+            self.df_index_10m = df_index_10m
+            if not self.df_index.empty:
+                self._map_timeframe_values(10, self.df_index_10m)
+
+        if not self.df_index.empty:
             self._trading_engine_active()
 
         df_future = build_df(future_candles, include_volume=True)
@@ -1452,7 +1493,8 @@ class TimeseriesTrendStrategy:
                 self._last_engine_revision = current_revision
                 return
 
-            if not self._is_trading_window(latest_time):
+            latest_ts = pd.to_datetime(latest_time, errors="coerce")
+            if pd.isna(latest_ts) or not (self.trade_start <= latest_ts.time() <= self.trade_end):
                 self._last_engine_revision = current_revision
                 return
 
