@@ -155,6 +155,7 @@ class TimeseriesTrendStrategy:
         self._today_realized_pnl_day: Optional[str] = None
         self._today_realized_pnl: float = 0.0
         self._today_realized_pnl_trade_ids = set()
+        self._last_outside_trading_window_log_minute: Optional[str] = None
         self.atr5_engine = AtrEngine(atr_period=self._coerce_int(sp.get("option_atr_period"), 5, minimum=1))
         self._order_container = self._new_order_container()
         self.trade_start, self.trade_end = self._init_trade_window_times()
@@ -311,11 +312,10 @@ class TimeseriesTrendStrategy:
             if self.curr_index_minute:
                 self._apply_indicators_if_dirty()
                 if self._is_trading_window(self.curr_index_minute):
+                    self._last_outside_trading_window_log_minute = None
                     self._trading_engine_active()
                 else:
-                    logger.info(f"Outside Trading Window at {self.curr_index_minute}")
-                    self._clear_waiting_order_intent()
-                    self._square_off_open_trade(reason=constants.EOD_SQUARE_OFF)
+                    self._log_outside_trading_window(self.curr_index_minute)
 
             self._trade_processing(feed_response)
 
@@ -327,14 +327,14 @@ class TimeseriesTrendStrategy:
     # Trade lifecycle, order creation and risk handling
     # ------------------------------------------------------------------
     def _trade_processing(self, feed_response):
-        if self.order_maneger is None:
-            return
-
         if self.curr_index_minute and not self._is_trading_window(self.curr_index_minute):
             if feed_response:
                 self._update_open_order_ltp(feed_response)
             self._clear_waiting_order_intent()
             self._square_off_open_trade(reason=constants.EOD_SQUARE_OFF)
+            return
+
+        if self.order_maneger is None:
             return
 
         if not feed_response:
@@ -1923,6 +1923,12 @@ class TimeseriesTrendStrategy:
             return False
         current = ts.time()
         return self.trade_start <= current <= self.trade_end
+
+    def _log_outside_trading_window(self, minute_key: str) -> None:
+        if minute_key == self._last_outside_trading_window_log_minute:
+            return
+        logger.info(f"Outside Trading Window at {minute_key}")
+        self._last_outside_trading_window_log_minute = minute_key
 
     def _init_trade_window_times(self) -> tuple[time, time]:
         sp = self._strategy_params()
