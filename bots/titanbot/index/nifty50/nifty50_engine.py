@@ -314,6 +314,8 @@ async def nifty50_engine(strategy, mode, param_data):
 
         selected_contracts = {}
         intraday_day_1min_candles = []
+        intraday_day_5min_candles = []
+        intraday_day_10min_candles = []
         intraday_day_future_candles = []
         minutes_processed = {}
         future_minutes_processed = {}
@@ -361,10 +363,16 @@ async def nifty50_engine(strategy, mode, param_data):
 
         else:																		  
             logger.info("Market already open. Bootstrapping intraday candles.")
-            data = get_instrument_intraday_data(upstox, constants.NIFTY50_SYMBOL)
+            data = get_instrument_intraday_data(upstox, constants.NIFTY50_SYMBOL, interval="1")
             data.reverse()
             intraday_day_1min_candles.extend(data)
-            future_data = get_instrument_intraday_data(upstox, future_contract["instrument_key"])
+            data_5min = get_instrument_intraday_data(upstox, constants.NIFTY50_SYMBOL, interval="5")
+            data_5min.reverse()
+            intraday_day_5min_candles.extend(data_5min)
+            data_10min = get_instrument_intraday_data(upstox, constants.NIFTY50_SYMBOL, interval="10")
+            data_10min.reverse()
+            intraday_day_10min_candles.extend(data_10min)
+            future_data = get_instrument_intraday_data(upstox, future_contract["instrument_key"], interval="1")
             future_data.reverse()
             intraday_day_future_candles.extend(future_data)
 
@@ -476,6 +484,8 @@ async def nifty50_engine(strategy, mode, param_data):
             index_minutes_processed=minutes_processed,
             future_minutes_processed=future_minutes_processed,
             intraday_index_candles=intraday_day_1min_candles,
+            intraday_index_5m_candles=intraday_day_5min_candles,
+            intraday_index_10m_candles=intraday_day_10min_candles,
             intraday_future_candles=intraday_day_future_candles,
         )
 
