@@ -156,6 +156,9 @@ class TimeseriesTrendStrategy:
         self._today_realized_pnl: float = 0.0
         self._today_realized_pnl_trade_ids = set()
         self._last_outside_trading_window_log_minute: Optional[str] = None
+        self._last_inside_trading_window_log_minute: Optional[str] = None
+        self._current_trading_window_minute: Optional[str] = None
+        self._current_trading_window_open = False
         self.atr5_engine = AtrEngine(atr_period=self._coerce_int(sp.get("option_atr_period"), 5, minimum=1))
         self._order_container = self._new_order_container()
         self.trade_start, self.trade_end = self._init_trade_window_times()
@@ -311,11 +314,7 @@ class TimeseriesTrendStrategy:
 
             if self.curr_index_minute:
                 self._apply_indicators_if_dirty()
-                if self._is_trading_window(self.curr_index_minute):
-                    self._last_outside_trading_window_log_minute = None
-                    self._trading_engine_active()
-                else:
-                    self._log_outside_trading_window(self.curr_index_minute)
+                self._trading_engine_active()
 
             self._trade_processing(feed_response)
 
@@ -327,7 +326,13 @@ class TimeseriesTrendStrategy:
     # Trade lifecycle, order creation and risk handling
     # ------------------------------------------------------------------
     def _trade_processing(self, feed_response):
-        if self.curr_index_minute and not self._is_trading_window(self.curr_index_minute):
+        if (
+            self.curr_index_minute
+            and (
+                self._current_trading_window_minute != self.curr_index_minute
+                or not self._current_trading_window_open
+            )
+        ):
             if feed_response:
                 self._update_open_order_ltp(feed_response)
             self._clear_waiting_order_intent()
@@ -1195,8 +1200,7 @@ class TimeseriesTrendStrategy:
             self.last_index_bar = self.df_index.iloc[-1].to_dict()
             self._mark_indicators_dirty(0)
             self._apply_indicators_if_dirty()
-            if self.last_index_bar and self._is_trading_window(str(self.last_index_bar.get("time"))):
-                self._trading_engine_active()
+            self._trading_engine_active()
 
         df_future = build_df(future_candles, include_volume=True)
         if not df_future.empty:
@@ -1427,6 +1431,16 @@ class TimeseriesTrendStrategy:
     # ------------------------------------------------------------------
     def _trading_engine_active(self):
         try:
+            latest = self.df_index.iloc[-1] if not self.df_index.empty else None
+            latest_idx = self.df_index.index[-1] if latest is not None else None
+            latest_time = str(latest.get("time")) if latest is not None else None
+            current_minute = self.curr_index_minute or latest_time
+            if not current_minute:
+                return
+
+            current_window_open = self._is_trading_window(current_minute)
+            self._set_trading_window_state(current_minute, current_window_open)
+
             if not self.enable_trading_engine:
                 return
 
@@ -1438,9 +1452,6 @@ class TimeseriesTrendStrategy:
                 self._last_engine_revision = current_revision
                 return
 
-            latest = self.df_index.iloc[-1]
-            latest_idx = self.df_index.index[-1]
-            latest_time = str(latest.get("time"))
             if not self._is_trading_window(latest_time):
                 self._last_engine_revision = current_revision
                 return
@@ -1929,6 +1940,30 @@ class TimeseriesTrendStrategy:
             return
         logger.info(f"Outside Trading Window at {minute_key}")
         self._last_outside_trading_window_log_minute = minute_key
+
+    def _set_trading_window_state(self, minute_key: str, is_open: bool) -> None:
+        self._current_trading_window_minute = minute_key
+        self._current_trading_window_open = bool(is_open)
+        if is_open:
+            self._last_outside_trading_window_log_minute = None
+            self._log_inside_trading_window(minute_key)
+            return
+
+        self._last_inside_trading_window_log_minute = None
+        self._log_outside_trading_window(minute_key)
+
+    def _log_inside_trading_window(self, minute_key: str) -> None:
+        if minute_key == self._last_inside_trading_window_log_minute:
+            return
+        status = self._order_container.get("status") or "IDLE"
+        side = self._order_container.get("side") or "NONE"
+        logger.info(
+            f"Inside Trading Window at {minute_key}; "
+            f"status={status}, side={side}, signal={self.last_signal}, "
+            f"trades={self._order_counter}/{self._max_order_counter}, "
+            f"candles={len(self.df_index)}"
+        )
+        self._last_inside_trading_window_log_minute = minute_key
 
     def _init_trade_window_times(self) -> tuple[time, time]:
         sp = self._strategy_params()
