@@ -144,7 +144,7 @@ class TimeseriesTrendStrategy:
         )
 
         self.enable_trading_engine = self._coerce_bool(sp.get("enable_trading_engine"), True)
-        self._max_order_counter = self._coerce_int(sp.get("trade-per-day", sp.get("trade_per_day")), 2, minimum=0)
+        self._max_order_counter = self._coerce_int(sp.get("trade-per-day", sp.get("trade-per-day")), 2, minimum=0)
         self._order_counter = 0
         self._post_exit_cooldown_minutes = self._coerce_int(sp.get("post_exit_cooldown_minutes"), 5, minimum=0)
         self._post_exit_cooldown_until: Optional[datetime] = None
