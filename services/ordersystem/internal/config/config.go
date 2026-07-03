@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"math"
 	"net/url"
 	"os"
 	"strconv"
@@ -19,6 +20,8 @@ type Config struct {
 	SLPollInterval          time.Duration
 	SLRefreshMinInterval    time.Duration
 	AccountInitialCash      float64
+	ThresholdDayLoss        float64
+	StrategyBotNames        []string
 	UpstoxBaseURL           string
 	UpstoxAccessToken       string
 	UpstoxOrderPlacePath    string
@@ -53,6 +56,8 @@ func Load() (Config, error) {
 		SLPollInterval:          parseDurationEnv("ORDERSYSTEM_SL_POLL_INTERVAL", 10*time.Second),
 		SLRefreshMinInterval:    parseDurationEnv("ORDERSYSTEM_SL_REFRESH_MIN_INTERVAL", 10*time.Second),
 		AccountInitialCash:      parseFloatEnv("ACCOUNT_INITIAL_CASH", 0),
+		ThresholdDayLoss:        parseFloatEnvAny([]string{"threshold_day_loss", "THRESHOLD_DAY_LOSS", "ORDERSYSTEM_THRESHOLD_DAY_LOSS"}, 0),
+		StrategyBotNames:        resolveStrategyBotNames(),
 		UpstoxBaseURL:           resolveUpstoxBaseURL(appMode),
 		UpstoxAccessToken:       resolveUpstoxAccessToken(appMode),
 		UpstoxOrderPlacePath:    resolveUpstoxEndpoint(appMode, "UPSTOX_ORDER_PLACE_PATH", upstoxHFTBaseURL, "/v3/order/place"),
@@ -93,6 +98,10 @@ func Load() (Config, error) {
 
 	if cfg.RequestTimeout <= 0 {
 		return Config{}, fmt.Errorf("ORDERSYSTEM_REQUEST_TIMEOUT must be > 0")
+	}
+
+	if math.IsNaN(cfg.ThresholdDayLoss) || math.IsInf(cfg.ThresholdDayLoss, 0) || cfg.ThresholdDayLoss < 0 {
+		return Config{}, fmt.Errorf("threshold_day_loss must be >= 0")
 	}
 
 	if cfg.UpstoxStatusRequestGap < 0 {
@@ -225,6 +234,63 @@ func parseFloatEnv(key string, fallback float64) float64 {
 		return fallback
 	}
 	return parsed
+}
+
+func parseFloatEnvAny(keys []string, fallback float64) float64 {
+	for _, key := range keys {
+		value := strings.TrimSpace(os.Getenv(key))
+		if value == "" {
+			continue
+		}
+		parsed, err := strconv.ParseFloat(value, 64)
+		if err != nil {
+			return fallback
+		}
+		return parsed
+	}
+	return fallback
+}
+
+func resolveStrategyBotNames() []string {
+	if configured := getFirstEnv("ORDERSYSTEM_STRATEGY_BOT_NAMES", "ORDERSYSTEM_KILL_SWITCH_BOT_NAMES"); configured != "" {
+		return splitCleanCSV(configured)
+	}
+
+	names := []string{
+		getEnv("SOLOBOT_BOT_NAME", "solobot"),
+		getEnv("TRENDOBOT_BOT_NAME", "trendobot"),
+		getEnv("HAEMABOT_BOT_NAME", "haemabot"),
+		getEnv("FIREBOT_BOT_NAME", "firebot"),
+		getEnv("TITANBOT_BOT_NAME", "titanbot"),
+		getEnv("FIBOBOT_BOT_NAME", "fibobot"),
+	}
+	return cleanStringSet(names)
+}
+
+func splitCleanCSV(value string) []string {
+	parts := strings.Split(value, ",")
+	return cleanStringSet(parts)
+}
+
+func cleanStringSet(values []string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		seen := false
+		for _, existing := range out {
+			if existing == value {
+				seen = true
+				break
+			}
+		}
+		if !seen {
+			out = append(out, value)
+		}
+	}
+	return out
 }
 
 func normalizePath(path string) string {

@@ -145,6 +145,41 @@ func TestLoadDefaultsToSandbox(t *testing.T) {
 	}
 }
 
+func TestLoadReadsThresholdDayLoss(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgresql://user:pass@example.com:5432/omsdb?sslmode=disable")
+	t.Setenv("UPSTOX_SANDBOX_API_ACCESS_TOKEN", "sandbox-token")
+	t.Setenv("threshold_day_loss", "3500.75")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.ThresholdDayLoss != 3500.75 {
+		t.Fatalf("ThresholdDayLoss = %v, want 3500.75", cfg.ThresholdDayLoss)
+	}
+}
+
+func TestLoadReadsStrategyBotNames(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgresql://user:pass@example.com:5432/omsdb?sslmode=disable")
+	t.Setenv("UPSTOX_SANDBOX_API_ACCESS_TOKEN", "sandbox-token")
+	t.Setenv("ORDERSYSTEM_STRATEGY_BOT_NAMES", "alpha, beta,alpha")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+
+	want := []string{"alpha", "beta"}
+	if len(cfg.StrategyBotNames) != len(want) {
+		t.Fatalf("StrategyBotNames = %#v, want %#v", cfg.StrategyBotNames, want)
+	}
+	for idx := range want {
+		if cfg.StrategyBotNames[idx] != want[idx] {
+			t.Fatalf("StrategyBotNames = %#v, want %#v", cfg.StrategyBotNames, want)
+		}
+	}
+}
+
 func TestLoadRejectsUnsupportedMode(t *testing.T) {
 	t.Setenv("DATABASE_URL", "postgresql://user:pass@example.com:5432/omsdb?sslmode=disable")
 	t.Setenv("APP_MODE", "paper")

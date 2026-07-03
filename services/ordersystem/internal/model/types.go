@@ -3,11 +3,12 @@ package model
 import "time"
 
 const (
-	KillModeStatus       = "KILL_MODE"
-	KillModeMessage      = "Order intake blocked; no orders to be accepted."
-	KillSwitchExitStatus = "KILL_SWITCH"
-	OrderBlockStatus     = "ORDER_BLOCKED"
-	OrderBlockMessage    = "Order intake blocked for bot; existing broker orders and OMS trades were not changed."
+	AllStrategiesKillSwitchBotName = "__all_strategies__"
+	KillModeStatus                 = "KILL_MODE"
+	KillModeMessage                = "Order intake blocked; no orders to be accepted."
+	KillSwitchExitStatus           = "KILL_SWITCH"
+	OrderBlockStatus               = "ORDER_BLOCKED"
+	OrderBlockMessage              = "Order intake blocked for bot; existing broker orders and OMS trades were not changed."
 )
 
 type CreateTradeRequest struct {

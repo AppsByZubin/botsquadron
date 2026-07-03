@@ -503,6 +503,33 @@ func TestKillPositionTagsDefaultsToBotEntryTag(t *testing.T) {
 	}
 }
 
+func TestDayLossThresholdReached(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		dayLoss   float64
+		threshold float64
+		want      bool
+	}{
+		{name: "disabled at zero", dayLoss: 100, threshold: 0},
+		{name: "below threshold", dayLoss: 99.99, threshold: 100},
+		{name: "at threshold", dayLoss: 100, threshold: 100, want: true},
+		{name: "above threshold", dayLoss: 101, threshold: 100, want: true},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := dayLossThresholdReached(tt.dayLoss, tt.threshold); got != tt.want {
+				t.Fatalf("dayLossThresholdReached(%v, %v) = %v, want %v", tt.dayLoss, tt.threshold, got, tt.want)
+			}
+		})
+	}
+}
+
 func requireFloatPtr(t *testing.T, name string, got *float64, want float64) {
 	t.Helper()
 	if got == nil {

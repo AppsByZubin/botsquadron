@@ -74,6 +74,12 @@ type CreateAccountParams struct {
 	CurrentTime time.Time
 }
 
+type DailyLossSummary struct {
+	CurrDate    string
+	RealizedPNL float64
+	Loss        float64
+}
+
 func New(pool *pgxpool.Pool, timezone string, accountInitialCash float64) (*Store, error) {
 	loc, err := time.LoadLocation(timezone)
 	if err != nil {
@@ -690,12 +696,102 @@ RETURNING COALESCE(botname, ''), COALESCE(kill_enabled, false), COALESCE(reason,
 	return state, nil
 }
 
+func (s *Store) ResumeAllBotKillSwitches(ctx context.Context, reason string) (int64, error) {
+	result, err := s.pool.Exec(ctx, `
+UPDATE bot_runtime_controls
+SET
+    kill_enabled = false,
+    reason = NULLIF(BTRIM($1), ''),
+    updated_at = NOW()
+WHERE kill_enabled = true`, strings.TrimSpace(reason))
+	if err != nil {
+		return 0, fmt.Errorf("resume all bot kill switches: %w", err)
+	}
+	return result.RowsAffected(), nil
+}
+
+func (s *Store) ListKnownBotNames(ctx context.Context) ([]string, error) {
+	rows, err := s.pool.Query(ctx, fmt.Sprintf(`
+SELECT DISTINCT botname
+FROM (
+    SELECT COALESCE(botname, '') AS botname
+    FROM accounts
+    UNION ALL
+    SELECT COALESCE(botname, '') AS botname
+    FROM bot_runtime_controls
+    UNION ALL
+    SELECT COALESCE(a.botname, '') AS botname
+    FROM %s AS t
+    LEFT JOIN accounts AS a ON a.id = t.acct_id
+) AS names
+WHERE NULLIF(BTRIM(botname), '') IS NOT NULL
+  AND botname <> $1
+ORDER BY botname`, s.tradesTable), model.AllStrategiesKillSwitchBotName)
+	if err != nil {
+		return nil, fmt.Errorf("list known bot names: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]string, 0)
+	for rows.Next() {
+		var botName string
+		if err := rows.Scan(&botName); err != nil {
+			return nil, fmt.Errorf("scan known bot name: %w", err)
+		}
+		out = append(out, botName)
+	}
+	if rows.Err() != nil {
+		return nil, fmt.Errorf("iterate known bot names: %w", rows.Err())
+	}
+	return out, nil
+}
+
 func (s *Store) ListOpenTradesByBotDate(ctx context.Context, botName string, currDate string) ([]model.Trade, error) {
 	return s.listTradesByBotDateStatus(ctx, botName, currDate, true)
 }
 
 func (s *Store) ListClosedTradesByBotDate(ctx context.Context, botName string, currDate string) ([]model.Trade, error) {
 	return s.listTradesByBotDateStatus(ctx, botName, currDate, false)
+}
+
+func (s *Store) DailyLossSummaryForTrade(ctx context.Context, tradeID string) (DailyLossSummary, error) {
+	tradeID = strings.TrimSpace(tradeID)
+	if tradeID == "" {
+		return DailyLossSummary{}, fmt.Errorf("trade id is required")
+	}
+
+	var currDate string
+	if err := s.pool.QueryRow(ctx, fmt.Sprintf(`
+SELECT COALESCE(a.curr_date, '')
+FROM %s AS t
+LEFT JOIN accounts AS a ON a.id = t.acct_id
+WHERE t.id::text = $1
+LIMIT 1`, s.tradesTable), tradeID).Scan(&currDate); err != nil {
+		return DailyLossSummary{}, fmt.Errorf("load trade curr_date: %w", err)
+	}
+
+	return s.DailyLossSummary(ctx, currDate)
+}
+
+func (s *Store) DailyLossSummary(ctx context.Context, currDate string) (DailyLossSummary, error) {
+	normalizedDate := normalizeCurrDate(currDate, time.Now().In(s.loc))
+
+	var realizedPNL float64
+	if err := s.pool.QueryRow(ctx, fmt.Sprintf(`
+SELECT COALESCE(SUM(COALESCE(o.pnl, 0)), 0)::float8
+FROM accounts AS a
+JOIN %s AS t ON t.acct_id = a.id
+JOIN %s AS o ON o.trade_id = t.id
+WHERE a.curr_date = $1
+  AND o.exit_time IS NOT NULL`, s.tradesTable, ordersTableName), normalizedDate).Scan(&realizedPNL); err != nil {
+		return DailyLossSummary{}, fmt.Errorf("load daily realized pnl: %w", err)
+	}
+
+	return DailyLossSummary{
+		CurrDate:    normalizedDate,
+		RealizedPNL: realizedPNL,
+		Loss:        math.Max(-realizedPNL, 0),
+	}, nil
 }
 
 func (s *Store) listTradesByBotDateStatus(ctx context.Context, botName string, currDate string, wantOpen bool) ([]model.Trade, error) {

@@ -22,6 +22,7 @@ type Service struct {
 	upstox        *upstox.Client
 	slRefreshMu   sync.Mutex
 	slRefreshLast map[string]time.Time
+	dayLossMu     sync.Mutex
 }
 
 func New(cfg config.Config, st *store.Store, upClient *upstox.Client) *Service {
@@ -102,7 +103,7 @@ func (s *Service) CreateTrade(ctx context.Context, req model.CreateTradeRequest)
 	if s.store == nil {
 		return model.CreateTradeResponse{}, fmt.Errorf("store is not configured")
 	}
-	killState, err := s.store.GetBotKillSwitch(ctx, req.BotName)
+	killState, err := s.effectiveBotKillSwitch(ctx, req.BotName)
 	if err != nil {
 		return model.CreateTradeResponse{}, err
 	}
@@ -473,7 +474,7 @@ func (s *Service) GetBotKillSwitch(ctx context.Context, botName string) (model.B
 		return model.BotKillSwitchResponse{}, fmt.Errorf("store is not configured")
 	}
 
-	state, err := s.store.GetBotKillSwitch(ctx, botName)
+	state, err := s.effectiveBotKillSwitch(ctx, botName)
 	if err != nil {
 		return model.BotKillSwitchResponse{}, err
 	}
@@ -736,6 +737,7 @@ func (s *Service) SquareOffTrade(ctx context.Context, tradeID string, req model.
 	if err := s.store.SquareOffTrade(ctx, tradeID, exitOrderIDs, req.ExitPrice, trade.Qty, req.ExitTime, exitStatus); err != nil {
 		return model.SquareOffTradeResponse{}, err
 	}
+	s.enforceThresholdDayLossAfterTradeClose(ctx, tradeID)
 
 	closedTrade, err := s.store.GetTradeByID(ctx, tradeID)
 	if err != nil {
@@ -1221,7 +1223,105 @@ func (s *Service) recordStopLossFill(ctx context.Context, trade model.TradeForSL
 		log.Printf("record SL fill failed for trade_id=%s order_id=%s: %v", trade.ID, orderID, err)
 		return
 	}
+	s.enforceThresholdDayLossAfterTradeClose(ctx, trade.ID)
 	log.Printf("recorded SL fill in DB trade_id=%s order_id=%s exit_price=%.2f qty=%d brokerage=%s", trade.ID, orderID, exitPrice, exitQty, floatPtrForLog(brokerage))
+}
+
+func (s *Service) effectiveBotKillSwitch(ctx context.Context, botName string) (model.BotKillSwitch, error) {
+	globalState, err := s.store.GetBotKillSwitch(ctx, model.AllStrategiesKillSwitchBotName)
+	if err != nil {
+		return model.BotKillSwitch{}, err
+	}
+	if globalState.KillEnabled {
+		globalState.BotName = strings.TrimSpace(botName)
+		return globalState, nil
+	}
+	return s.store.GetBotKillSwitch(ctx, botName)
+}
+
+func (s *Service) enforceThresholdDayLossAfterTradeClose(ctx context.Context, tradeID string) {
+	if s.store == nil || s.cfg.ThresholdDayLoss <= 0 {
+		return
+	}
+
+	s.dayLossMu.Lock()
+	defer s.dayLossMu.Unlock()
+
+	summary, err := s.store.DailyLossSummaryForTrade(ctx, tradeID)
+	if err != nil {
+		log.Printf("daily loss threshold check failed for trade_id=%s: %v", tradeID, err)
+		return
+	}
+	if !dayLossThresholdReached(summary.Loss, s.cfg.ThresholdDayLoss) {
+		return
+	}
+
+	globalState, err := s.store.GetBotKillSwitch(ctx, model.AllStrategiesKillSwitchBotName)
+	if err != nil {
+		log.Printf("daily loss threshold global kill state check failed: %v", err)
+		return
+	}
+	if globalState.KillEnabled {
+		return
+	}
+
+	reason := fmt.Sprintf(
+		"threshold_day_loss reached for %s: day_loss=%.2f threshold=%.2f realized_pnl=%.2f",
+		summary.CurrDate,
+		summary.Loss,
+		s.cfg.ThresholdDayLoss,
+		summary.RealizedPNL,
+	)
+	if err := s.enableKillSwitchForAllStrategies(ctx, summary.CurrDate, reason); err != nil {
+		log.Printf("daily loss threshold kill-all failed: %v", err)
+		return
+	}
+	log.Printf("daily loss threshold kill-all enabled: %s", reason)
+}
+
+func dayLossThresholdReached(dayLoss float64, threshold float64) bool {
+	return threshold > 0 && dayLoss >= threshold
+}
+
+func (s *Service) enableKillSwitchForAllStrategies(ctx context.Context, currDate string, reason string) error {
+	if s.store == nil {
+		return fmt.Errorf("store is not configured")
+	}
+
+	if _, err := s.store.SetBotKillSwitch(ctx, model.AllStrategiesKillSwitchBotName, true, reason); err != nil {
+		return err
+	}
+
+	botNames := append([]string(nil), s.cfg.StrategyBotNames...)
+	knownBotNames, err := s.store.ListKnownBotNames(ctx)
+	if err != nil {
+		log.Printf("daily loss threshold list known bots failed: %v", err)
+	} else {
+		botNames = append(botNames, knownBotNames...)
+	}
+	botNames = cleanStringSet(botNames)
+
+	errorsOut := make([]string, 0)
+	for _, botName := range botNames {
+		if strings.TrimSpace(botName) == "" || botName == model.AllStrategiesKillSwitchBotName {
+			continue
+		}
+		resp, err := s.KillBot(ctx, botName, model.KillBotRequest{
+			CurrDate: currDate,
+			Reason:   reason,
+		})
+		if err != nil {
+			errorsOut = append(errorsOut, fmt.Sprintf("%s: %v", botName, err))
+			continue
+		}
+		for _, brokerErr := range resp.Errors {
+			log.Printf("daily loss threshold kill-all broker warning bot=%s: %s", botName, brokerErr)
+		}
+	}
+	if len(errorsOut) > 0 {
+		return errors.New(strings.Join(errorsOut, "; "))
+	}
+	return nil
 }
 
 func (s *Service) calculateBrokerage(ctx context.Context, trade model.TradeForSLPolling, statusResp upstox.OrderStatus, price float64, qty int, fallbackTxnType string) *float64 {

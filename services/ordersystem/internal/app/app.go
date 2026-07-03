@@ -53,6 +53,14 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 		st.Close()
 		return nil, err
 	}
+	resumeCtx, resumeCancel := context.WithTimeout(ctx, cfg.RequestTimeout)
+	defer resumeCancel()
+	resumedKillRows, err := st.ResumeAllBotKillSwitches(resumeCtx, "ordersystem startup resume")
+	if err != nil {
+		st.Close()
+		return nil, err
+	}
+	logger.Printf("ordersystem startup resumed %d kill switch rows", resumedKillRows)
 
 	var upClient *upstox.Client
 	if strings.TrimSpace(cfg.UpstoxAccessToken) != "" {
