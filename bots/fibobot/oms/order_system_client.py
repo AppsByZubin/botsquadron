@@ -436,8 +436,20 @@ class OrderSystemClient:
         response = self._request("POST", "/v1/trades", json=payload)
         self._sync_closed_trades_from_kill_response(response)
         trade_id = str(response.get("trade_id") or "").strip()
-        if not trade_id and str(response.get("status") or "").strip().upper() == "KILL_MODE":
-            log.warning(str(response.get("message") or "KILL mode enabled no orders to be accepted."))
+        status = str(response.get("status") or "").strip().upper()
+        if not trade_id and status == "KILL_MODE":
+            message = str(response.get("message") or "KILL mode enabled no orders to be accepted.").strip()
+            reason = str(response.get("reason") or "").strip()
+            log.warning(
+                "Order intake blocked by ordersystem bot_name=%s symbol=%s instrument_token=%s "
+                "status=%s message=%s reason=%s",
+                self.bot_name,
+                symbol,
+                instrument_token,
+                status,
+                message,
+                reason or "<empty>",
+            )
             return response
         if trade_id:
             local_row = self._local_row_from_create(payload, response, ts=ts)

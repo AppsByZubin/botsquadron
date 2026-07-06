@@ -49,6 +49,7 @@ type CreateTradeResponse struct {
 	EntryOrders   []OrderRef `json:"entry_orders,omitempty"`
 	SLOrders      []OrderRef `json:"sl_orders,omitempty"`
 	Message       string     `json:"message,omitempty"`
+	Reason        string     `json:"reason,omitempty"`
 	ClosedTrades  []Trade    `json:"closed_trades,omitempty"`
 	ClosedOrders  []Trade    `json:"closed_orders,omitempty"`
 }

@@ -111,6 +111,7 @@ func TestHandleCreateTradeReturnsOKForKillMode(t *testing.T) {
 		createResp: model.CreateTradeResponse{
 			Status:  model.KillModeStatus,
 			Message: model.KillModeMessage,
+			Reason:  "threshold_day_loss reached for 06-07-2026: day_loss=3500.75 threshold=3500.00 realized_pnl=-3500.75",
 		},
 	}, 5*time.Second)
 
@@ -128,6 +129,9 @@ func TestHandleCreateTradeReturnsOKForKillMode(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), model.KillModeMessage) {
 		t.Fatalf("body = %s, want kill-mode message", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "threshold_day_loss reached") {
+		t.Fatalf("body = %s, want kill-mode reason", rec.Body.String())
 	}
 }
 

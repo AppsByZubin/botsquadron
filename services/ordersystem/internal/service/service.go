@@ -115,6 +115,7 @@ func (s *Service) CreateTrade(ctx context.Context, req model.CreateTradeRequest)
 		return model.CreateTradeResponse{
 			Status:       model.KillModeStatus,
 			Message:      model.KillModeMessage,
+			Reason:       killState.Reason,
 			ClosedTrades: closedTrades,
 			ClosedOrders: closedTrades,
 		}, nil
