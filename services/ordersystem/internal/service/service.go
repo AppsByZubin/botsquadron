@@ -582,7 +582,7 @@ func (s *Service) ModifyTrade(ctx context.Context, tradeID string, req model.Mod
 			continue
 		}
 
-		if _, err := s.upstox.ModifyOrder(ctx, upstox.ModifyOrderRequest{
+		modifyResp, err := s.upstox.ModifyOrder(ctx, upstox.ModifyOrderRequest{
 			Quantity:     qty,
 			Validity:     validity,
 			Price:        float64Value(slLimit),
@@ -590,7 +590,8 @@ func (s *Service) ModifyTrade(ctx context.Context, tradeID string, req model.Mod
 			OrderType:    orderType,
 			DisclosedQty: req.DisclosedQty,
 			TriggerPrice: float64Value(stoploss),
-		}); err != nil {
+		})
+		if err != nil {
 			if upstox.IsRateLimited(err) {
 				return model.ModifyTradeResponse{}, fmt.Errorf("modify trade rate limited for trade_id=%s order_id=%s: %w", tradeID, orderID, err)
 			}
@@ -607,7 +608,17 @@ func (s *Service) ModifyTrade(ctx context.Context, tradeID string, req model.Mod
 			continue
 		}
 
-		modifiedOrderIDs = append(modifiedOrderIDs, orderID)
+		activeOrderID := strings.TrimSpace(modifyResp.OrderID)
+		if activeOrderID == "" {
+			activeOrderID = orderID
+		}
+		if activeOrderID != orderID {
+			if err := s.store.ReplaceStopLossOrderID(ctx, tradeID, orderID, activeOrderID); err != nil {
+				return model.ModifyTradeResponse{}, err
+			}
+			log.Printf("stoploss modify replaced broker order id trade_id=%s old_order_id=%s new_order_id=%s", tradeID, orderID, activeOrderID)
+		}
+		modifiedOrderIDs = append(modifiedOrderIDs, activeOrderID)
 	}
 
 	if len(failedOrderMessages) > 0 {
@@ -1081,9 +1092,14 @@ func (s *Service) syncStopLossAfterModifyError(ctx context.Context, trade model.
 	// Upstox sometimes rejects modify with UDAPI100041 before order details/trades
 	// reflect the terminal state. Treat the modify rejection as authoritative for
 	// trailing management so bots do not repeatedly retry the same dead SL order.
-	if err := s.store.DisableTrailingByTradeID(ctx, trade.ID); err != nil {
+	disabled, err := s.store.DisableTrailingByActiveStopLossOrderID(ctx, trade.ID, orderID)
+	if err != nil {
 		log.Printf("disable trailing after terminal modify rejection failed for trade_id=%s order_id=%s: %v", trade.ID, orderID, err)
 		return "", stopLossNotTerminal
+	}
+	if !disabled {
+		log.Printf("modify rejected for stale terminal SL; current active SL already moved on trade_id=%s order_id=%s: %v", trade.ID, orderID, modifyErr)
+		return fmt.Sprintf("%s: modify rejected for stale terminal stoploss order", orderID), stopLossTerminalUnfilled
 	}
 	log.Printf("modify rejected for terminal SL; disabled trailing and kept trade open trade_id=%s order_id=%s: %v", trade.ID, orderID, modifyErr)
 	return fmt.Sprintf("%s: modify rejected because stoploss order is terminal; disabled trailing", orderID), stopLossTerminalUnfilled
@@ -1404,8 +1420,13 @@ func singleOrderFallbackQty(tradeQty int, orderCount int) int {
 }
 
 func (s *Service) handleTerminalUnfilledStopLoss(ctx context.Context, tradeID string, orderID string, status string) {
-	if err := s.store.DisableTrailingByTradeID(ctx, tradeID); err != nil {
+	disabled, err := s.store.DisableTrailingByActiveStopLossOrderID(ctx, tradeID, orderID)
+	if err != nil {
 		log.Printf("disable trailing after terminal SL failed for trade_id=%s order_id=%s status=%s: %v", tradeID, orderID, status, err)
+		return
+	}
+	if !disabled {
+		log.Printf("sl order terminal but no longer active; kept trailing unchanged trade_id=%s order_id=%s status=%s", tradeID, orderID, status)
 		return
 	}
 	log.Printf("sl order terminal but not filled; disabled trailing and kept trade open trade_id=%s order_id=%s status=%s", tradeID, orderID, status)

@@ -103,6 +103,38 @@ func TestClientModifyOrderSendsExpectedPayload(t *testing.T) {
 	}
 }
 
+func TestClientModifyOrderCapturesReplacementOrderID(t *testing.T) {
+	t.Parallel()
+
+	client := NewClient(config.Config{
+		UpstoxBaseURL:         "https://api.example.com",
+		UpstoxAccessToken:     "test-token",
+		UpstoxOrderModifyPath: "/v3/order/modify",
+	})
+	client.httpClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{"status":"success","data":{"order_id":"order-456"}}`)),
+		}, nil
+	})}
+
+	resp, err := client.ModifyOrder(context.Background(), ModifyOrderRequest{
+		OrderID:      "order-123",
+		Quantity:     75,
+		Validity:     "DAY",
+		OrderType:    "SL",
+		TriggerPrice: 91,
+		Price:        90.5,
+	})
+	if err != nil {
+		t.Fatalf("ModifyOrder returned error: %v", err)
+	}
+	if resp.OrderID != "order-456" {
+		t.Fatalf("response order_id = %s, want replacement order-456", resp.OrderID)
+	}
+}
+
 func TestClientModifyOrderBacksOffOn429(t *testing.T) {
 	t.Parallel()
 

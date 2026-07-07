@@ -1484,6 +1484,35 @@ WHERE id::text = $1
 	return nil
 }
 
+func (s *Store) DisableTrailingByActiveStopLossOrderID(ctx context.Context, tradeID string, brokerOrderID string) (bool, error) {
+	tradeID = strings.TrimSpace(tradeID)
+	brokerOrderID = strings.TrimSpace(brokerOrderID)
+	if tradeID == "" {
+		return false, fmt.Errorf("trade id is required")
+	}
+	if brokerOrderID == "" {
+		return false, fmt.Errorf("broker order id is required")
+	}
+
+	result, err := s.pool.Exec(ctx, fmt.Sprintf(`
+UPDATE %s AS t
+SET tsl_active = false
+WHERE t.id::text = $1
+  AND (t.status IS NULL OR UPPER(t.status) IN ('OPEN', 'PLACED', 'ENTRY_PLACED'))
+  AND EXISTS (
+      SELECT 1
+      FROM %s AS o
+      WHERE o.trade_id = t.id
+        AND lower(COALESCE(o.order_type, '')) = 'sl'
+        AND o.order_id = $2
+        AND o.exit_time IS NULL
+  )`, s.tradesTable, ordersTableName), tradeID, brokerOrderID)
+	if err != nil {
+		return false, fmt.Errorf("disable trailing by active sl order id: %w", err)
+	}
+	return result.RowsAffected() > 0, nil
+}
+
 func (s *Store) UpdateTrailingStateByTradeID(ctx context.Context, tradeID string, stoploss *float64, slLimit *float64, spotTrailAnchor *float64) error {
 	if strings.TrimSpace(tradeID) == "" {
 		return fmt.Errorf("trade id is required")
@@ -1518,6 +1547,41 @@ WHERE trade_id::text = $1
 
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit update trailing state: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) ReplaceStopLossOrderID(ctx context.Context, tradeID string, oldBrokerOrderID string, newBrokerOrderID string) error {
+	tradeID = strings.TrimSpace(tradeID)
+	oldBrokerOrderID = strings.TrimSpace(oldBrokerOrderID)
+	newBrokerOrderID = strings.TrimSpace(newBrokerOrderID)
+	if tradeID == "" {
+		return fmt.Errorf("trade id is required")
+	}
+	if oldBrokerOrderID == "" {
+		return fmt.Errorf("old broker order id is required")
+	}
+	if newBrokerOrderID == "" {
+		return fmt.Errorf("new broker order id is required")
+	}
+	if oldBrokerOrderID == newBrokerOrderID {
+		return nil
+	}
+
+	result, err := s.pool.Exec(ctx, fmt.Sprintf(`
+UPDATE %s
+SET
+    order_id = $3,
+    exchange_order_id = NULL
+WHERE trade_id::text = $1
+  AND lower(COALESCE(order_type, '')) = 'sl'
+  AND order_id = $2
+  AND exit_time IS NULL`, ordersTableName), tradeID, oldBrokerOrderID, newBrokerOrderID)
+	if err != nil {
+		return fmt.Errorf("replace sl broker order id: %w", err)
+	}
+	if result.RowsAffected() == 0 {
+		return fmt.Errorf("replace sl broker order id matched no active sl order row for trade_id=%s old_order_id=%s", tradeID, oldBrokerOrderID)
 	}
 	return nil
 }
