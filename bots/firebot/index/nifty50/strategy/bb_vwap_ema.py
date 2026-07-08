@@ -277,10 +277,38 @@ class BbVwapEmaStrategy:
         self._gap_direction: Optional[str] = None
 
     def _extract_day_key(self, minute_key: str) -> Optional[str]:
+        dt_obj = self._parse_datetime_value(minute_key)
+        if dt_obj is None:
+            return None
+        return dt_obj.strftime("%Y-%m-%d")
+
+    @staticmethod
+    def _parse_datetime_value(value: Any) -> Optional[datetime]:
+        if isinstance(value, datetime):
+            return value
+        ts = pd.to_datetime(value, errors="coerce")
+        if pd.isna(ts):
+            return None
         try:
-            return datetime.strptime(str(minute_key), "%Y-%m-%d %H:%M").strftime("%Y-%m-%d")
+            return ts.to_pydatetime()
         except Exception:
             return None
+
+    @staticmethod
+    def _parse_time_value(value: Any, default: time) -> time:
+        text = str(value or "").strip()
+        for fmt in ("%H:%M:%S", "%H:%M"):
+            try:
+                return datetime.strptime(text, fmt).time()
+            except Exception:
+                continue
+        return default
+
+    @staticmethod
+    def _ensure_ist(dt_obj: datetime) -> datetime:
+        if dt_obj.tzinfo is None:
+            return dt_obj.replace(tzinfo=ist)
+        return dt_obj.astimezone(ist)
 
     @staticmethod
     def _coerce_bool(value: Any, default: bool) -> bool:
@@ -458,9 +486,8 @@ class BbVwapEmaStrategy:
 
     def _update_gap_stats(self, candle: Dict[str, Any]) -> None:
         minute_key = str(candle.get("time") or "")
-        try:
-            dt_obj = datetime.strptime(minute_key, "%Y-%m-%d %H:%M")
-        except Exception:
+        dt_obj = self._parse_datetime_value(minute_key)
+        if dt_obj is None:
             return
         day_key = dt_obj.strftime("%Y-%m-%d")
 
@@ -1517,11 +1544,7 @@ class BbVwapEmaStrategy:
         if not isinstance(trade_window, dict):
             trade_window = {}
         end_str = str(trade_window.get("end") or "15:10").strip()
-        try:
-            hh, mm = map(int, end_str.split(":"))
-            self._trade_end_time = time(hh, mm)
-        except Exception:
-            self._trade_end_time = time(15, 10)
+        self._trade_end_time = self._parse_time_value(end_str, time(15, 10))
 
     def _is_trading_window(self, time_str: str) -> bool:
         try:
@@ -1533,9 +1556,12 @@ class BbVwapEmaStrategy:
             start_time = trade_window.get("start", market_hours.get("start", "09:45"))
             end_time = trade_window.get("end", market_hours.get("end", "14:45"))
 
-            current_time = datetime.strptime(time_str, "%Y-%m-%d %H:%M").time()
-            start_time_obj = datetime.strptime(start_time, "%H:%M").time()
-            end_time_obj = datetime.strptime(end_time, "%H:%M").time()
+            current_dt = self._parse_datetime_value(time_str)
+            if current_dt is None:
+                return False
+            current_time = current_dt.time()
+            start_time_obj = self._parse_time_value(start_time, time(9, 45))
+            end_time_obj = self._parse_time_value(end_time, time(14, 45))
 
             return start_time_obj <= current_time <= end_time_obj
         except Exception as e:
@@ -1544,10 +1570,9 @@ class BbVwapEmaStrategy:
 
     def _resolve_reference_ts(self) -> datetime:
         if self.curr_index_minute:
-            try:
-                return datetime.strptime(self.curr_index_minute, "%Y-%m-%d %H:%M").replace(tzinfo=ist)
-            except Exception:
-                pass
+            dt_obj = self._parse_datetime_value(self.curr_index_minute)
+            if dt_obj is not None:
+                return self._ensure_ist(dt_obj)
         return datetime.now(ist)
 
     def _set_post_exit_cooldown(self, exit_status: Optional[str], ts: Optional[datetime] = None) -> None:
@@ -2129,7 +2154,10 @@ class BbVwapEmaStrategy:
                     self._reset_order_container()
 
         if self.curr_index_minute:
-            current_time = datetime.strptime(self.curr_index_minute, "%Y-%m-%d %H:%M").time()
+            current_dt = self._parse_datetime_value(self.curr_index_minute)
+            if current_dt is None:
+                return
+            current_time = current_dt.time()
 
             # Hard EOD cleanup to avoid overnight carry.
             if current_time >= self._trade_end_time:

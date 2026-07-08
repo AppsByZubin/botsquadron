@@ -963,10 +963,10 @@ class BbVwapEmaV2Strategy(BbVwapEmaStrategy):
         if not self.curr_index_minute:
             return
 
-        try:
-            current_time = datetime.strptime(self.curr_index_minute, "%Y-%m-%d %H:%M").time()
-        except Exception:
+        current_dt = self._parse_datetime_value(self.curr_index_minute)
+        if current_dt is None:
             return
+        current_time = current_dt.time()
         if current_time < self._trade_end_time:
             return
 

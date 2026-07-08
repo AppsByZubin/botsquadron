@@ -1928,10 +1928,9 @@ class TimeseriesTrendStrategy:
 
         minute_key = self._minute_from_tick(item)
         if minute_key:
-            try:
-                return datetime.strptime(minute_key, "%Y-%m-%d %H:%M").replace(tzinfo=ist)
-            except Exception:
-                return None
+            dt_obj = self._parse_datetime_value(minute_key)
+            if dt_obj is not None:
+                return self._ensure_ist(dt_obj)
         return None
 
     def _resolve_reference_ts(self) -> datetime:
@@ -1941,11 +1940,28 @@ class TimeseriesTrendStrategy:
         if minute_key is None:
             minute_key = self.curr_index_minute
         if minute_key:
-            try:
-                return datetime.strptime(str(minute_key), "%Y-%m-%d %H:%M").replace(tzinfo=ist)
-            except Exception:
-                pass
+            dt_obj = self._parse_datetime_value(minute_key)
+            if dt_obj is not None:
+                return self._ensure_ist(dt_obj)
         return datetime.now(ist)
+
+    @staticmethod
+    def _parse_datetime_value(value: Any) -> Optional[datetime]:
+        if isinstance(value, datetime):
+            return value
+        ts = pd.to_datetime(value, errors="coerce")
+        if pd.isna(ts):
+            return None
+        try:
+            return ts.to_pydatetime()
+        except Exception:
+            return None
+
+    @staticmethod
+    def _ensure_ist(dt_obj: datetime) -> datetime:
+        if dt_obj.tzinfo is None:
+            return dt_obj.replace(tzinfo=ist)
+        return dt_obj.astimezone(ist)
 
     def _minute_from_tick(self, item: Dict[str, Any]) -> Optional[str]:
         minute_key, _ = self._minute_and_timestamp_from_tick(item)
@@ -2016,10 +2032,13 @@ class TimeseriesTrendStrategy:
         return self._parse_hhmm(start_str, time(9, 20)), self._parse_hhmm(end_str, time(15, 15))
 
     def _parse_hhmm(self, value: Any, default: time) -> time:
-        try:
-            return datetime.strptime(str(value), "%H:%M").time()
-        except Exception:
-            return default
+        text = str(value or "").strip()
+        for fmt in ("%H:%M:%S", "%H:%M"):
+            try:
+                return datetime.strptime(text, fmt).time()
+            except Exception:
+                continue
+        return default
 
     def _round_to_tick(self, x: float, tick: float, mode: str) -> float:
         x = float(x)
