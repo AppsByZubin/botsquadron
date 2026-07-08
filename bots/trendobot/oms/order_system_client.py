@@ -685,7 +685,7 @@ class OrderSystemClient:
         remembered = self._remember_trade(trade)
         status = str(remembered.get("status") or "").strip().upper()
         if status in self.CLOSED_STATUSES:
-            if event_type:
+            if event_type and status != constants.KILL_SWITCH.upper():
                 self._log_local_event(event_type, remembered, ts=ts)
             self._forget_trade(remembered)
             self._trade_refresh_last.pop(str(trade_id), None)
@@ -695,7 +695,8 @@ class OrderSystemClient:
         trade = self.get_trade_by_id(trade_id)
         status = str(trade.get("status") or "").strip().upper()
         if status in self.CLOSED_STATUSES:
-            self._log_local_event("SYNC_CLOSED_TRADE", trade, ts=ts)
+            if status != constants.KILL_SWITCH.upper():
+                self._log_local_event("SYNC_CLOSED_TRADE", trade, ts=ts)
             self._forget_trade(trade)
             self._trade_refresh_last.pop(str(trade_id), None)
         return trade
@@ -957,6 +958,8 @@ class OrderSystemClient:
             status = str(trade.get("status") or "").strip().upper()
             if status and status not in self.CLOSED_STATUSES:
                 continue
+            if status == constants.KILL_SWITCH.upper():
+                continue
             remembered = self._remember_trade(trade)
             if trade_id:
                 seen.add(trade_id)
@@ -978,6 +981,8 @@ class OrderSystemClient:
         return closed_trades
 
     def _sync_closed_trades_from_kill_response(self, response: Mapping[str, Any]) -> None:
+        if str(response.get("status") or "").strip().upper() == "KILL_MODE":
+            return
         self._sync_closed_trades_from_response(response, "KILL_MODE_SYNC_CLOSED_TRADE")
 
     def _local_row_from_create(

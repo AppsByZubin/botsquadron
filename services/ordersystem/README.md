@@ -9,7 +9,7 @@
 - `POST /v1/trades/{id}/modify` to modify all SL broker orders for a trade
 - `POST /v1/trades/{id}/square-off` to square off a trade from strategy code
 - `POST /v1/bots/{bot_name}/block-orders` to block new order requests for a bot without touching existing broker/OMS trades
-- `POST /v1/bots/{bot_name}/kill` to block new orders for a bot, cancel open SL orders, and request Upstox position exit by entry tag
+- `POST /v1/bots/{bot_name}/kill` to block new orders for a bot without touching existing broker/OMS trades
 - `POST /v1/bots/{bot_name}/resume` to disable kill mode for a bot
 - Writes/updates PostgreSQL tables:
   - `accounts`
@@ -25,7 +25,7 @@
   - syncs actual filled entry/exit prices from Upstox order details
   - calculates per-order and trade-level brokerage from Upstox charges
   - closes trade in DB when SL is completed
-  - blocks new bot orders while kill mode is enabled and returns closed trades for bot-side local ledger sync
+  - blocks new bot orders while kill mode is enabled
   - updates daily `accounts.net_profit`
 - In `APP_MODE=sandbox`:
   - uses `UPSTOX_SANDBOX_API_BASE_URL`
@@ -159,9 +159,9 @@ The strategy owns square-off timing and sends the latest LTP as `exit_price`.
 
 ### Kill Bot Request Example
 
-Kill mode is stored in `ordersystem`, so future `POST /v1/trades` calls for the same bot return `Order intake blocked; no orders to be accepted.` with `closed_trades` for the bot pod to sync into its local order CSV.
+Kill mode is stored in `ordersystem`, so future `POST /v1/trades` calls for the same bot return `Order intake blocked; no orders to be accepted.` Existing broker orders and OMS trade rows are not changed by this endpoint; handle those manually at the broker and DB if needed.
 
-If you only want to stop accepting new orders without cancelling SL orders, exiting broker positions, or closing OMS trades:
+`block-orders` is an alias-style endpoint for the same intake-only behavior:
 
 ```bash
 curl -X POST 'http://localhost:8081/v1/bots/haemabot/block-orders' \
@@ -184,18 +184,6 @@ scripts/ordersystem_order_intake_control.sh fibobot resume
 curl -X POST 'http://localhost:8081/v1/bots/nifty50_pcr_vwap_ema_orb/kill' \
   -H 'Content-Type: application/json' \
   -d '{"curr_date":"14-04-2026","segment":"NSE_FO","reason":"manual kill"}'
-```
-
-By default, the Upstox exit-position call uses each open trade's `tag_entry` value. If no stored entry tag is available, it falls back to `<bot_name>-entry`. This is deliberate: Upstox filters positions by the tag on the order that opened the intraday position, not the SL tag.
-
-You can override the tag if needed:
-
-```json
-{
-  "curr_date": "14-04-2026",
-  "segment": "NSE_FO",
-  "tag": "custom-entry-tag"
-}
 ```
 
 Resume the bot:

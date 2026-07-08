@@ -393,7 +393,7 @@ class BbVwapEmaV2Strategy(BbVwapEmaStrategy):
             return 0.0
 
         if self._coerce_bool(self._order_container.get("enable_longer_trail"), False) or self._longer_trail_condition_active():
-            atr_mult = 10.0
+            atr_mult = 4.0
             self._order_container["enable_longer_trail"] = True
         else:
             if self._order_container.get("status") != constants.OPEN:
@@ -472,19 +472,54 @@ class BbVwapEmaV2Strategy(BbVwapEmaStrategy):
         manager_side = str(trade.get("side", "")).upper()
         anchor_gap = float(latest_ltp) * float(start_trail_after)
         next_anchor = float(latest_ltp) - anchor_gap if manager_side == "SELL" else float(latest_ltp) + anchor_gap
+        latest = self._latest_index_indicator_row()
+        angle_ema_21_1m = safe_float(latest.get("angle_ema_21_1m")) if latest is not None else None
+        angle_sma_50_1m = safe_float(latest.get("angle_sma_50_1m")) if latest is not None else None
+        ema_21_1m = safe_float(latest.get("ema_21_1m")) if latest is not None else None
+        sma_50_1m = safe_float(latest.get("sma_50_1m")) if latest is not None else None
+        candle_time = str(latest.get("time") or "") if latest is not None else ""
 
         trade["start_trail_after"] = float(start_trail_after)
         trade["spot_ltp"] = float(latest_ltp)
         trade["_spot_trail_anchor"] = float(next_anchor)
 
-        if hasattr(self.order_maneger, "_upsert_trade_row"):
-            self.order_maneger._upsert_trade_row(trade)
-        if hasattr(self.order_maneger, "_replace_trade_in_memory"):
-            self.order_maneger._replace_trade_in_memory(trade)
+        updates = {
+            "start_trail_after": float(start_trail_after),
+            "spot_ltp": float(latest_ltp),
+            "_spot_trail_anchor": float(next_anchor),
+            "spot_trail_anchor": float(next_anchor),
+        }
+        if hasattr(self.order_maneger, "_patch_cached_trade"):
+            self.order_maneger._patch_cached_trade(trade_id, updates)
+        if hasattr(self.order_maneger, "_patch_local_trade"):
+            self.order_maneger._patch_local_trade(trade_id, updates)
 
         logger.info(
-            f"Longer trail enabled for trade {trade_id}; start_trail_after={start_trail_after}, "
-            f"anchor_points={next_anchor}, ts={ts}"
+            f"Longer trail enabled trade_id={trade_id}, symbol={trade.get('symbol')}, side={self._order_container.get('side')}, "
+            f"ltp={latest_ltp:.2f}, entry={safe_float(trade.get('entry_price'))}, option_atr={self._order_container.get('option_atr')}, "
+            f"start_trail_after={start_trail_after:.6f}, anchor_gap={anchor_gap:.2f}, next_anchor={next_anchor:.2f}, "
+            f"angle_ema_21_1m={angle_ema_21_1m}, angle_sma_50_1m={angle_sma_50_1m}, ts={ts}"
+        )
+        self._log_strategy_event(
+            "ENABLE_LONGER_TRAIL",
+            trade,
+            ts=ts,
+            extra={
+                "enable_longer_trail": True,
+                "latest_ltp": float(latest_ltp),
+                "entry_price_at_enable": safe_float(trade.get("entry_price")),
+                "option_atr": safe_float(self._order_container.get("option_atr")),
+                "start_trail_after": float(start_trail_after),
+                "anchor_gap": float(anchor_gap),
+                "next_trail_anchor": float(next_anchor),
+                "spot_trail_anchor": float(next_anchor),
+                "ema_21_1m": ema_21_1m,
+                "sma_50_1m": sma_50_1m,
+                "angle_ema_21_1m": angle_ema_21_1m,
+                "angle_sma_50_1m": angle_sma_50_1m,
+                "candle_time": candle_time,
+                "condition": "abs(angle_ema_21_1m)>45 and abs(angle_sma_50_1m)>30",
+            },
         )
 
     def _should_force_trail_open_order(
@@ -1004,11 +1039,23 @@ class BbVwapEmaV2Strategy(BbVwapEmaStrategy):
         ts: datetime,
         extra: Dict[str, Any],
     ) -> None:
-        if self.order_maneger is None or not hasattr(self.order_maneger, "_log_event"):
+        self._log_strategy_event(event_type, trade, ts=ts, extra=extra)
+
+    def _log_strategy_event(
+        self,
+        event_type: str,
+        trade: Optional[Dict[str, Any]],
+        ts: Optional[datetime],
+        extra: Dict[str, Any],
+    ) -> None:
+        if self.order_maneger is None:
             return
         if not isinstance(trade, dict):
             trade = {}
         try:
-            self.order_maneger._log_event(event_type, trade, ts=ts, extra=extra)
+            if hasattr(self.order_maneger, "_log_local_event"):
+                self.order_maneger._log_local_event(event_type, trade, ts=ts, extra=extra)
+            elif hasattr(self.order_maneger, "_log_event"):
+                self.order_maneger._log_event(event_type, trade, ts=ts, extra=extra)
         except Exception as exc:
             logger.error(f"Failed to log {event_type}: {exc}")

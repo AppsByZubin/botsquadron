@@ -108,16 +108,10 @@ func (s *Service) CreateTrade(ctx context.Context, req model.CreateTradeRequest)
 		return model.CreateTradeResponse{}, err
 	}
 	if killState.KillEnabled {
-		closedTrades, err := s.store.ListClosedTradesByBotDate(ctx, req.BotName, req.CurrDate)
-		if err != nil {
-			return model.CreateTradeResponse{}, err
-		}
 		return model.CreateTradeResponse{
-			Status:       model.KillModeStatus,
-			Message:      model.KillModeMessage,
-			Reason:       killState.Reason,
-			ClosedTrades: closedTrades,
-			ClosedOrders: closedTrades,
+			Status:  model.KillModeStatus,
+			Message: model.KillModeMessage,
+			Reason:  killState.Reason,
 		}, nil
 	}
 	if strings.TrimSpace(req.Symbol) == "" {
@@ -351,68 +345,26 @@ func (s *Service) KillBot(ctx context.Context, botName string, req model.KillBot
 	if s.store == nil {
 		return model.BotKillSwitchResponse{}, fmt.Errorf("store is not configured")
 	}
-	if strings.TrimSpace(req.Mode) != "" {
-		if _, err := normalizeRuntimeMode(req.Mode); err != nil {
-			return model.BotKillSwitchResponse{}, err
-		}
-	}
 
 	reason := strings.TrimSpace(req.Reason)
 	if reason == "" {
-		reason = model.KillSwitchExitStatus
+		reason = model.OrderBlockStatus
 	}
 	state, err := s.store.SetBotKillSwitch(ctx, botName, true, reason)
 	if err != nil {
 		return model.BotKillSwitchResponse{}, err
 	}
 
-	openTrades, err := s.store.ListOpenTradesByBotDate(ctx, botName, req.CurrDate)
-	if err != nil {
-		return model.BotKillSwitchResponse{}, err
-	}
-
-	response := model.BotKillSwitchResponse{
+	return model.BotKillSwitchResponse{
 		BotName:     state.BotName,
 		CurrDate:    strings.TrimSpace(req.CurrDate),
 		KillEnabled: state.KillEnabled,
 		Status:      model.KillModeStatus,
-		Message:     "kill switch enabled",
+		Message:     model.OrderBlockMessage,
 		Reason:      state.Reason,
 		Segment:     strings.TrimSpace(req.Segment),
 		UpdatedAt:   state.UpdatedAt,
-	}
-
-	if len(openTrades) == 0 {
-		response.Message = "kill switch enabled; no open trades found"
-		return response, nil
-	}
-
-	tags := killPositionTags(botName, req.Tag, openTrades)
-	response.Tags = tags
-
-	if s.upstox == nil || !s.upstox.Enabled() {
-		response.Errors = append(response.Errors, "upstox client is not configured; kill mode is enabled but broker orders were not changed")
-	} else {
-		cancelledSLOrderIDs, cancelErrors := s.cancelBotStopLossOrders(ctx, openTrades)
-		response.CancelledSLOrderIDs = cancelledSLOrderIDs
-		response.Errors = append(response.Errors, cancelErrors...)
-
-		exitOrderIDs, exitErrors := s.exitBotPositionsByTag(ctx, req.Segment, tags)
-		response.ExitOrderIDs = exitOrderIDs
-		response.Errors = append(response.Errors, exitErrors...)
-	}
-
-	closedTrades, err := s.store.MarkOpenTradesKilled(ctx, botName, req.CurrDate, response.ExitOrderIDs, time.Now(), model.KillSwitchExitStatus)
-	if err != nil {
-		return model.BotKillSwitchResponse{}, err
-	}
-	response.ClosedTrades = closedTrades
-	response.ClosedOrders = closedTrades
-	response.Message = "kill switch enabled; stoploss orders cancelled and positions exit requested"
-	if len(response.Errors) > 0 {
-		response.Message = "kill switch enabled with broker errors"
-	}
-	return response, nil
+	}, nil
 }
 
 func (s *Service) BlockBotOrders(ctx context.Context, botName string, req model.BlockBotOrdersRequest) (model.BotKillSwitchResponse, error) {
