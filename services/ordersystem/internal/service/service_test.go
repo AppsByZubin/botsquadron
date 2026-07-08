@@ -4,7 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/AppsByZubin/botsquadron/services/ordersystem/internal/config"
@@ -440,6 +443,106 @@ func TestIsTerminalModifyOrderError(t *testing.T) {
 	}
 	if isTerminalModifyOrderError(errors.New("temporary rate limit")) {
 		t.Fatal("isTerminalModifyOrderError returned true for unrelated error")
+	}
+}
+
+func TestSquareOffBrokerOrdersCancelsStopLossBeforeExitByTag(t *testing.T) {
+	t.Parallel()
+
+	var mu sync.Mutex
+	calls := make([]string, 0, 4)
+	recordCall := func(r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		calls = append(calls, r.Method+" "+r.URL.Path+" order_id="+r.URL.Query().Get("order_id")+" tag="+r.URL.Query().Get("tag"))
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		recordCall(r)
+		w.Header().Set("Content-Type", "application/json")
+
+		switch r.URL.Path {
+		case "/v2/order/details":
+			if r.Method != http.MethodGet || r.URL.Query().Get("order_id") != "sl-123" {
+				http.Error(w, "unexpected order details request", http.StatusBadRequest)
+				return
+			}
+			_, _ = w.Write([]byte(`{"status":"success","data":{"order_id":"sl-123","status":"trigger pending","quantity":75,"filled_quantity":0}}`))
+		case "/v2/order/trades":
+			if r.Method != http.MethodGet || r.URL.Query().Get("order_id") != "sl-123" {
+				http.Error(w, "unexpected order trades request", http.StatusBadRequest)
+				return
+			}
+			_, _ = w.Write([]byte(`{"status":"success","data":[]}`))
+		case "/v3/order/cancel":
+			if r.Method != http.MethodDelete || r.URL.Query().Get("order_id") != "sl-123" {
+				http.Error(w, "unexpected cancel request", http.StatusBadRequest)
+				return
+			}
+			_, _ = w.Write([]byte(`{"status":"success","data":{"order_id":"sl-123"}}`))
+		case "/v2/order/positions/exit":
+			if r.Method != http.MethodPost || r.URL.Query().Get("tag") != "firebot-entry" {
+				http.Error(w, "unexpected exit request", http.StatusBadRequest)
+				return
+			}
+			_, _ = w.Write([]byte(`{"status":"success","data":{"order_ids":["exit-123"]}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := upstox.NewClient(config.Config{
+		UpstoxBaseURL:           server.URL,
+		UpstoxAccessToken:       "test-token",
+		UpstoxOrderCancelPath:   "/v3/order/cancel",
+		UpstoxExitPositionsPath: "/v2/order/positions/exit",
+		UpstoxOrderDetailsPath:  "/v2/order/details",
+		UpstoxOrderTradesPath:   "/v2/order/trades",
+	})
+	svc := New(config.Config{AppMode: config.ModeProduction}, nil, client)
+
+	exitOrderIDs, err := svc.squareOffBrokerOrders(context.Background(), model.Trade{
+		ID:         "trade-1",
+		BotName:    "firebot",
+		Qty:        75,
+		SLOrderIDs: []string{"sl-123"},
+		TagEntry:   "firebot-entry",
+	}, "DAY", 0)
+	if err != nil {
+		t.Fatalf("squareOffBrokerOrders returned error: %v", err)
+	}
+	if len(exitOrderIDs) != 1 || exitOrderIDs[0] != "exit-123" {
+		t.Fatalf("exit order ids = %#v, want [exit-123]", exitOrderIDs)
+	}
+
+	mu.Lock()
+	got := append([]string(nil), calls...)
+	mu.Unlock()
+	want := []string{
+		"GET /v2/order/details order_id=sl-123 tag=",
+		"GET /v2/order/trades order_id=sl-123 tag=",
+		"DELETE /v3/order/cancel order_id=sl-123 tag=",
+		"POST /v2/order/positions/exit order_id= tag=firebot-entry",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("broker calls = %#v, want %#v", got, want)
+	}
+	for idx := range want {
+		if got[idx] != want[idx] {
+			t.Fatalf("broker calls = %#v, want %#v", got, want)
+		}
+	}
+}
+
+func TestTradePositionExitTagFallsBackToBotEntryTag(t *testing.T) {
+	t.Parallel()
+
+	if got := tradePositionExitTag(model.Trade{BotName: "firebot"}); got != "firebot-entry" {
+		t.Fatalf("tradePositionExitTag fallback = %q, want firebot-entry", got)
+	}
+	if got := tradePositionExitTag(model.Trade{BotName: "firebot", TagEntry: "custom-entry"}); got != "custom-entry" {
+		t.Fatalf("tradePositionExitTag custom = %q, want custom-entry", got)
 	}
 }
 

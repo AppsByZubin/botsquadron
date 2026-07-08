@@ -767,95 +767,76 @@ func (s *Service) SquareOffTrade(ctx context.Context, tradeID string, req model.
 }
 
 func (s *Service) squareOffBrokerOrders(ctx context.Context, trade model.Trade, validity string, disclosedQty int) ([]string, error) {
-	if len(trade.SLOrderIDs) == 0 {
-		if strings.TrimSpace(trade.InstrumentToken) == "" {
-			return nil, fmt.Errorf("trade instrument_token is required for square-off order")
-		}
-		if trade.Qty <= 0 {
-			return nil, fmt.Errorf("trade qty is required for square-off order")
-		}
-		product := strings.ToUpper(strings.TrimSpace(trade.Product))
-		if product == "" {
-			product = "D"
-		}
+	_ = validity
+	_ = disclosedQty
 
-		resp, err := s.upstox.PlaceOrder(ctx, upstox.PlaceOrderRequest{
-			Quantity:        trade.Qty,
-			Product:         product,
-			Validity:        validity,
-			Price:           0,
-			InstrumentToken: trade.InstrumentToken,
-			OrderType:       "MARKET",
-			TransactionType: oppositeSide(trade.Side),
-			DisclosedQty:    disclosedQty,
-			TriggerPrice:    0,
-			IsAMO:           false,
-			Slice:           true,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("place square-off order: %w", err)
-		}
-		return append([]string(nil), resp.OrderIDs...), nil
+	cancelledSLOrderIDs, stopLossFilled, err := s.cancelTradeStopLossOrders(ctx, trade)
+	if err != nil {
+		return nil, err
+	}
+	if stopLossFilled {
+		return nil, nil
+	}
+	if len(cancelledSLOrderIDs) > 0 {
+		log.Printf("square-off cancelled stoploss orders trade_id=%s order_ids=%s", trade.ID, strings.Join(cancelledSLOrderIDs, ","))
 	}
 
-	exitOrderIDs := make([]string, 0, len(trade.SLOrderIDs))
+	tag := tradePositionExitTag(trade)
+	if tag == "" {
+		return nil, fmt.Errorf("trade tag_entry is required for Upstox exit-position square-off trade_id=%s", trade.ID)
+	}
+
+	resp, err := s.upstox.ExitPositions(ctx, upstox.ExitPositionsRequest{Tag: tag})
+	if err != nil {
+		return nil, fmt.Errorf("exit positions by tag=%s: %w", tag, err)
+	}
+	if len(resp.OrderIDs) == 0 {
+		return nil, fmt.Errorf("exit positions by tag=%s returned no order ids", tag)
+	}
+	return append([]string(nil), resp.OrderIDs...), nil
+}
+
+func (s *Service) cancelTradeStopLossOrders(ctx context.Context, trade model.Trade) ([]string, bool, error) {
+	slOrderIDs := cleanStringSet(collectTradeSLOrderIDs([]model.Trade{trade}))
+	cancelled := make([]string, 0, len(slOrderIDs))
 	failedOrderMessages := make([]string, 0)
-	for _, slOrderID := range trade.SLOrderIDs {
-		orderID := strings.TrimSpace(slOrderID)
-		if orderID == "" {
-			continue
-		}
-		if message, outcome, _ := s.syncStopLossTerminalStateDetailed(ctx, trade, orderID, "pre-square-off"); outcome != stopLossNotTerminal {
+
+	for _, orderID := range slOrderIDs {
+		if message, outcome, _ := s.syncStopLossTerminalStateDetailed(ctx, trade, orderID, "pre-square-off cancel"); outcome != stopLossNotTerminal {
 			if outcome == stopLossFilled {
-				log.Printf("square-off skipped already filled stoploss order trade_id=%s order_id=%s: %s", trade.ID, orderID, message)
-				continue
+				log.Printf("square-off skipped broker exit because stoploss filled trade_id=%s order_id=%s: %s", trade.ID, orderID, message)
+				return cancelled, true, nil
 			}
-			failedOrderMessages = append(failedOrderMessages, message)
+			log.Printf("square-off stoploss order already terminal trade_id=%s order_id=%s: %s", trade.ID, orderID, message)
 			continue
 		}
 
-		qty := squareOffBrokerOrderQuantity(trade, orderID)
-		if qty <= 0 {
-			failedOrderMessages = append(failedOrderMessages, fmt.Sprintf("%s: quantity missing", orderID))
-			continue
-		}
-		resp, err := s.upstox.ModifyOrder(ctx, upstox.ModifyOrderRequest{
-			Quantity:     qty,
-			Validity:     validity,
-			Price:        0,
-			OrderID:      orderID,
-			OrderType:    "MARKET",
-			DisclosedQty: disclosedQty,
-			TriggerPrice: 0,
-		})
+		resp, err := s.upstox.CancelOrder(ctx, orderID)
 		if err != nil {
 			if upstox.IsRateLimited(err) {
-				return nil, fmt.Errorf("square-off rate limited for trade_id=%s order_id=%s: %w", trade.ID, orderID, err)
+				return cancelled, false, fmt.Errorf("square-off cancel rate limited for trade_id=%s order_id=%s: %w", trade.ID, orderID, err)
 			}
-			if isTerminalModifyOrderError(err) {
-				message, outcome, _ := s.syncStopLossTerminalStateDetailed(ctx, trade, orderID, "square-off modify rejected")
+			if isTerminalOrderCancelError(err) {
+				message, outcome, _ := s.syncStopLossTerminalStateDetailed(ctx, trade, orderID, "square-off cancel rejected")
 				if outcome == stopLossFilled {
 					log.Printf("square-off synced already filled stoploss order trade_id=%s order_id=%s: %s", trade.ID, orderID, message)
-					continue
+					return cancelled, true, nil
 				}
 				if outcome == stopLossTerminalUnfilled {
-					failedOrderMessages = append(failedOrderMessages, message)
+					log.Printf("square-off stoploss cancel rejected for terminal order trade_id=%s order_id=%s: %s", trade.ID, orderID, message)
 					continue
 				}
 			}
 			failedOrderMessages = append(failedOrderMessages, fmt.Sprintf("%s: %v", orderID, err))
 			continue
 		}
-		if strings.TrimSpace(resp.OrderID) != "" {
-			exitOrderIDs = append(exitOrderIDs, strings.TrimSpace(resp.OrderID))
-		} else {
-			exitOrderIDs = append(exitOrderIDs, orderID)
-		}
+		cancelled = append(cancelled, firstNonEmpty(resp.OrderID, orderID))
 	}
+
 	if len(failedOrderMessages) > 0 {
-		return nil, fmt.Errorf("square-off partially failed for trade_id=%s: %s", trade.ID, strings.Join(failedOrderMessages, "; "))
+		return cancelled, false, fmt.Errorf("square-off cancel sl failed for trade_id=%s: %s", trade.ID, strings.Join(failedOrderMessages, "; "))
 	}
-	return exitOrderIDs, nil
+	return cleanStringSet(cancelled), false, nil
 }
 
 func (s *Service) cancelBotStopLossOrders(ctx context.Context, trades []model.Trade) ([]string, []string) {
@@ -1687,6 +1668,17 @@ func killPositionTags(botName string, requestedTag string, trades []model.Trade)
 	return []string{botName + "-entry"}
 }
 
+func tradePositionExitTag(trade model.Trade) string {
+	if tag := strings.TrimSpace(trade.TagEntry); tag != "" {
+		return tag
+	}
+	botName := strings.TrimSpace(trade.BotName)
+	if botName == "" {
+		return ""
+	}
+	return botName + "-entry"
+}
+
 func cleanStringSet(values []string) []string {
 	out := make([]string, 0, len(values))
 	for _, value := range values {
@@ -1756,4 +1748,16 @@ func isTerminalModifyOrderError(err error) bool {
 		strings.Contains(msg, "already rejected") ||
 		strings.Contains(msg, "already completed") ||
 		(strings.Contains(msg, "modifications of already") && strings.Contains(msg, "orders is not allowed"))
+}
+
+func isTerminalOrderCancelError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "udapi100040") ||
+		strings.Contains(msg, "already cancelled") ||
+		strings.Contains(msg, "already canceled") ||
+		strings.Contains(msg, "already rejected") ||
+		strings.Contains(msg, "already completed")
 }

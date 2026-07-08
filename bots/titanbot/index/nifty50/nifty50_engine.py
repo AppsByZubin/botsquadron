@@ -425,11 +425,15 @@ async def nifty50_engine(strategy, mode, param_data):
         # init bot
         strategy_key = str(strategy or "").strip().lower()
         timeseries_trend_key = str(constants.TIMESERIES_TREND).strip().lower()
+        timeseries_trend_v2_key = str(constants.TIMESERIES_TREND_V2).strip().lower()
 
         strategy_cls = None
         if strategy_key == timeseries_trend_key:
             from index.nifty50.strategy import TimeseriesTrendStrategy
             strategy_cls = TimeseriesTrendStrategy
+        elif strategy_key == timeseries_trend_v2_key:
+            from index.nifty50.strategy import TimeseriesTrendV2Strategy
+            strategy_cls = TimeseriesTrendV2Strategy
         
         if strategy_cls is None:
             logger.error(f"Unsupported strategy: {strategy}. Exiting.")
