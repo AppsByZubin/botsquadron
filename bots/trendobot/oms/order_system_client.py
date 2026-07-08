@@ -730,7 +730,7 @@ class OrderSystemClient:
             return self._get_cached_trade(trade_id)
 
         self._trade_refresh_last[trade_id] = now
-        return self.refresh_trade(trade_id, ts=ts)
+        return self.refresh_trade_from_broker(trade_id, ts=ts)
 
     def on_tick(
         self,

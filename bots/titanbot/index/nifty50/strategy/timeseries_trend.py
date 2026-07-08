@@ -648,12 +648,7 @@ class TimeseriesTrendStrategy:
             trade_info = self.order_maneger.maybe_refresh_trade(trade_id, ts=ts)
         if trade_info is None:
             trade_info = self.order_maneger.get_trade_by_id(trade_id)
-        if trade_info and trade_info.get("status") in [
-            constants.TARGET_HIT,
-            constants.STOPLOSS_HIT,
-            constants.MANUAL_EXIT,
-            constants.EOD_SQUARE_OFF,
-        ]:
+        if self._is_closed_trade_info(trade_info):
             logger.debug(f"Trade closed Info: {trade_info}")
             self._set_post_exit_cooldown(trade_info.get("status"), ts=ts)
             self._update_today_realized_pnl_on_trade_close(trade_info, ts=ts)
@@ -843,6 +838,18 @@ class TimeseriesTrendStrategy:
 
     def _reset_order_container(self):
         self._order_container = self._new_order_container()
+
+    def _is_closed_trade_info(self, trade_info: Optional[Dict[str, Any]]) -> bool:
+        if not isinstance(trade_info, dict):
+            return False
+        status = str(trade_info.get("status") or "").strip().upper()
+        return status in {
+            constants.TARGET_HIT.upper(),
+            constants.STOPLOSS_HIT.upper(),
+            constants.MANUAL_EXIT.upper(),
+            constants.EOD_SQUARE_OFF.upper(),
+            constants.KILL_SWITCH.upper(),
+        }
 
     def _new_order_container(self) -> Dict[str, Any]:
         return {

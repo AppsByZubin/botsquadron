@@ -1990,6 +1990,18 @@ class VwapEmaStStrategy:
     def _reset_order_container(self) -> None:
         self._order_container = {k: None for k in self._order_container}
 
+    def _is_closed_trade_info(self, trade_info: Optional[Dict[str, Any]]) -> bool:
+        if not isinstance(trade_info, dict):
+            return False
+        status = str(trade_info.get("status") or "").strip().upper()
+        return status in {
+            constants.TARGET_HIT.upper(),
+            constants.STOPLOSS_HIT.upper(),
+            constants.MANUAL_EXIT.upper(),
+            constants.EOD_SQUARE_OFF.upper(),
+            constants.KILL_SWITCH.upper(),
+        }
+
     def _get_itm_contracts(self, side: str, index_price: float, itm_range: float) -> Dict[str, Dict[str, Any]]:
         output: Dict[str, Dict[str, Any]] = {}
         spot_price = safe_float(index_price)
@@ -2284,7 +2296,7 @@ class VwapEmaStStrategy:
                         if closed_status:
                             trade_info = {"id": trade_id, "trade_id": trade_id, "status": closed_status}
                     closed_status = str((trade_info or {}).get("status") or "").strip()
-                    if closed_status in [constants.STOPLOSS_HIT, constants.TARGET_HIT, constants.MANUAL_EXIT, constants.EOD_SQUARE_OFF, constants.KILL_SWITCH]:
+                    if self._is_closed_trade_info(trade_info):
                         self._set_post_exit_cooldown(closed_status, ts=ts)
                         if hasattr(self.order_maneger, "get_trade_by_id"):
                             trade_info = self.order_maneger.get_trade_by_id(trade_id)
@@ -2307,13 +2319,7 @@ class VwapEmaStStrategy:
                     trade_info = self.order_maneger.maybe_refresh_trade(trade_id, ts=ts)
                 if trade_info is None:
                     trade_info = self.order_maneger.get_trade_by_id(trade_id)
-                if trade_info and trade_info.get("status") in [
-                    constants.TARGET_HIT,
-                    constants.STOPLOSS_HIT,
-                    constants.MANUAL_EXIT,
-                    constants.EOD_SQUARE_OFF,
-                    constants.KILL_SWITCH,
-                ]:
+                if self._is_closed_trade_info(trade_info):
                     self._set_post_exit_cooldown(trade_info.get("status"), ts=ts)
                     self._update_today_realized_pnl_on_trade_close(trade_info, ts=ts)
                     logger.debug(f"Trade closed Info: {trade_info}")

@@ -1199,12 +1199,7 @@ class FibEmaAtrVolStrategy:
             trade_info = self.order_maneger.maybe_refresh_trade(trade_id, ts=ts)
         if trade_info is None:
             trade_info = self.order_maneger.get_trade_by_id(trade_id)
-        if trade_info and trade_info.get("status") in [
-            constants.TARGET_HIT,
-            constants.STOPLOSS_HIT,
-            constants.MANUAL_EXIT,
-            constants.EOD_SQUARE_OFF,
-        ]:
+        if self._is_closed_trade_info(trade_info):
             logger.debug(f"Trade closed Info: {trade_info}")
             self._order_container = self._default_order_container()
 
@@ -1933,6 +1928,18 @@ class FibEmaAtrVolStrategy:
             "trade_create_time": None,
             "force_trail_lock": False,
             "signal_context": None,
+        }
+
+    def _is_closed_trade_info(self, trade_info: Optional[Dict[str, Any]]) -> bool:
+        if not isinstance(trade_info, dict):
+            return False
+        status = str(trade_info.get("status") or "").strip().upper()
+        return status in {
+            constants.TARGET_HIT.upper(),
+            constants.STOPLOSS_HIT.upper(),
+            constants.MANUAL_EXIT.upper(),
+            constants.EOD_SQUARE_OFF.upper(),
+            constants.KILL_SWITCH.upper(),
         }
 
     def _timestamp_from_item(self, item: Dict[str, Any]) -> Optional[datetime]:

@@ -314,12 +314,7 @@ class BbVwapEmaV2Strategy(BbVwapEmaStrategy):
             trade_info = self.order_maneger.maybe_refresh_trade(trade_id, ts=ts)
         if trade_info is None:
             trade_info = self.order_maneger.get_trade_by_id(trade_id)
-        if trade_info and trade_info.get("status") in [
-            constants.TARGET_HIT,
-            constants.STOPLOSS_HIT,
-            constants.MANUAL_EXIT,
-            constants.EOD_SQUARE_OFF,
-        ]:
+        if self._is_closed_trade_info(trade_info):
             logger.debug(f"Trade closed Info: {trade_info}")
             self._set_post_exit_cooldown(trade_info.get("status"), ts=ts)
             self._update_today_realized_pnl_on_trade_close(trade_info, ts=ts)
