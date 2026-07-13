@@ -405,9 +405,11 @@ class TimeseriesTrendV2Strategy(TimeseriesTrendStrategy):
         if entry_price <= 0:
             return 0.0
 
+        got_enable_longer_trail = False
         if self._coerce_bool(self._order_container.get("enable_longer_trail"), False) or self._longer_trail_condition_active():
-            atr_mult = 4.0
+            atr_mult = 3.0
             self._order_container["enable_longer_trail"] = True
+            got_enable_longer_trail = True
         else:
             if self._order_container.get("status") != constants.OPEN:
                 self._order_container["enable_longer_trail"] = False
@@ -417,6 +419,10 @@ class TimeseriesTrendV2Strategy(TimeseriesTrendStrategy):
 
         start_trail_after = float((float(option_atr) * atr_mult) / float(entry_price))
         self._order_container["start_trail_after"] = start_trail_after
+
+        if got_enable_longer_trail:
+            logger.info(f"enable_longer_trail is enabled with entry_price: {entry_price}, option_atr: {option_atr}, start_trail_after: {start_trail_after}")
+
         return start_trail_after
 
     def _longer_trail_condition_active(self) -> bool:
