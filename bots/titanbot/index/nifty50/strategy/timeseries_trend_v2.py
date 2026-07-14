@@ -19,6 +19,15 @@ class TimeseriesTrendV2Strategy(TimeseriesTrendStrategy):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        sp = self._strategy_params()
+        self.call_ema_21_angle_1m = self._coerce_float(
+            sp.get("call_ema_21_angle_1m_threshold"),
+            30.0,
+        )
+        self.put_ema_21_angle_1m = self._coerce_float(
+            sp.get("put_ema_21_angle_1m_threshold"),
+            -30.0,
+        )
         self._ensure_v2_columns()
         self._ensure_v2_order_container()
 
@@ -835,14 +844,14 @@ class TimeseriesTrendV2Strategy(TimeseriesTrendStrategy):
                 and angle_5m > self.call_angle_5m
                 and angle_1m > self.call_angle_1m
                 and angle_ema_21_1m is not None
-                and angle_ema_21_1m > self.call_angle_1m
+                and angle_ema_21_1m > self.call_ema_21_angle_1m
             )
             put_setup = (
                 angle_10m < self.put_angle_10m
                 and angle_5m < self.put_angle_5m
                 and angle_1m < self.put_angle_1m
                 and angle_ema_21_1m is not None
-                and angle_ema_21_1m < self.put_angle_1m
+                and angle_ema_21_1m < self.put_ema_21_angle_1m
             )
 
             logger.debug(
@@ -850,7 +859,8 @@ class TimeseriesTrendV2Strategy(TimeseriesTrendStrategy):
                 f"ema_10m={ema_10m}, angle_10m={angle_10m}, threshold_call_10m={self.call_angle_10m}, threshold_put_10m={self.put_angle_10m}, "
                 f"ema_5m={ema_5m}, angle_5m={angle_5m}, threshold_call_5m={self.call_angle_5m}, threshold_put_5m={self.put_angle_5m}, "
                 f"ema_1m={ema_1m}, ema_21_1m={ema_21_1m}, sma_50_1m={sma_50_1m}, "
-                f"angle_ema_21_1m={angle_ema_21_1m}, angle_sma_50_1m={angle_sma_50_1m}, "
+                f"angle_ema_21_1m={angle_ema_21_1m}, threshold_call_ema_21_1m={self.call_ema_21_angle_1m}, "
+                f"threshold_put_ema_21_1m={self.put_ema_21_angle_1m}, angle_sma_50_1m={angle_sma_50_1m}, "
                 f"angle_1m={angle_1m}, threshold_call_1m={self.call_angle_1m}, threshold_put_1m={self.put_angle_1m}"
             )
             logger.debug(f"candle_time={latest_time}, condition check call_setup:{call_setup}, put_setup:{put_setup}")
