@@ -23,6 +23,15 @@ class BbVwapEmaV2Strategy(BbVwapEmaStrategy):
         super().__init__(*args, **kwargs)
         self.last_signal = getattr(self, "last_signal", constants.WAITING)
         self.signals = getattr(self, "signals", [])
+        sp = self._strategy_params()
+        self.call_ema_21_angle_1m = self._coerce_float(
+            sp.get("call_ema_21_angle_1m_threshold"),
+            30.0,
+        )
+        self.put_ema_21_angle_1m = self._coerce_float(
+            sp.get("put_ema_21_angle_1m_threshold"),
+            -30.0,
+        )
         self.slope_window = int(getattr(self, "_slope_window", 3) or 3)
         self._ensure_v2_columns()
         self._ensure_v2_order_container()
@@ -393,11 +402,13 @@ class BbVwapEmaV2Strategy(BbVwapEmaStrategy):
         if entry_price <= 0:
             return 0.0
 
-        got_enable_longer_trail = False
-        if self._coerce_bool(self._order_container.get("enable_longer_trail"), False) or self._longer_trail_condition_active():
+        longer_trail_was_enabled = self._coerce_bool(
+            self._order_container.get("enable_longer_trail"),
+            False,
+        )
+        if longer_trail_was_enabled or self._longer_trail_condition_active():
             atr_mult = 3.0
             self._order_container["enable_longer_trail"] = True
-            got_enable_longer_trail = True
         else:
             if self._order_container.get("status") != constants.OPEN:
                 self._order_container["enable_longer_trail"] = False
@@ -408,8 +419,14 @@ class BbVwapEmaV2Strategy(BbVwapEmaStrategy):
         start_trail_after = float((float(option_atr) * atr_mult) / float(entry_price))
         self._order_container["start_trail_after"] = start_trail_after
 
-        if got_enable_longer_trail:
-            logger.info(f"enable_longer_trail is enabled with entry_price: {entry_price}, option_atr: {option_atr}, start_trail_after: {start_trail_after}")
+        if not longer_trail_was_enabled and self._order_container["enable_longer_trail"]:
+            source = "open_trade" if self._order_container.get("status") == constants.OPEN else "order_entry"
+            self._log_longer_trail_enabled(
+                source=source,
+                entry_price=entry_price,
+                option_atr=option_atr,
+                start_trail_after=start_trail_after,
+            )
 
         return start_trail_after
 
@@ -429,6 +446,37 @@ class BbVwapEmaV2Strategy(BbVwapEmaStrategy):
         if self.df_index is None or self.df_index.empty:
             return None
         return self.df_index.iloc[-1]
+
+    def _log_longer_trail_enabled(
+        self,
+        source: str,
+        entry_price: Optional[float] = None,
+        option_atr: Optional[float] = None,
+        start_trail_after: Optional[float] = None,
+    ) -> None:
+        latest = self._latest_index_indicator_row()
+        angle_ema_21_1m = safe_float(latest.get("angle_ema_21_1m")) if latest is not None else None
+        angle_sma_50_1m = safe_float(latest.get("angle_sma_50_1m")) if latest is not None else None
+        logger.info(
+            f"Long trail enabled; source={source}, trade_id={self._order_container.get('trade_id')}, "
+            f"side={self._order_container.get('side')}, entry_price={entry_price}, option_atr={option_atr}, "
+            f"start_trail_after={start_trail_after}, angle_ema_21_1m={angle_ema_21_1m}, "
+            f"angle_sma_50_1m={angle_sma_50_1m}"
+        )
+        self._log_order_event(
+            "LONG_TRAIL_ENABLED",
+            self._current_order_event_trade(),
+            self._resolve_reference_ts(),
+            {
+                "source": source,
+                "enable_longer_trail": True,
+                "entry_price": entry_price,
+                "option_atr": option_atr,
+                "start_trail_after": start_trail_after,
+                "angle_ema_21_1m": angle_ema_21_1m,
+                "angle_sma_50_1m": angle_sma_50_1m,
+            },
+        )
 
     def _enable_longer_trail_if_needed(self, latest_ltp: float, ts: Optional[datetime]) -> None:
         if self._coerce_bool(self._order_container.get("enable_longer_trail"), False):
@@ -507,8 +555,8 @@ class BbVwapEmaV2Strategy(BbVwapEmaStrategy):
             f"start_trail_after={start_trail_after:.6f}, anchor_gap={anchor_gap:.2f}, next_anchor={next_anchor:.2f}, "
             f"angle_ema_21_1m={angle_ema_21_1m}, angle_sma_50_1m={angle_sma_50_1m}, ts={ts}"
         )
-        self._log_strategy_event(
-            "ENABLE_LONGER_TRAIL",
+        self._log_order_event(
+            "LONG_TRAIL_ANCHOR_UPDATED",
             trade,
             ts=ts,
             extra={
@@ -674,7 +722,7 @@ class BbVwapEmaV2Strategy(BbVwapEmaStrategy):
 
         trade_info = self.order_maneger.get_trade_by_id(trade_id)
         self._update_today_realized_pnl_on_trade_close(trade_info, ts=ref_ts)
-        self._log_reversal_event(
+        self._log_order_event(
             "REVERSAL_CLOSE_REASON",
             trade_info,
             ref_ts,
@@ -711,10 +759,15 @@ class BbVwapEmaV2Strategy(BbVwapEmaStrategy):
         self._order_container["lot"] = int(lot)
         self._order_container["force_trail_lock"] = False
         self._order_container["enable_longer_trail"] = True
+        self._log_longer_trail_enabled(
+            source="reversal_order",
+            option_atr=safe_float(self._order_container.get("option_atr")),
+            start_trail_after=safe_float(self._order_container.get("start_trail_after")),
+        )
         self._order_container["skip_order_counter_increment"] = True
         self._order_container["reversal_reason"] = reversal_reason
         self._order_container["reversal_from_side"] = side
-        self._log_reversal_event(
+        self._log_order_event(
             "REVERSAL_ORDER_INTENT",
             {
                 "id": None,
@@ -810,6 +863,8 @@ class BbVwapEmaV2Strategy(BbVwapEmaStrategy):
                     or (close_price > bb_upper and candle_length > self.bb_candle_length_threshold)
                 )
                 and angle_ema_9 > self.call_ema_angle_threshold
+                and angle_ema_21_1m is not None
+                and angle_ema_21_1m > self.call_ema_21_angle_1m
             )
 
             put_setup = (
@@ -818,13 +873,16 @@ class BbVwapEmaV2Strategy(BbVwapEmaStrategy):
                     or (close_price < bb_lower and candle_length > self.bb_candle_length_threshold)
                 )
                 and angle_ema_9 < self.put_ema_angle_threshold
+                and angle_ema_21_1m is not None
+                and angle_ema_21_1m < self.put_ema_21_angle_1m
             )
 
             logger.debug(
                 f"candle_time={latest_time}, Engine check open={open_price}, close={close_price}, bb_upper={bb_upper}, "
                 f"bb_lower={bb_lower}, candle_length={candle_length}, angle_ema={angle_ema_9}, "
                 f"ema_21_1m={ema_21_1m}, sma_50_1m={sma_50_1m}, "
-                f"angle_ema_21_1m={angle_ema_21_1m}, angle_sma_50_1m={angle_sma_50_1m}"
+                f"angle_ema_21_1m={angle_ema_21_1m}, threshold_call_ema_21_1m={self.call_ema_21_angle_1m}, "
+                f"threshold_put_ema_21_1m={self.put_ema_21_angle_1m}, angle_sma_50_1m={angle_sma_50_1m}"
             )
             logger.debug(f"candle_time={latest_time}, condition check call_setup:{call_setup}, put_setup:{put_setup}")
             self._last_engine_revision = current_revision
@@ -942,13 +1000,13 @@ class BbVwapEmaV2Strategy(BbVwapEmaStrategy):
         if band_width is None:
             return None
         if band_width < 100:
-            return 1.0
-        if 100 < band_width < 130:
             return 1.5
-        if 150 < band_width < 200:
-            return 2.0
-        if band_width > 200:
+        if 100 < band_width < 130:
             return 2.5
+        if 150 < band_width < 200:
+            return 3.0
+        if band_width > 200:
+            return 3.5
         return None
 
     def _clear_pending_contract(self):
@@ -1039,7 +1097,23 @@ class BbVwapEmaV2Strategy(BbVwapEmaStrategy):
             return True
         return False
 
-    def _log_reversal_event(
+    def _current_order_event_trade(self) -> Dict[str, Any]:
+        trade_id = self._order_container.get("trade_id")
+        if self.order_maneger is not None and trade_id and hasattr(self.order_maneger, "get_trade_by_id"):
+            trade = self.order_maneger.get_trade_by_id(trade_id)
+            if isinstance(trade, dict):
+                return trade
+        return {
+            "id": trade_id,
+            "symbol": self._order_container.get("instrument_symbol"),
+            "instrument_token": self._order_container.get("instrument_key"),
+            "side": self._order_container.get("side"),
+            "qty": None,
+            "status": self._order_container.get("status"),
+            "description": "Long trail enabled by bb_vwap_ema_v2",
+        }
+
+    def _log_order_event(
         self,
         event_type: str,
         trade: Optional[Dict[str, Any]],
