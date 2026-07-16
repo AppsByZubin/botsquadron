@@ -1988,6 +1988,9 @@ class HmEmaAdxStrategy:
                 self._order_container["force_trail_lock"] = False
                 self._order_counter += 1
                 logger.info(f"{self._order_container}")
+            else:
+                logger.warning("Order manager did not return trade_id; clearing complete waiting intent.")
+                self._reset_order_container()
 
             return
 

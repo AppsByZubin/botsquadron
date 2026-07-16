@@ -2268,6 +2268,9 @@ class VwapEmaStStrategy:
                 self._order_container["status"] = constants.OPEN
                 self._order_counter += 1
                 logger.info(f"{self._order_container}")
+            else:
+                logger.warning("Order manager did not return trade_id; clearing complete waiting intent.")
+                self._reset_order_container()
             return
 
         # 2) OPEN -> feed LTP to OMS for fixed SL/TP monitoring

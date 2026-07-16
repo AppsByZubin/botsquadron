@@ -298,7 +298,7 @@ class TimeseriesTrendV2Strategy(TimeseriesTrendStrategy):
             logger.info(f"{self._order_container}")
         else:
             logger.warning(
-                f"Order manager did not return trade_id; clearing waiting intent for "
+                f"Order manager did not return trade_id; clearing complete waiting intent for "
                 f"instrument_key={instrument_key}, symbol={self._order_container.get('instrument_symbol')}."
             )
             self._clear_waiting_order_intent()

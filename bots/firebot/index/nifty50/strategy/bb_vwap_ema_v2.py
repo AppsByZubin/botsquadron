@@ -272,7 +272,8 @@ class BbVwapEmaV2Strategy(BbVwapEmaStrategy):
                 self._order_counter += 1
             logger.info(f"{self._order_container}")
         else:
-            self._clear_pending_contract()
+            logger.warning("Order manager did not return trade_id; clearing complete waiting intent.")
+            self._reset_order_container()
 
     def _trail_open_order(self, feed_response):
         latest_ltp = None

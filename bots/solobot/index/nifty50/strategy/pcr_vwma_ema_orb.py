@@ -1793,6 +1793,10 @@ class PCRVwmaEmaOrbStrategy:
                 self._order_container["status"] = constants.OPEN
                 self._order_counter += 1
                 log.info(f"{self._order_container}")
+            else:
+                log.warning("Order manager did not return trade_id; clearing complete waiting intent.")
+                for key in self._order_container:
+                    self._order_container[key] = None
             return
 
         # 2) OPEN -> feed LTP to OMS for trailing/exit
