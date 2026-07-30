@@ -747,6 +747,7 @@ class OrderSystemClient:
         ts: Optional[datetime] = None,
         trade_id: Optional[str] = None,
         force_trail: bool = False,
+        force_trail_stoploss: Optional[float] = None,
     ) -> Optional[Dict[str, Any]]:
         price = _first_float(c, h, l, o)
         if price is None or price <= 0:
@@ -806,7 +807,12 @@ class OrderSystemClient:
         if not _to_bool(trade.get("tsl_active"), False):
             return trade
 
-        update = self._build_trailing_update(trade, price, force=force_trail)
+        update = self._build_trailing_update(
+            trade,
+            price,
+            force=force_trail,
+            force_stoploss=force_trail_stoploss,
+        )
         if update is None:
             return trade
 
@@ -1522,6 +1528,7 @@ class OrderSystemClient:
         trade: Mapping[str, Any],
         price: float,
         force: bool = False,
+        force_stoploss: Optional[float] = None,
     ) -> Optional[Dict[str, float]]:
         entry = _to_float(trade.get("entry_price"), 0.0)
         trail_points = _to_float(_first_value(trade.get("trail_points"), trade.get("_trail_points")), 0.0)
@@ -1560,7 +1567,11 @@ class OrderSystemClient:
             return None
         if not force and trail_anchor > 0 and price < trail_anchor + trail_points:
             return None
-        new_sl = self._round_price(price - trail_points, "CEIL")
+        requested_force_sl = _to_float(force_stoploss, None)
+        if force and requested_force_sl is not None and requested_force_sl > 0:
+            new_sl = self._round_price(requested_force_sl, "CEIL")
+        else:
+            new_sl = self._round_price(price - trail_points, "CEIL")
         if not force:
             min_trailing_sl = self._round_price(entry + 3.0, "CEIL")
             if new_sl < min_trailing_sl:

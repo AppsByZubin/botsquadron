@@ -13,6 +13,8 @@ from utils.generic_utils import safe_float
 
 logger = logger_module.create_logger("BbVwapEmaV2StrategyLogger")
 
+LONG_TRAIL_BELOW_ENTRY_SL_GAP = 2.0
+
 
 class BbVwapEmaV2Strategy(BbVwapEmaStrategy):
     """BB/VWAP/EMA v2 with 21 EMA / 50 SMA longer trail and reversal logic."""
@@ -298,7 +300,20 @@ class BbVwapEmaV2Strategy(BbVwapEmaStrategy):
 
         self._order_container["ltp"] = latest_ltp
         self._enable_longer_trail_if_needed(latest_ltp=latest_ltp, ts=ts)
-        force_trail = self._should_force_trail_open_order(latest_ltp, ts)
+        longer_trail_crossover = self._should_force_longer_trail(latest_ltp)
+        force_trail = self._should_force_trail_open_order(
+            latest_ltp,
+            ts,
+            longer_trail_crossover=longer_trail_crossover,
+        )
+        force_trail_stoploss = None
+        entry_price = safe_float(self._order_container.get("entry_price"))
+        if (
+            longer_trail_crossover
+            and entry_price is not None
+            and latest_ltp < entry_price
+        ):
+            force_trail_stoploss = latest_ltp - LONG_TRAIL_BELOW_ENTRY_SL_GAP
         tick_result = self.order_maneger.on_tick(
             symbol=self._order_container["instrument_symbol"],
             o=latest_ltp,
@@ -307,6 +322,7 @@ class BbVwapEmaV2Strategy(BbVwapEmaStrategy):
             c=latest_ltp,
             ts=ts,
             force_trail=force_trail,
+            force_trail_stoploss=force_trail_stoploss,
         )
         force_trail_applied = (
             tick_result is True
@@ -581,13 +597,16 @@ class BbVwapEmaV2Strategy(BbVwapEmaStrategy):
         self,
         latest_ltp: Optional[float] = None,
         ts: Optional[datetime] = None,
+        longer_trail_crossover: Optional[bool] = None,
     ) -> bool:
         del ts
         if self._order_container.get("status") != constants.OPEN:
             return False
         if self._coerce_bool(self._order_container.get("force_trail_lock"), False):
             return False
-        if self._should_force_longer_trail(latest_ltp):
+        if longer_trail_crossover is None:
+            longer_trail_crossover = self._should_force_longer_trail(latest_ltp)
+        if longer_trail_crossover:
             return True
         return self._last_two_closes_beyond_bb_basis()
 

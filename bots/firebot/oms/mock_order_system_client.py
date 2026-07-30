@@ -205,6 +205,7 @@ class MockOrderSystemClient(OrderSystemClient):
         ts: Optional[datetime] = None,
         trade_id: Optional[str] = None,
         force_trail: bool = False,
+        force_trail_stoploss: Optional[float] = None,
     ) -> Optional[Dict[str, Any]]:
         resolved_trade_id = str(
             trade_id
@@ -244,6 +245,7 @@ class MockOrderSystemClient(OrderSystemClient):
             ts=ts,
             trade_id=resolved_trade_id,
             force_trail=force_trail,
+            force_trail_stoploss=force_trail_stoploss,
         )
 
     def square_off_trade(
