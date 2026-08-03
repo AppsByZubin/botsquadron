@@ -1040,6 +1040,20 @@ class UpstoxOrderManager:
         if not t or str(t.get("status", "")).upper() != "OPEN":
             return False
 
+        current_stoploss = _safe_float(t.get("stoploss"), None)
+        requested_stoploss = _safe_float(new_trigger, None)
+        if requested_stoploss is None:
+            return False
+        if current_stoploss is not None and requested_stoploss <= current_stoploss:
+            logger.info(
+                "SL modify skipped trade_id=%s old_stoploss=%.2f new_stoploss=%.2f; "
+                "new stoploss must be greater",
+                trade_id,
+                current_stoploss,
+                requested_stoploss,
+            )
+            return False
+
         # Load slice ids + qty map
         sl_ids = t.get("sl_order_ids") or []
         if isinstance(sl_ids, str):

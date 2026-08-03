@@ -85,7 +85,14 @@ class MockOrderSystem:
     def modify_order(self, order_id, new_sl=None, new_target=None, new_qty=None):
         for order in self.orders:
             if order["id"] == order_id and order["status"] == "OPEN":
-                if new_sl:
+                if new_sl is not None:
+                    current_sl = order.get("stoploss")
+                    if current_sl is not None and float(new_sl) <= float(current_sl):
+                        logger.info(
+                            f"[MODIFY SKIPPED] {order['symbol']} | Existing SL={current_sl} | "
+                            f"Requested SL={new_sl}; new SL must be greater"
+                        )
+                        return False
                     order["stoploss"] = new_sl
                 if new_target:
                     order["target"] = new_target
@@ -133,7 +140,7 @@ class MockOrderSystem:
                         if order["min_price"] is None or ltp < order["min_price"]:
                             order["min_price"] = ltp
                             new_sl = ltp + self.tsl_buffer
-                            if new_sl < sl:
+                            if new_sl > sl:
                                 order["stoploss"] = new_sl
                                 next_anchor = ltp - self.tsl_buffer
                                 logger.info(f"[TSL] SELL {symbol} | New SL = {new_sl} | Next anchor = {next_anchor}")

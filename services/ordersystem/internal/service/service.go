@@ -487,13 +487,13 @@ func (s *Service) ModifyTrade(ctx context.Context, tradeID string, req model.Mod
 	if err != nil {
 		return model.ModifyTradeResponse{}, fmt.Errorf("load trade: %w", err)
 	}
-	if shouldSkipBrokerStoplossModifyForForceTrail(trade, stoploss, req.ForceTrail) {
+	if shouldSkipStoplossModify(trade, stoploss) {
 		return model.ModifyTradeResponse{
 			TradeID: tradeID,
 			Message: fmt.Sprintf(
-				"force trail skipped because existing stoploss %.2f is greater than requested stoploss %.2f",
-				trade.Stoploss,
+				"SL modify skipped because requested stoploss %.2f must be greater than existing stoploss %.2f",
 				*stoploss,
+				trade.Stoploss,
 			),
 		}, nil
 	}
@@ -1424,8 +1424,8 @@ func validateModifiedTradeAgainstTrade(trade model.Trade, stoploss *float64, slL
 	return nil
 }
 
-func shouldSkipBrokerStoplossModifyForForceTrail(trade model.Trade, stoploss *float64, forceTrail bool) bool {
-	return forceTrail && stoploss != nil && trade.Stoploss > 0 && trade.Stoploss > *stoploss
+func shouldSkipStoplossModify(trade model.Trade, stoploss *float64) bool {
+	return stoploss != nil && trade.Stoploss > 0 && *stoploss <= trade.Stoploss
 }
 
 func validatePositiveFloatPtr(name string, value *float64) error {

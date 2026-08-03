@@ -569,20 +569,21 @@ class OrderSystemClient:
             "spot_trail_anchor": _to_float(spot_trail_anchor, None),
             "force_trail": True if force_trail else None,
         })
-        cached_trade = self._get_cached_trade(trade_id)
+        cached_trade = self._get_cached_trade(trade_id) or self._read_local_trade(trade_id)
         current_stoploss = _to_float((cached_trade or {}).get("stoploss"), None)
         requested_stoploss = payload.get("stoploss")
-        if force_trail and current_stoploss is not None and requested_stoploss is not None and current_stoploss > requested_stoploss:
+        if current_stoploss is not None and requested_stoploss is not None and requested_stoploss <= current_stoploss:
             response = {
                 "trade_id": trade_id,
                 "modified_order_ids": [],
-                "message": "force trail skipped because existing stoploss is greater than requested stoploss",
+                "message": "SL modify skipped because new stoploss must be greater than existing stoploss",
             }
             log.info(
-                "Force trailing SL modify skipped trade_id=%s old_stoploss=%.2f new_stoploss=%.2f",
+                "SL modify skipped trade_id=%s old_stoploss=%.2f new_stoploss=%.2f force_trail=%s",
                 trade_id,
                 current_stoploss,
                 requested_stoploss,
+                force_trail,
             )
             self._log_local_event("MODIFY_TRADE", cached_trade or {"id": trade_id}, extra={"request": payload, "response": dict(response)})
             return response

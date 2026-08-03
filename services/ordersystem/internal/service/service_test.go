@@ -331,48 +331,50 @@ func TestValidateModifiedTradeAgainstTradeChecksSLLimitDirection(t *testing.T) {
 	}
 }
 
-func TestShouldSkipBrokerStoplossModifyForForceTrail(t *testing.T) {
+func TestShouldSkipStoplossModify(t *testing.T) {
 	t.Parallel()
 
 	lowerStoploss := 95.0
+	equalStoploss := 100.0
 	higherStoploss := 105.0
 
 	tests := []struct {
-		name       string
-		trade      model.Trade
-		stoploss   *float64
-		forceTrail bool
-		want       bool
+		name     string
+		trade    model.Trade
+		stoploss *float64
+		want     bool
 	}{
 		{
-			name:       "force trail skips lower requested stoploss",
-			trade:      model.Trade{Stoploss: 100},
-			stoploss:   &lowerStoploss,
-			forceTrail: true,
-			want:       true,
+			name:     "lower requested stoploss is skipped",
+			trade:    model.Trade{Stoploss: 100},
+			stoploss: &lowerStoploss,
+			want:     true,
 		},
 		{
-			name:       "force trail allows higher requested stoploss",
-			trade:      model.Trade{Stoploss: 100},
-			stoploss:   &higherStoploss,
-			forceTrail: true,
+			name:     "equal requested stoploss is skipped",
+			trade:    model.Trade{Stoploss: 100},
+			stoploss: &equalStoploss,
+			want:     true,
 		},
 		{
-			name:       "regular modify allows lower requested stoploss",
-			trade:      model.Trade{Stoploss: 100},
-			stoploss:   &lowerStoploss,
-			forceTrail: false,
+			name:     "higher requested stoploss is allowed",
+			trade:    model.Trade{Stoploss: 100},
+			stoploss: &higherStoploss,
 		},
 		{
-			name:       "missing current stoploss does not skip",
-			trade:      model.Trade{},
-			stoploss:   &lowerStoploss,
-			forceTrail: true,
+			name:     "regular modify also skips lower requested stoploss",
+			trade:    model.Trade{Stoploss: 100},
+			stoploss: &lowerStoploss,
+			want:     true,
 		},
 		{
-			name:       "missing requested stoploss does not skip",
-			trade:      model.Trade{Stoploss: 100},
-			forceTrail: true,
+			name:     "missing current stoploss does not skip",
+			trade:    model.Trade{},
+			stoploss: &lowerStoploss,
+		},
+		{
+			name:  "missing requested stoploss does not skip",
+			trade: model.Trade{Stoploss: 100},
 		},
 	}
 
@@ -381,9 +383,9 @@ func TestShouldSkipBrokerStoplossModifyForForceTrail(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			got := shouldSkipBrokerStoplossModifyForForceTrail(tt.trade, tt.stoploss, tt.forceTrail)
+			got := shouldSkipStoplossModify(tt.trade, tt.stoploss)
 			if got != tt.want {
-				t.Fatalf("shouldSkipBrokerStoplossModifyForForceTrail() = %v, want %v", got, tt.want)
+				t.Fatalf("shouldSkipStoplossModify() = %v, want %v", got, tt.want)
 			}
 		})
 	}

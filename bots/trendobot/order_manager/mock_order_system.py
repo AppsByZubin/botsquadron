@@ -726,6 +726,16 @@ class MockOrderManager:
         lim = _safe_float(new_limit, None)
         if trig is None or lim is None:
             return False
+        current_stoploss = _safe_float(t.get("stoploss"), None)
+        if current_stoploss is not None and trig <= current_stoploss:
+            logger.info(
+                "SL modify skipped trade_id=%s old_stoploss=%.2f new_stoploss=%.2f; "
+                "new stoploss must be greater",
+                trade_id,
+                current_stoploss,
+                trig,
+            )
+            return False
 
         t["stoploss"] = float(trig)
         t["_sl_limit"] = float(lim)

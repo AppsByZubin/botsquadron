@@ -148,11 +148,11 @@ class MockOrderSystemClient(OrderSystemClient):
         current_trade = self._get_cached_trade(trade_id) or self._read_local_trade(trade_id)
         current_stoploss = _to_float((current_trade or {}).get("stoploss"), None)
         requested_stoploss = _to_float(stoploss, None)
-        if force_trail and current_stoploss is not None and requested_stoploss is not None and current_stoploss > requested_stoploss:
+        if current_stoploss is not None and requested_stoploss is not None and requested_stoploss <= current_stoploss:
             response = {
                 "trade_id": trade_id,
                 "modified_order_ids": [],
-                "message": "force trail skipped because existing stoploss is greater than requested stoploss",
+                "message": "SL modify skipped because new stoploss must be greater than existing stoploss",
             }
             self._log_local_event(
                 "MOCK_MODIFY_TRADE",
@@ -160,7 +160,7 @@ class MockOrderSystemClient(OrderSystemClient):
                 extra={
                     "order_type": str(order_type or constants.SL).upper(),
                     "validity": str(validity or self.validity).upper(),
-                    "force_trail": True,
+                    "force_trail": bool(force_trail),
                     "new_stoploss": requested_stoploss,
                 },
             )
