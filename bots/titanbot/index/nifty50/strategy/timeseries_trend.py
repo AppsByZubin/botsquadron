@@ -30,6 +30,8 @@ class TimeseriesTrendStrategy:
     when the three EMA-angle conditions align.
     """
 
+    VWAP_BAND_1_ENTRY_MIN_WIDTH = 60.0
+
     def __init__(
         self,
         current_date=None,
@@ -1269,6 +1271,10 @@ class TimeseriesTrendStrategy:
                 "close": pd.Series(dtype="float64"),
                 "volume": pd.Series(dtype="float64"),
                 "candle_length": pd.Series(dtype="float64"),
+                "vwap": pd.Series(dtype="float64"),
+                "vwap_stdev": pd.Series(dtype="float64"),
+                "vwap_upper_band_1": pd.Series(dtype="float64"),
+                "vwap_lower_band_1": pd.Series(dtype="float64"),
                 "ema_1m": pd.Series(dtype="float64"),
                 "angle_ema_1m": pd.Series(dtype="float64"),
                 "ema_5m": pd.Series(dtype="float64"),
@@ -1362,6 +1368,7 @@ class TimeseriesTrendStrategy:
         high = pd.to_numeric(frame["high"], errors="coerce").astype("float64")
         low = pd.to_numeric(frame["low"], errors="coerce").astype("float64")
 
+        self._apply_vwap_band_1(frame)
         ema_1m = self._ema(close)
         angle_1m = self._ema_angle(ema_1m)
 
@@ -1378,6 +1385,53 @@ class TimeseriesTrendStrategy:
         self.df_index["angle_ema_9"] = angle_1m.to_numpy()
         self._last_indicator_row = len(self.df_index) - 1
         self._indicator_revision += 1
+
+    def _apply_vwap_band_1(self, frame: pd.DataFrame) -> None:
+        candle_time = pd.to_datetime(frame["time"], errors="coerce")
+        high = pd.to_numeric(frame["high"], errors="coerce").astype("float64")
+        low = pd.to_numeric(frame["low"], errors="coerce").astype("float64")
+        close = pd.to_numeric(frame["close"], errors="coerce").astype("float64")
+
+        index_volume = pd.to_numeric(frame["volume"], errors="coerce").astype("float64")
+        minute_keys = frame["time"].map(self._minute_key_from_value)
+        future_volume = pd.to_numeric(
+            minute_keys.map(self._future_volume_by_minute),
+            errors="coerce",
+        ).astype("float64")
+        volume = future_volume.where(future_volume > 0, index_volume)
+        volume = volume.fillna(1.0).mask(volume <= 0, 1.0)
+
+        vwap_source = (high + low + close) / 3.0
+        trade_day = candle_time.dt.strftime("%Y-%m-%d")
+        cumulative_volume = volume.groupby(trade_day).cumsum()
+        cumulative_pv = (vwap_source * volume).groupby(trade_day).cumsum()
+        cumulative_pv2 = ((vwap_source ** 2) * volume).groupby(trade_day).cumsum()
+        vwap = cumulative_pv / cumulative_volume.replace(0.0, np.nan)
+        variance = (cumulative_pv2 / cumulative_volume.replace(0.0, np.nan)) - (vwap ** 2)
+        vwap_stdev = pd.Series(
+            np.sqrt(np.maximum(variance, 0.0)),
+            index=frame.index,
+            dtype="float64",
+        )
+
+        sp = self._strategy_params()
+        band_multiplier = self._coerce_float(
+            sp.get("vwap_band_mult_1", sp.get("bandMult_1")),
+            1.0,
+            minimum=0.0,
+        )
+        band_basis = vwap_stdev
+        calc_mode = str(
+            sp.get("vwap_bands_calc_mode", sp.get("vwap_band_calc_mode", "Standard Deviation"))
+            or "Standard Deviation"
+        ).strip().lower()
+        if calc_mode == "percentage":
+            band_basis = vwap * 0.01
+
+        self.df_index["vwap"] = vwap.to_numpy()
+        self.df_index["vwap_stdev"] = vwap_stdev.to_numpy()
+        self.df_index["vwap_upper_band_1"] = (vwap + (band_basis * band_multiplier)).to_numpy()
+        self.df_index["vwap_lower_band_1"] = (vwap - (band_basis * band_multiplier)).to_numpy()
 
     def _build_timeframe_frame(self, frame: pd.DataFrame, minutes: int) -> pd.DataFrame:
         if frame.empty:
@@ -1512,26 +1566,43 @@ class TimeseriesTrendStrategy:
             ema_10m = safe_float(latest.get("ema_10m"))
             ema_5m = safe_float(latest.get("ema_5m"))
             ema_1m = safe_float(latest.get("ema_1m"))
-            if any(value is None for value in (close_price, angle_10m, angle_5m, angle_1m)):
+            vwap_upper_band_1 = safe_float(latest.get("vwap_upper_band_1"))
+            vwap_lower_band_1 = safe_float(latest.get("vwap_lower_band_1"))
+            if any(
+                value is None
+                for value in (
+                    close_price,
+                    angle_10m,
+                    angle_5m,
+                    angle_1m,
+                    vwap_upper_band_1,
+                    vwap_lower_band_1,
+                )
+            ):
                 self._last_engine_revision = current_revision
                 return
+            vwap_band_1_width = vwap_upper_band_1 - vwap_lower_band_1
 
             call_setup = (
                 angle_10m > self.call_angle_10m
                 and angle_5m > self.call_angle_5m
                 and angle_1m > self.call_angle_1m
+                and vwap_band_1_width > self.VWAP_BAND_1_ENTRY_MIN_WIDTH
             )
             put_setup = (
                 angle_10m < self.put_angle_10m
                 and angle_5m < self.put_angle_5m
                 and angle_1m < self.put_angle_1m
+                and vwap_band_1_width > self.VWAP_BAND_1_ENTRY_MIN_WIDTH
             )
 
             logger.debug(
                 f"candle_time={latest_time}, close={close_price}, "
                 f"ema_10m={ema_10m}, angle_10m={angle_10m}, threshold_call_10m={self.call_angle_10m}, threshold_put_10m={self.put_angle_10m}, "
                 f"ema_5m={ema_5m}, angle_5m={angle_5m}, threshold_call_5m={self.call_angle_5m}, threshold_put_5m={self.put_angle_5m}, "
-                f"ema_1m={ema_1m}, angle_1m={angle_1m}, threshold_call_1m={self.call_angle_1m}, threshold_put_1m={self.put_angle_1m}"
+                f"ema_1m={ema_1m}, angle_1m={angle_1m}, threshold_call_1m={self.call_angle_1m}, threshold_put_1m={self.put_angle_1m}, "
+                f"vwap_band_1={vwap_lower_band_1}/{vwap_upper_band_1}, vwap_band_1_width={vwap_band_1_width}, "
+                f"vwap_band_1_min_width={self.VWAP_BAND_1_ENTRY_MIN_WIDTH}"
             )
             logger.debug(f"candle_time={latest_time}, condition check call_setup:{call_setup}, put_setup:{put_setup}")
             self._last_engine_revision = current_revision

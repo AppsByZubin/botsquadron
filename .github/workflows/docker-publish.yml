@@ -50,6 +50,9 @@ jobs:
           - service: fibobot
             context: .
             dockerfile: bots/fibobot/Dockerfile
+          - service: meanbot
+            context: .
+            dockerfile: bots/meanbot/Dockerfile
 
     steps:
       - name: Checkout botsquadron
@@ -197,6 +200,10 @@ jobs:
           if "fibobot" in data:
               data["fibobot"]["image"]["repository"] = repo
               data["fibobot"]["image"]["tag"] = f"fibobot-{tag}"
+
+          if "meanbot" in data:
+              data["meanbot"]["image"]["repository"] = repo
+              data["meanbot"]["image"]["tag"] = f"meanbot-{tag}"
 
           with path.open("w") as f:
               yaml.dump(data, f)

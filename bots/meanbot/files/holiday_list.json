@@ -1,0 +1,67 @@
+[
+    {
+      "date": "2026-01-26",
+      "description": "Republic Day"
+    },
+    {
+      "date": "2026-03-03",
+      "description": "Holi"
+    },
+    {
+      "date": "2026-03-26",
+      "description": "Ram Navami"
+    },
+    {
+      "date": "2026-03-31",
+      "description": "Mahavir Jayanti"
+    },
+    {
+      "date": "2026-04-03",
+      "description": "Good Friday"
+    },
+    {
+      "date": "2026-04-14",
+      "description": "Dr. Baba Saheb Ambedkar Jayanti"
+    },
+    {
+      "date": "2026-05-01",
+      "description": "Maharashtra Day"
+    },
+    {
+      "date": "2026-05-28",
+      "description": "Bakri Id / Eid-ul-Adha"
+    },
+    {
+      "date": "2026-06-26",
+      "description": "Muharram",
+      "holiday_type": "TRADING_HOLIDAY"
+    },
+    {
+      "date": "2026-09-14",
+      "description": "Ganesh Chaturthi"
+    },
+    {
+      "date": "2026-10-02",
+      "description": "Gandhi Jayanti"
+    },
+    {
+      "date": "2026-10-20",
+      "description": "Dussehra"
+    },
+    {
+      "date": "2026-11-08",
+      "description": "Diwali Laxmi Pujan"
+    },
+    {
+      "date": "2026-11-10",
+      "description": "Diwali-Balipratipada"
+    },
+    {
+      "date": "2026-11-24",
+      "description": "Guru Nanak Jayanti"
+    },
+    {
+      "date": "2026-12-25",
+      "description": "Christmas"
+    }
+]
