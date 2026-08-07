@@ -125,6 +125,8 @@ class MeanRevVwapStrategyTests(unittest.TestCase):
         strategy._post_exit_cooldown_until = None
         strategy._max_order_counter = 5
         strategy._order_counter = 0
+        strategy.call_ema_9_angle_threshold = 45.0
+        strategy.put_ema_9_angle_threshold = -45.0
         strategy._is_daily_loss_limit_active = lambda _ref_ts: False
         strategy._calculate_lot_size = lambda _side, _bullish, _bearish: 2
         return strategy
@@ -282,6 +284,8 @@ class MeanRevVwapStrategyTests(unittest.TestCase):
                 "trade_expiry": "2026-08-11",
                 "max_daily_loss_amount": 4200.0,
                 "post_exit_cooldown_minutes": 7,
+                "call_ema_9_angle_threshold": 52.0,
+                "put_ema_9_angle_threshold": -51.0,
                 "trade-window": {"start": "11:00", "end": "15:15"},
             }
         }
@@ -311,6 +315,8 @@ class MeanRevVwapStrategyTests(unittest.TestCase):
         self.assertEqual(len(strategy.df_index_future), 2)
         self.assertEqual(strategy._max_daily_loss_amount, 4200.0)
         self.assertEqual(strategy._post_exit_cooldown_minutes, 7)
+        self.assertEqual(strategy.call_ema_9_angle_threshold, 52.0)
+        self.assertEqual(strategy.put_ema_9_angle_threshold, -51.0)
         self.assertEqual(strategy.trade_start, time(11, 0))
         self.assertEqual(strategy.trade_end, time(15, 15))
         self.assertTrue(pd.notna(strategy.df_index.iloc[-1]["vwap"]))
