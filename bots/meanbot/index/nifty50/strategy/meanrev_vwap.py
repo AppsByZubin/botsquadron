@@ -125,7 +125,11 @@ class MeanRevVwapStrategy:
 
         self._max_order_counter = int(sp.get("trade-per-day", sp.get("trade_per_day", 5)) or 5)
         self._order_counter = 0
-        self._post_exit_cooldown_minutes = 5
+        configured_post_exit_cooldown = safe_float(sp.get("post_exit_cooldown_minutes", 5))
+        self._post_exit_cooldown_minutes = max(
+            int(configured_post_exit_cooldown) if configured_post_exit_cooldown is not None else 5,
+            0,
+        )
         self._post_exit_cooldown_until: Optional[datetime] = None
         configured_daily_loss_amount = safe_float(
             sp.get("max_daily_loss_amount", 5000.0)

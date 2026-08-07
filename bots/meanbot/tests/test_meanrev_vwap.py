@@ -118,6 +118,7 @@ class MeanRevVwapStrategyTests(unittest.TestCase):
             "strategy-parameters": {
                 "trade_expiry": "2026-08-11",
                 "max_daily_loss_amount": 4200.0,
+                "post_exit_cooldown_minutes": 7,
                 "trade-window": {"start": "11:00", "end": "15:15"},
             }
         }
@@ -146,6 +147,7 @@ class MeanRevVwapStrategyTests(unittest.TestCase):
         self.assertEqual(len(strategy.df_index), 2)
         self.assertEqual(len(strategy.df_index_future), 2)
         self.assertEqual(strategy._max_daily_loss_amount, 4200.0)
+        self.assertEqual(strategy._post_exit_cooldown_minutes, 7)
         self.assertTrue(pd.notna(strategy.df_index.iloc[-1]["vwap"]))
 
     def test_selects_only_in_the_money_contracts_for_side(self):
