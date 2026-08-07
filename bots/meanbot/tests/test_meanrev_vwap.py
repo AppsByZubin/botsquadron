@@ -215,6 +215,32 @@ class MeanRevVwapStrategyTests(unittest.TestCase):
         self.assertTrue(pd.notna(latest["ema_9"]))
         self.assertGreater(latest["angle_ema_9"], 45.0)
 
+    def test_trading_engine_runs_only_when_one_minute_candle_completes(self):
+        strategy = MeanRevVwapStrategy.__new__(MeanRevVwapStrategy)
+        strategy.curr_index_minute = "2026-08-07 11:00"
+        strategy.curr_index_candle = {
+            "time": strategy.curr_index_minute,
+            "open": 100.0,
+            "high": 100.0,
+            "low": 100.0,
+            "close": 100.0,
+        }
+        strategy.df_index = pd.DataFrame()
+        strategy.last_index_bar = None
+        strategy._gap_day = "2026-08-07"
+        strategy._apply_indicators = Mock()
+        strategy._trading_engine_active = Mock()
+
+        strategy._handle_index_tick("2026-08-07 11:00", 101.0)
+        strategy._trading_engine_active.assert_not_called()
+
+        strategy._handle_index_tick("2026-08-07 11:01", 102.0)
+
+        strategy._apply_indicators.assert_called_once_with()
+        strategy._trading_engine_active.assert_called_once_with()
+        self.assertEqual(strategy.last_index_bar["time"], "2026-08-07 11:00")
+        self.assertEqual(strategy.curr_index_minute, "2026-08-07 11:01")
+
     def test_five_minute_cooldown_boundary(self):
         strategy = MeanRevVwapStrategy.__new__(MeanRevVwapStrategy)
         strategy._post_exit_cooldown_minutes = 5
