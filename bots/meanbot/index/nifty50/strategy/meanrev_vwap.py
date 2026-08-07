@@ -831,7 +831,8 @@ class MeanRevVwapStrategy:
                     self.atr5_engine.on_tick(instrument_key, ltp, dt_object)
 
             if self.curr_index_minute:
-                self._trading_engine_active()
+                current_window_open = self._is_trading_window(self.curr_index_minute)
+                self._set_trading_window_state(self.curr_index_minute, current_window_open)
             self._trade_processing(feed_response)
 
         except Exception as e:
@@ -1170,6 +1171,7 @@ class MeanRevVwapStrategy:
         self.last_index_bar = c
         self.curr_index_candle = None
         self._apply_indicators()
+        self._trading_engine_active()
 
 
     def _is_trading_window(self, time_str: str) -> bool:
