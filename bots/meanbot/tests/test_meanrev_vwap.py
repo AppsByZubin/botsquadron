@@ -1,8 +1,8 @@
 import pathlib
 import sys
 import unittest
-from datetime import datetime, timedelta
-from unittest.mock import Mock
+from datetime import datetime, time, timedelta
+from unittest.mock import Mock, patch
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -17,6 +17,83 @@ from oms.mock_order_system_client import MockOrderSystemClient
 
 
 class MeanRevVwapStrategyTests(unittest.TestCase):
+    def test_trading_window_state_logs_once_per_minute(self):
+        strategy = MeanRevVwapStrategy.__new__(MeanRevVwapStrategy)
+        strategy._last_outside_trading_window_log_minute = None
+        strategy._last_inside_trading_window_log_minute = None
+        strategy._current_trading_window_minute = None
+        strategy._current_trading_window_open = False
+        strategy._order_container = {"status": None, "side": None}
+        strategy._order_counter = 0
+        strategy._max_order_counter = 5
+        strategy.df_index = pd.DataFrame()
+
+        with patch("index.nifty50.strategy.meanrev_vwap.logger.info") as log_info:
+            strategy._set_trading_window_state("2026-08-07 09:31", False)
+            strategy._set_trading_window_state("2026-08-07 09:31", False)
+            strategy._set_trading_window_state("2026-08-07 09:32", False)
+            strategy._set_trading_window_state("2026-08-07 11:00", True)
+            strategy._set_trading_window_state("2026-08-07 11:00", True)
+
+        self.assertEqual(log_info.call_count, 3)
+        log_info.assert_any_call("Outside Trading Window at 2026-08-07 09:31")
+        log_info.assert_any_call("Outside Trading Window at 2026-08-07 09:32")
+        self.assertTrue(
+            any(
+                str(call.args[0]).startswith("Inside Trading Window at 2026-08-07 11:00;")
+                for call in log_info.call_args_list
+            )
+        )
+        self.assertEqual(strategy._current_trading_window_minute, "2026-08-07 11:00")
+        self.assertTrue(strategy._current_trading_window_open)
+
+    def test_outside_trading_window_clears_waiting_order(self):
+        strategy = MeanRevVwapStrategy.__new__(MeanRevVwapStrategy)
+        strategy.curr_index_minute = "2026-08-07 09:31"
+        strategy._current_trading_window_minute = strategy.curr_index_minute
+        strategy._current_trading_window_open = False
+        strategy._order_container = {
+            "trade_id": None,
+            "side": constants.CALL,
+            "instrument_key": None,
+            "status": constants.WAITING,
+        }
+        strategy.order_maneger = None
+
+        strategy._trade_processing([])
+
+        self.assertTrue(all(value is None for value in strategy._order_container.values()))
+
+    def test_outside_trading_window_updates_ltp_and_squares_off_open_order(self):
+        strategy = MeanRevVwapStrategy.__new__(MeanRevVwapStrategy)
+        strategy.curr_index_minute = "2026-08-07 15:01"
+        strategy._current_trading_window_minute = strategy.curr_index_minute
+        strategy._current_trading_window_open = False
+        strategy._order_container = {
+            "trade_id": "trade-1",
+            "side": constants.CALL,
+            "instrument_key": "option-1",
+            "status": constants.OPEN,
+            "ltp": 100.0,
+        }
+        strategy.order_maneger = Mock()
+        strategy.order_maneger.square_off_trade.return_value = True
+        strategy.order_maneger.get_trade_by_id.return_value = {"id": "trade-1"}
+        strategy._resolve_reference_ts = Mock(
+            return_value=datetime(2026, 8, 7, 15, 1, tzinfo=ZoneInfo("Asia/Kolkata"))
+        )
+        strategy._update_today_realized_pnl_on_trade_close = Mock()
+
+        strategy._trade_processing([{"instrument_key": "option-1", "ltp": 105.0}])
+
+        strategy.order_maneger.square_off_trade.assert_called_once_with(
+            trade_id="trade-1",
+            exit_price=105.0,
+            ts=strategy._resolve_reference_ts.return_value,
+            reason=constants.EOD_SQUARE_OFF,
+        )
+        self.assertTrue(all(value is None for value in strategy._order_container.values()))
+
     @staticmethod
     def _strategy_with_candle(*, open_price, close_price, lowerbound, upperbound):
         strategy = MeanRevVwapStrategy.__new__(MeanRevVwapStrategy)
@@ -30,6 +107,12 @@ class MeanRevVwapStrategyTests(unittest.TestCase):
             "upperbound": upperbound,
         }])
         strategy._order_container = {"side": None, "status": None, "lot": None}
+        strategy.trade_start = time(9, 45)
+        strategy.trade_end = time(15, 15)
+        strategy._last_outside_trading_window_log_minute = None
+        strategy._last_inside_trading_window_log_minute = None
+        strategy._current_trading_window_minute = None
+        strategy._current_trading_window_open = False
         strategy._post_exit_cooldown_until = None
         strategy._max_order_counter = 5
         strategy._order_counter = 0
@@ -148,6 +231,8 @@ class MeanRevVwapStrategyTests(unittest.TestCase):
         self.assertEqual(len(strategy.df_index_future), 2)
         self.assertEqual(strategy._max_daily_loss_amount, 4200.0)
         self.assertEqual(strategy._post_exit_cooldown_minutes, 7)
+        self.assertEqual(strategy.trade_start, time(11, 0))
+        self.assertEqual(strategy.trade_end, time(15, 15))
         self.assertTrue(pd.notna(strategy.df_index.iloc[-1]["vwap"]))
 
     def test_selects_only_in_the_money_contracts_for_side(self):

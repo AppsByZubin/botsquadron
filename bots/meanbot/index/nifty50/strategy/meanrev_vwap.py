@@ -125,6 +125,10 @@ class MeanRevVwapStrategy:
 
         self._max_order_counter = int(sp.get("trade-per-day", sp.get("trade_per_day", 5)) or 5)
         self._order_counter = 0
+        self._last_outside_trading_window_log_minute: Optional[str] = None
+        self._last_inside_trading_window_log_minute: Optional[str] = None
+        self._current_trading_window_minute: Optional[str] = None
+        self._current_trading_window_open = False
         configured_post_exit_cooldown = safe_float(sp.get("post_exit_cooldown_minutes", 5))
         self._post_exit_cooldown_minutes = max(
             int(configured_post_exit_cooldown) if configured_post_exit_cooldown is not None else 5,
@@ -160,8 +164,8 @@ class MeanRevVwapStrategy:
             "max_gamma": None,
             "start_trail_after": None
         }
-        self._trade_end_time=None
-        self._init_trade_window_times()
+        self.trade_start, self.trade_end = self._init_trade_window_times()
+        self._trade_end_time = self.trade_end
         self._setup_gap_state()
         self._initialize_from_intraday_candles(intraday_index_candles, intraday_future_candles)
         self._restore_open_order_container_from_ordersystem()
@@ -211,6 +215,41 @@ class MeanRevVwapStrategy:
 
     def _reset_order_container(self) -> None:
         self._order_container = {k: None for k in self._order_container}
+
+    def _clear_waiting_order_intent(self) -> None:
+        if self._order_container.get("status") == constants.WAITING:
+            self._reset_order_container()
+
+    def _update_open_order_ltp(self, feed_response) -> None:
+        if self._order_container.get("status") != constants.OPEN:
+            return
+        for item in feed_response or []:
+            if item.get("instrument_key") != self._order_container.get("instrument_key"):
+                continue
+            ltp = safe_float(item.get("ltp"))
+            if ltp is not None:
+                self._order_container["ltp"] = ltp
+            return
+
+    def _square_off_open_trade(self, reason: str) -> None:
+        if self.order_maneger is None or self._order_container.get("status") != constants.OPEN:
+            return
+        trade_id = self._order_container.get("trade_id")
+        latest_ltp = safe_float(self._order_container.get("ltp"))
+        if not trade_id or latest_ltp is None:
+            return
+
+        square_ts = self._resolve_reference_ts()
+        trade_closed = self.order_maneger.square_off_trade(
+            trade_id=trade_id,
+            exit_price=latest_ltp,
+            ts=square_ts,
+            reason=reason,
+        )
+        if trade_closed:
+            trade_info = self.order_maneger.get_trade_by_id(trade_id)
+            self._update_today_realized_pnl_on_trade_close(trade_info, ts=square_ts)
+            self._reset_order_container()
 
     def _update_gap_stats(self, candle: Dict[str, Any]) -> None:
         minute_key = str(candle.get("time") or "")
@@ -747,8 +786,6 @@ class MeanRevVwapStrategy:
             return
         obj = None
         try:
-            self._trade_processing(feed_response)
-
             for item in feed_response:
                 ltt = item.get('ltt')
                 ltt_f = safe_float(ltt)
@@ -783,27 +820,41 @@ class MeanRevVwapStrategy:
                     self.atr5_engine.on_tick(instrument_key, ltp, dt_object)
 
             if self.curr_index_minute:
-                if self._is_trading_window(self.curr_index_minute):
-                    self._trading_engine_active()
-                else:
-                    logger.info(f"Outside Trading Window at {self.curr_index_minute}")
-                    if self._order_container.get("status") == constants.OPEN:
-                        logger.info(f"Closing all open positions {self._order_container}") 
-                        square_ts = self._resolve_reference_ts()
-                        trade_closed = self.order_maneger.square_off_trade(
-                            trade_id=self._order_container["trade_id"],
-                            exit_price=float(self._order_container["ltp"]),
-                            ts=square_ts,
-                        )
-                        if trade_closed:
-                            trade_info = self.order_maneger.get_trade_by_id(self._order_container.get("trade_id"))
-                            self._update_today_realized_pnl_on_trade_close(trade_info, ts=square_ts)
-                            self._reset_order_container()
-                        
+                self._trading_engine_active()
+            self._trade_processing(feed_response)
 
         except Exception as e:
             logger.exception(f"An error occurred in obj {obj} on_ws_message: {e}")
 
+    def _log_outside_trading_window(self, minute_key: str) -> None:
+        if minute_key == self._last_outside_trading_window_log_minute:
+            return
+        logger.info(f"Outside Trading Window at {minute_key}")
+        self._last_outside_trading_window_log_minute = minute_key
+
+    def _set_trading_window_state(self, minute_key: str, is_open: bool) -> None:
+        self._current_trading_window_minute = minute_key
+        self._current_trading_window_open = bool(is_open)
+        if is_open:
+            self._last_outside_trading_window_log_minute = None
+            self._log_inside_trading_window(minute_key)
+            return
+
+        self._last_inside_trading_window_log_minute = None
+        self._log_outside_trading_window(minute_key)
+
+    def _log_inside_trading_window(self, minute_key: str) -> None:
+        if minute_key == self._last_inside_trading_window_log_minute:
+            return
+        status = self._order_container.get("status") or "IDLE"
+        side = self._order_container.get("side") or "NONE"
+        logger.info(
+            f"Inside Trading Window at {minute_key}; "
+            f"status={status}, side={side}, "
+            f"trades={self._order_counter}/{self._max_order_counter}, "
+            f"candles={len(self.df_index)}"
+        )
+        self._last_inside_trading_window_log_minute = minute_key
 
     def _trade_processing(self, feed_response):
         """
@@ -811,11 +862,24 @@ class MeanRevVwapStrategy:
         WAITING: pick best contract and place order.
         OPEN: forward latest tick to OMS and sync local state after exits.
         """
+        if (
+            self.curr_index_minute
+            and (
+                self._current_trading_window_minute != self.curr_index_minute
+                or not self._current_trading_window_open
+            )
+        ):
+            self._update_open_order_ltp(feed_response)
+            self._clear_waiting_order_intent()
+            self._square_off_open_trade(reason=constants.EOD_SQUARE_OFF)
+            return
+
+        if not feed_response:
+            return
+
         sp = (self.params.get("strategy-parameters") or {}) if isinstance(self.params, dict) else {}
         dict_itm = {}
         ts = None
-        if not feed_response:
-            return
 
         # -------------------------
         # 1) WAITING -> pick contract + place order
@@ -1098,36 +1162,31 @@ class MeanRevVwapStrategy:
 
 
     def _is_trading_window(self, time_str: str) -> bool:
-        try:
-            sp = (self.params.get("strategy-parameters") or {}) if isinstance(self.params, dict) else {}
-            trade_window = sp.get("trade-window") or sp.get("trade_window") or self.params.get('trade-window') or self.params.get("trade_window") or {}
-            if not isinstance(trade_window, dict):
-                trade_window = {}
-            market_hours = self.params.get('market-hours', {}) if isinstance(self.params, dict) else {}
-            start_time = trade_window.get('start', market_hours.get('start', '09:45'))
-            start_time = "11:00"
-            end_time = trade_window.get('end', market_hours.get('end', '14:45'))
+        ts = pd.to_datetime(time_str, errors="coerce")
+        if pd.isna(ts):
+            return False
+        current = ts.time()
+        return self.trade_start <= current <= self.trade_end
 
-            current_time = datetime.fromisoformat(str(time_str)).time().replace(tzinfo=None)
-            start_time_obj = time.fromisoformat(str(start_time)).replace(tzinfo=None)
-            end_time_obj = time.fromisoformat(str(end_time)).replace(tzinfo=None)
-
-            return start_time_obj <= current_time <= end_time_obj
-        except Exception as e:
-            logger.warning(f"An error occurred in _is_trading_window: {e}")
-            return True
-
-    def _init_trade_window_times(self):
+    def _init_trade_window_times(self) -> tuple[time, time]:
         sp = (self.params.get("strategy-parameters") or {}) if isinstance(self.params, dict) else {}
         trade_window = sp.get("trade-window") or sp.get("trade_window") or self.params.get("trade-window") or self.params.get("trade_window") or {}
         if not isinstance(trade_window, dict):
             trade_window = {}
-        end_str = str(trade_window.get("end") or constants.EOD_SQUARE_OFF_TIME).strip()
-        try:
-            hh, mm = map(int, end_str.split(":"))
-            self._trade_end_time = time(hh, mm)
-        except Exception:
-            self._trade_end_time = time(15, 15)
+        market_hours = self.params.get("market-hours", {}) if isinstance(self.params, dict) else {}
+        start_str = trade_window.get("start", market_hours.get("start", "09:45"))
+        end_str = trade_window.get("end", market_hours.get("end", constants.EOD_SQUARE_OFF_TIME))
+        return self._parse_hhmm(start_str, time(9, 45)), self._parse_hhmm(end_str, time(15, 15))
+
+    @staticmethod
+    def _parse_hhmm(value: Any, default: time) -> time:
+        text = str(value or "").strip()
+        for fmt in ("%H:%M:%S", "%H:%M"):
+            try:
+                return datetime.strptime(text, fmt).time()
+            except ValueError:
+                continue
+        return default
 
     def _resolve_reference_ts(self) -> datetime:
         if self.curr_index_minute:
@@ -1369,9 +1428,18 @@ class MeanRevVwapStrategy:
         Enter from the latest completed candle's position relative to VWAP bands.
         """
         try:
+            current_minute = self.curr_index_minute
+            if not current_minute:
+                return
+
+            current_window_open = self._is_trading_window(current_minute)
+            self._set_trading_window_state(current_minute, current_window_open)
+            if not current_window_open:
+                return
+
             if not self.enable_trading_engine:
                 return
-            candle_time = getattr(self, "curr_index_minute", None) or "unknown"
+            candle_time = current_minute
 
             if self.df_index.empty:
                 return
@@ -1381,9 +1449,6 @@ class MeanRevVwapStrategy:
             candle_time = str(latest.get("time") or candle_time)
 
             if self._order_container["status"] is not None:
-                return
-
-            if ref_ts.time() < time(9, 45):
                 return
 
             if self._is_post_exit_cooldown_active(ref_ts):
