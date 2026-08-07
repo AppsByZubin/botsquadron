@@ -32,6 +32,10 @@ class MeanRevVwapStrategy:
     3) Enter when a completed candle body is fully outside a VWAP band.
     4) Delegate live trade lifecycle to order manager.
     """
+
+    CALL_EMA_9_ANGLE_THRESHOLD = 45.0
+    PUT_EMA_9_ANGLE_THRESHOLD = -45.0
+
     def __init__(
         self,
         current_date=None,
@@ -93,6 +97,11 @@ class MeanRevVwapStrategy:
         self._oi_previous_snapshot= {}
         self._sum_oi_changes= {}
         self.enable_trading_engine = bool(sp.get("enable_trading_engine", self.params.get("enable_trading_engine", True)))
+        configured_slope_window = safe_float(sp.get("slope_window", 3))
+        self._slope_window = max(
+            int(configured_slope_window) if configured_slope_window is not None else 3,
+            1,
+        )
 
         self._daily_sentiment = ht.get("daily", ht.get("trader-sentiment", constants.SIDEWAYS))
 
@@ -118,6 +127,8 @@ class MeanRevVwapStrategy:
             "hlc3": pd.Series(dtype="float64"),
             "fut_volume": pd.Series(dtype="float64"),
             "sma_100": pd.Series(dtype="float64"),
+            "ema_9": pd.Series(dtype="float64"),
+            "angle_ema_9": pd.Series(dtype="float64"),
             "vwap": pd.Series(dtype="float64"),
             "upperbound": pd.Series(dtype="float64"),
             "lowerbound": pd.Series(dtype="float64"),
@@ -1360,6 +1371,13 @@ class MeanRevVwapStrategy:
         close_series = pd.to_numeric(self.df_index["close"], errors="coerce").astype("float64")
         self.df_index["hlc3"] = (high_series + low_series + close_series) / 3.0
 
+        ema_9 = close_series.ewm(span=9, adjust=False, min_periods=9).mean()
+        slope_ema_9 = (ema_9 - ema_9.shift(self._slope_window)) / float(self._slope_window)
+        self.df_index["ema_9"] = ema_9.to_numpy()
+        self.df_index["angle_ema_9"] = np.degrees(
+            np.arctan(np.clip(slope_ema_9.to_numpy(dtype="float64"), -10.0, 10.0))
+        )
+
         self.df_index["fut_volume"] = pd.Series(np.nan, index=self.df_index.index, dtype="float64")
         self.df_index["vwap"] = pd.Series(np.nan, index=self.df_index.index, dtype="float64")
         self.df_index["upperbound"] = pd.Series(np.nan, index=self.df_index.index, dtype="float64")
@@ -1468,6 +1486,8 @@ class MeanRevVwapStrategy:
                 "close": safe_float(latest.get("close")),
                 "upperbound": safe_float(latest.get("upperbound")),
                 "lowerbound": safe_float(latest.get("lowerbound")),
+                "ema_9": safe_float(latest.get("ema_9")),
+                "angle_ema_9": safe_float(latest.get("angle_ema_9")),
             }
             if any(value is None for value in required_values.values()):
                 return
@@ -1476,23 +1496,29 @@ class MeanRevVwapStrategy:
             close_price = float(required_values["close"])
             upperbound = float(required_values["upperbound"])
             lowerbound = float(required_values["lowerbound"])
+            ema_9 = float(required_values["ema_9"])
+            angle_ema_9 = float(required_values["angle_ema_9"])
             band_width = upperbound - lowerbound
 
             logger.debug(
                 f"candle_time={candle_time}, Setup inputs open={open_price}, close={close_price}, "
                 f"vwap_session_upperband={upperbound}, vwap_session_lowerband={lowerbound}, "
-                f"band_width={band_width}, max_band_width=60"
+                f"band_width={band_width}, max_band_width=60, ema_9={ema_9}, "
+                f"angle_ema_9={angle_ema_9}, call_angle_threshold={self.CALL_EMA_9_ANGLE_THRESHOLD}, "
+                f"put_angle_threshold={self.PUT_EMA_9_ANGLE_THRESHOLD}"
             )
 
             call_setup = (
                 open_price < lowerbound
                 and close_price < lowerbound
                 and band_width < 60
+                and angle_ema_9 > self.CALL_EMA_9_ANGLE_THRESHOLD
             )
             put_setup = (
                 open_price > upperbound
                 and close_price > upperbound
                 and band_width < 60
+                and angle_ema_9 < self.PUT_EMA_9_ANGLE_THRESHOLD
             )
 
             logger.debug(
