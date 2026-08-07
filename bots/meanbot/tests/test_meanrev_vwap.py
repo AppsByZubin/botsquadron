@@ -95,7 +95,14 @@ class MeanRevVwapStrategyTests(unittest.TestCase):
         self.assertTrue(all(value is None for value in strategy._order_container.values()))
 
     @staticmethod
-    def _strategy_with_candle(*, open_price, close_price, lowerbound, upperbound):
+    def _strategy_with_candle(
+        *,
+        open_price,
+        close_price,
+        lowerbound,
+        upperbound,
+        angle_ema_9,
+    ):
         strategy = MeanRevVwapStrategy.__new__(MeanRevVwapStrategy)
         strategy.enable_trading_engine = True
         strategy.curr_index_minute = "2026-03-02 11:01"
@@ -105,6 +112,8 @@ class MeanRevVwapStrategyTests(unittest.TestCase):
             "close": close_price,
             "lowerbound": lowerbound,
             "upperbound": upperbound,
+            "ema_9": close_price,
+            "angle_ema_9": angle_ema_9,
         }])
         strategy._order_container = {"side": None, "status": None, "lot": None}
         strategy.trade_start = time(9, 45)
@@ -126,6 +135,7 @@ class MeanRevVwapStrategyTests(unittest.TestCase):
             close_price=99.0,
             lowerbound=100.0,
             upperbound=110.0,
+            angle_ema_9=46.0,
         )
 
         strategy._trading_engine_active()
@@ -139,6 +149,7 @@ class MeanRevVwapStrategyTests(unittest.TestCase):
             close_price=111.0,
             lowerbound=100.0,
             upperbound=110.0,
+            angle_ema_9=-46.0,
         )
 
         strategy._trading_engine_active()
@@ -157,9 +168,52 @@ class MeanRevVwapStrategyTests(unittest.TestCase):
                     close_price=close_price,
                     lowerbound=lowerbound,
                     upperbound=upperbound,
+                    angle_ema_9=46.0,
                 )
                 strategy._trading_engine_active()
                 self.assertIsNone(strategy._order_container["status"])
+
+    def test_ema_angle_thresholds_are_strict(self):
+        for open_price, close_price, angle_ema_9 in (
+            (98.0, 99.0, 45.0),
+            (112.0, 111.0, -45.0),
+        ):
+            with self.subTest(angle_ema_9=angle_ema_9):
+                strategy = self._strategy_with_candle(
+                    open_price=open_price,
+                    close_price=close_price,
+                    lowerbound=100.0,
+                    upperbound=110.0,
+                    angle_ema_9=angle_ema_9,
+                )
+
+                strategy._trading_engine_active()
+
+                self.assertIsNone(strategy._order_container["status"])
+
+    def test_indicator_calculation_populates_ema_9_and_angle(self):
+        strategy = MeanRevVwapStrategy.__new__(MeanRevVwapStrategy)
+        strategy.params = {"strategy-parameters": {}}
+        strategy._slope_window = 3
+        strategy.df_index_future = pd.DataFrame()
+        strategy.df_index = pd.DataFrame(
+            [
+                {
+                    "time": f"2026-08-07 09:{15 + index:02d}",
+                    "open": 100.0 + (2.0 * index),
+                    "high": 101.0 + (2.0 * index),
+                    "low": 99.0 + (2.0 * index),
+                    "close": 100.0 + (2.0 * index),
+                }
+                for index in range(15)
+            ]
+        )
+
+        strategy._apply_indicators()
+
+        latest = strategy.df_index.iloc[-1]
+        self.assertTrue(pd.notna(latest["ema_9"]))
+        self.assertGreater(latest["angle_ema_9"], 45.0)
 
     def test_five_minute_cooldown_boundary(self):
         strategy = MeanRevVwapStrategy.__new__(MeanRevVwapStrategy)
