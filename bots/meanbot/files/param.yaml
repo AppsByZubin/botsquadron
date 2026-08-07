@@ -1,0 +1,43 @@
+strategy-parameters:
+  trade-per-day: 5
+  max-open-trades: 1
+  skip-execution: false
+  skip-execution-dates: []
+
+  enable_trading_engine: true
+  max_daily_loss_amount: 5000.0
+  vwap_band_calc_mode: standard_deviation
+  vwap_band_multiplier: 1.0
+
+  option_atr_period: 6
+  use_option_atr_risk: true
+  require_option_atr: true
+  atr_target_mult: 5.0
+
+  take-profit: 0.30
+  stop-loss: 0.20
+  itm_strike_range: 200
+  trailing-stop: true
+  trailing-stop-distance: 10.0
+  trail-start-after-points: 0.1
+  sl-limit-gap: 0.5
+  tick-size: 0.05
+
+  trade_expiry: "2026-08-11"
+  pcr_expiry: "2026-08-11"
+
+  lot-size:
+    small: 1
+    medium: 1
+    large: 1
+
+  trade-window:
+    start: "11:00"
+    end: "15:15"
+
+historical-trends: &historical_trends
+  weekly: "sideways"
+  daily: "sideways"
+  trader-sentiment: "sideways"
+
+historical-trend: *historical_trends

@@ -1,4 +1,4 @@
-.PHONY: build build-ordersystem docker-build docker-build-ordersystem docker-build-solobot docker-build-trendobot docker-build-haemabot docker-build-firebot docker-build-titanbot docker-build-fibobot docker-build-all deploy-nats deploy-marketfeeder deploy-all clean test-nats install-python-deps install-trendobot-deps install-haemabot-deps install-firebot-deps install-titanbot-deps install-fibobot-deps
+.PHONY: build build-ordersystem docker-build docker-build-ordersystem docker-build-solobot docker-build-trendobot docker-build-haemabot docker-build-firebot docker-build-titanbot docker-build-fibobot docker-build-meanbot docker-build-all deploy-nats deploy-marketfeeder deploy-all clean test-nats install-python-deps install-trendobot-deps install-haemabot-deps install-firebot-deps install-titanbot-deps install-fibobot-deps install-meanbot-deps
 
 # Build the Go binary
 build:
@@ -40,8 +40,12 @@ docker-build-titanbot:
 docker-build-fibobot:
 	docker build -f bots/fibobot/Dockerfile -t fibobot:latest .
 
+# Build the meanbot Docker image from the repo root so its runtime paths stay stable
+docker-build-meanbot:
+	docker build -f bots/meanbot/Dockerfile -t meanbot:latest .
+
 # Build every runtime image
-docker-build-all: docker-build docker-build-ordersystem docker-build-solobot docker-build-trendobot docker-build-haemabot docker-build-firebot docker-build-titanbot docker-build-fibobot
+docker-build-all: docker-build docker-build-ordersystem docker-build-solobot docker-build-trendobot docker-build-haemabot docker-build-firebot docker-build-titanbot docker-build-fibobot docker-build-meanbot
 
 # Install Python dependencies
 install-python-deps:
@@ -66,6 +70,10 @@ install-titanbot-deps:
 # Install fibobot Python dependencies
 install-fibobot-deps:
 	cd bots/fibobot && pip3 install -r requirements.txt
+
+# Install meanbot Python dependencies
+install-meanbot-deps:
+	cd bots/meanbot && pip3 install -r requirements.txt
 
 # Test NATS communication
 test-nats: install-python-deps
@@ -96,3 +104,4 @@ clean:
 	docker rmi firebot:latest --force
 	docker rmi titanbot:latest --force
 	docker rmi fibobot:latest --force
+	docker rmi meanbot:latest --force

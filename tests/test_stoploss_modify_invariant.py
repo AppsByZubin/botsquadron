@@ -5,7 +5,7 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-BOT_NAMES = ("solobot", "trendobot", "fibobot", "firebot", "haemabot", "titanbot")
+BOT_NAMES = ("solobot", "trendobot", "fibobot", "firebot", "haemabot", "titanbot", "meanbot")
 BOT_LOCAL_MODULES = ("common", "logger", "oms", "utils")
 
 

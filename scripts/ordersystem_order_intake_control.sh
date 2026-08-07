@@ -18,6 +18,8 @@ Examples:
   $0 fibobot block
   $0 fibobot status
   $0 fibobot resume
+  $0 meanbot block
+  $0 meanbot resume
   $0 haemabot status
   $0 haemabot resume
 

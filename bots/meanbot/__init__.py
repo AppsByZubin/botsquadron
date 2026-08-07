@@ -1,0 +1,1 @@
+"""Meanbot trading bot package."""
