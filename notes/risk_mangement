@@ -38,3 +38,45 @@ b) REST
 	ii) Strategy drawdown reaches 7%.
 	iii) Rolling three eligible sessions lose 7%.
 	iv) A single session loses 6% or more.
+
+
+4. hm_ema_adx_v2
+a) trade at 50% quantity
+    i) Two consecutive losing active sessions.
+    ii) Last 10 trades have:
+        PF below 0.80, and Net loss of at least 2% of strategy capital.
+    iii) Rolling three active sessions lose at least 5%.
+
+b) REST
+    i) Three consecutive losing active sessions.
+    ii) Drawdown from the bot’s highest capital reaches 8%.
+    iii) Rolling five active sessions lose 10%.
+    iv) Last 10 trades have: PF below 0.60, and Net loss of at least 3%.
+    v) One active session loses 7% or more.
+
+5.fib_ema_atr_vol
+a) trade at 50% quantity
+    i) Two consecutive losing active sessions and drawdown reaches 4%.
+    ii) One active session loses at least 6%.
+    iii) Rolling three active sessions lose at least 7%.
+    iv) Last 10 trades have PF below 0.80 and lose at least 2%.
+
+b) REST
+    i)Three consecutive losing active sessions.
+    ii)Strategy drawdown reaches 8%.
+    iii)Rolling three active sessions lose 10%.
+    iv)One active session loses 10% or more.
+    v)Last 10 trades have PF below 0.60 and lose at least 3%.
+
+6. vwap_ema_st
+a) trade at 50% quantity
+    i)Three consecutive losing active sessions.
+    ii)Rolling five active sessions lose 5%.
+    iii)One session loses 5%.
+    iv)Last 10 trades have PF below 0.80 and lose at least 2%.
+
+b)REST
+    i)Four consecutive losing active sessions while drawdown is at least 4%.
+    ii)Strategy drawdown reaches 7%.
+    iii)Rolling five active sessions lose 8%.
+    iv)Last 10 trades have PF below 0.60 and lose at least 3%.
