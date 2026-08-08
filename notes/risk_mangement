@@ -1,0 +1,40 @@
+1. bb_vwap_ema_v2 (firebot)
+
+a) trade at 50% quantity
+	i) 3 consecutive losing session and drawdown of atleast 4%
+	ii) Rolling five active-session loss reaches 5% of strategy equity.
+	iii)One session loses 5% or more.
+b)rest
+	i) Strategy drawdown reaches 8%.
+	ii) Rolling five active-session loss reaches 8%.
+	iii) Four consecutive red active sessions while drawdown is at least 5%.
+	iv) Rolling last 10 trades has:
+		Profit factor below 0.60, and
+		Net loss of at least 3% of equity.
+
+2. timeseries_trend_v2(titanbot)
+a) trade at 50% quantity
+	i) Two consecutive losing active sessions and drawdown reaches 4%.
+	ii) Rolling last 10 trades has:
+		Profit factor below 0.80, and
+		Net loss of at least 2% of strategy equity.
+	iii) One session loses 8% or more.
+b)REST
+	i)Strategy drawdown reaches 8%.
+	ii)Rolling five active-session loss reaches 7%.
+	iii)Three consecutive red sessions while drawdown is at least 5%.
+	iv) Rolling last 10 trades has
+		Profit factor below 0.60, and
+		Net loss of at least 3%.
+
+3. meanrev_vwap(meanbot)
+a) trade at 50% quantity
+	i) Two consecutive losing mean-reversion sessions and drawdown reaches 4%.
+	ii) Rolling three eligible sessions lose at least 5%.
+	iii) Rolling last six trades has PF below 0.80 and loses at least 3%.
+
+b) REST
+	i) Three consecutive losing eligible sessions.
+	ii) Strategy drawdown reaches 7%.
+	iii) Rolling three eligible sessions lose 7%.
+	iv) A single session loses 6% or more.
