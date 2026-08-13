@@ -22,6 +22,7 @@ class TimeseriesTrendV2Strategy(TimeseriesTrendStrategy):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         sp = self._strategy_params()
+        self._max_daily_loss_pct_of_initial_cash = 0.08
         self.call_ema_21_angle_1m = self._coerce_float(
             sp.get("call_ema_21_angle_1m_threshold"),
             30.0,
@@ -111,10 +112,6 @@ class TimeseriesTrendV2Strategy(TimeseriesTrendStrategy):
                 "close": pd.Series(dtype="float64"),
                 "volume": pd.Series(dtype="float64"),
                 "candle_length": pd.Series(dtype="float64"),
-                "vwap": pd.Series(dtype="float64"),
-                "vwap_stdev": pd.Series(dtype="float64"),
-                "vwap_upper_band_1": pd.Series(dtype="float64"),
-                "vwap_lower_band_1": pd.Series(dtype="float64"),
                 "ema_1m": pd.Series(dtype="float64"),
                 "ema_21_1m": pd.Series(dtype="float64"),
                 "sma_50_1m": pd.Series(dtype="float64"),
@@ -140,7 +137,6 @@ class TimeseriesTrendV2Strategy(TimeseriesTrendStrategy):
         high = pd.to_numeric(frame["high"], errors="coerce").astype("float64")
         low = pd.to_numeric(frame["low"], errors="coerce").astype("float64")
 
-        self._apply_vwap_band_1(frame)
         ema_1m = self._ema(close)
         ema_21_1m = close.ewm(span=21, adjust=False, min_periods=21).mean()
         sma_50_1m = close.rolling(window=50, min_periods=50).mean()
@@ -933,22 +929,9 @@ class TimeseriesTrendV2Strategy(TimeseriesTrendStrategy):
             sma_50_1m = safe_float(latest.get("sma_50_1m"))
             angle_ema_21_1m = safe_float(latest.get("angle_ema_21_1m"))
             angle_sma_50_1m = safe_float(latest.get("angle_sma_50_1m"))
-            vwap_upper_band_1 = safe_float(latest.get("vwap_upper_band_1"))
-            vwap_lower_band_1 = safe_float(latest.get("vwap_lower_band_1"))
-            if any(
-                value is None
-                for value in (
-                    close_price,
-                    angle_10m,
-                    angle_5m,
-                    angle_1m,
-                    vwap_upper_band_1,
-                    vwap_lower_band_1,
-                )
-            ):
+            if any(value is None for value in (close_price, angle_10m, angle_5m, angle_1m)):
                 self._last_engine_revision = current_revision
                 return
-            vwap_band_1_width = vwap_upper_band_1 - vwap_lower_band_1
 
             call_setup = (
                 angle_10m > self.call_angle_10m
@@ -956,7 +939,6 @@ class TimeseriesTrendV2Strategy(TimeseriesTrendStrategy):
                 and angle_1m > self.call_angle_1m
                 and angle_ema_21_1m is not None
                 and angle_ema_21_1m > self.call_ema_21_angle_1m
-                and vwap_band_1_width > self.VWAP_BAND_1_ENTRY_MIN_WIDTH
             )
             put_setup = (
                 angle_10m < self.put_angle_10m
@@ -964,7 +946,6 @@ class TimeseriesTrendV2Strategy(TimeseriesTrendStrategy):
                 and angle_1m < self.put_angle_1m
                 and angle_ema_21_1m is not None
                 and angle_ema_21_1m < self.put_ema_21_angle_1m
-                and vwap_band_1_width > self.VWAP_BAND_1_ENTRY_MIN_WIDTH
             )
 
             logger.debug(
@@ -974,9 +955,7 @@ class TimeseriesTrendV2Strategy(TimeseriesTrendStrategy):
                 f"ema_1m={ema_1m}, ema_21_1m={ema_21_1m}, sma_50_1m={sma_50_1m}, "
                 f"angle_ema_21_1m={angle_ema_21_1m}, threshold_call_ema_21_1m={self.call_ema_21_angle_1m}, "
                 f"threshold_put_ema_21_1m={self.put_ema_21_angle_1m}, angle_sma_50_1m={angle_sma_50_1m}, "
-                f"angle_1m={angle_1m}, threshold_call_1m={self.call_angle_1m}, threshold_put_1m={self.put_angle_1m}, "
-                f"vwap_band_1={vwap_lower_band_1}/{vwap_upper_band_1}, vwap_band_1_width={vwap_band_1_width}, "
-                f"vwap_band_1_min_width={self.VWAP_BAND_1_ENTRY_MIN_WIDTH}"
+                f"angle_1m={angle_1m}, threshold_call_1m={self.call_angle_1m}, threshold_put_1m={self.put_angle_1m}"
             )
             logger.debug(f"candle_time={latest_time}, condition check call_setup:{call_setup}, put_setup:{put_setup}")
             self._last_engine_revision = current_revision

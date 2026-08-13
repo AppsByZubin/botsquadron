@@ -104,6 +104,7 @@ class MeanRevVwapStrategyTests(unittest.TestCase):
         angle_ema_9,
     ):
         strategy = MeanRevVwapStrategy.__new__(MeanRevVwapStrategy)
+        strategy.params = {"strategy-parameters": {"entry_band_tick_size": 0.05}}
         strategy.enable_trading_engine = True
         strategy.curr_index_minute = "2026-03-02 11:01"
         strategy.df_index = pd.DataFrame([{
@@ -158,6 +159,53 @@ class MeanRevVwapStrategyTests(unittest.TestCase):
 
         self.assertEqual(strategy._order_container["side"], constants.PUT)
         self.assertEqual(strategy._order_container["status"], constants.WAITING)
+
+    def test_call_setup_uses_ceiled_lower_band_tick_boundary(self):
+        strategy = self._strategy_with_candle(
+            open_price=100.05,
+            close_price=100.05,
+            lowerbound=100.011,
+            upperbound=110.011,
+            angle_ema_9=46.0,
+        )
+
+        strategy._trading_engine_active()
+
+        self.assertEqual(strategy._order_container["side"], constants.CALL)
+        self.assertEqual(strategy._order_container["status"], constants.WAITING)
+
+    def test_put_setup_uses_floored_upper_band_tick_boundary(self):
+        strategy = self._strategy_with_candle(
+            open_price=109.95,
+            close_price=109.95,
+            lowerbound=99.989,
+            upperbound=109.989,
+            angle_ema_9=-46.0,
+        )
+
+        strategy._trading_engine_active()
+
+        self.assertEqual(strategy._order_container["side"], constants.PUT)
+        self.assertEqual(strategy._order_container["status"], constants.WAITING)
+
+    def test_directional_rounding_does_not_allow_a_full_tick_gap(self):
+        for open_price, close_price, lowerbound, upperbound, angle_ema_9 in (
+            (100.10, 100.10, 100.000001, 110.000001, 46.0),
+            (109.90, 109.90, 99.999999, 109.999999, -46.0),
+        ):
+            with self.subTest(angle_ema_9=angle_ema_9):
+                strategy = self._strategy_with_candle(
+                    open_price=open_price,
+                    close_price=close_price,
+                    lowerbound=lowerbound,
+                    upperbound=upperbound,
+                    angle_ema_9=angle_ema_9,
+                )
+
+                strategy._trading_engine_active()
+
+                self.assertIsNone(strategy._order_container["side"])
+                self.assertIsNone(strategy._order_container["status"])
 
     def test_band_cross_or_width_at_limit_does_not_enter(self):
         for open_price, close_price, lowerbound, upperbound in (

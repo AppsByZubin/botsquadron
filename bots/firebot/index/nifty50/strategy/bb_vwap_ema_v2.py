@@ -1,4 +1,5 @@
 import sys
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 from datetime import datetime, timedelta
 from typing import Any, Dict, Optional
 
@@ -26,6 +27,11 @@ class BbVwapEmaV2Strategy(BbVwapEmaStrategy):
         self.last_signal = getattr(self, "last_signal", constants.WAITING)
         self.signals = getattr(self, "signals", [])
         sp = self._strategy_params()
+        self._max_daily_loss_pct_of_initial_cash = self._coerce_float(
+            sp.get("max_daily_loss_pct_of_initial_cash"),
+            0.08,
+            minimum=0.0,
+        )
         self.call_ema_21_angle_1m = self._coerce_float(
             sp.get("call_ema_21_angle_1m_threshold"),
             30.0,
@@ -44,6 +50,43 @@ class BbVwapEmaV2Strategy(BbVwapEmaStrategy):
             if isinstance(sp, dict):
                 return sp
         return {}
+
+    def _entry_band_boundaries(self, bb_upper: float, bb_lower: float) -> tuple[float, float, float]:
+        sp = self._strategy_params()
+        params = self.params if isinstance(self.params, dict) else {}
+        tick_size = self._coerce_float(
+            sp.get(
+                "bb_entry_tick_size",
+                sp.get(
+                    "bb-entry-tick-size",
+                    params.get("bb_entry_tick_size", params.get("bb-entry-tick-size")),
+                ),
+            ),
+            0.05,
+            minimum=0.01,
+        )
+        return (
+            self._round_entry_band_to_tick(bb_upper, tick_size, "FLOOR"),
+            self._round_entry_band_to_tick(bb_lower, tick_size, "CEIL"),
+            tick_size,
+        )
+
+    @staticmethod
+    def _round_entry_band_to_tick(value: float, tick_size: float, mode: str) -> float:
+        price = Decimal(str(value))
+        tick = Decimal(str(tick_size))
+        if tick <= 0:
+            return float(price)
+
+        if mode == "FLOOR":
+            rounding = ROUND_FLOOR
+        elif mode == "CEIL":
+            rounding = ROUND_CEILING
+        else:
+            raise ValueError(f"Unsupported entry-band rounding mode: {mode}")
+
+        ticks = (price / tick).to_integral_value(rounding=rounding)
+        return float(ticks * tick)
 
     def _ensure_v2_columns(self) -> None:
         if self.df_index is None:
@@ -876,10 +919,18 @@ class BbVwapEmaV2Strategy(BbVwapEmaStrategy):
                 self._last_engine_revision = current_revision
                 return
 
+            call_bb_upper, put_bb_lower, entry_tick_size = self._entry_band_boundaries(
+                bb_upper,
+                bb_lower,
+            )
+
             call_setup = (
                 (
-                    (open_price > bb_upper and close_price > bb_upper)
-                    or (close_price > bb_upper and candle_length > self.bb_candle_length_threshold)
+                    (open_price >= call_bb_upper and close_price >= call_bb_upper)
+                    or (
+                        close_price >= call_bb_upper
+                        and candle_length >= self.bb_candle_length_threshold
+                    )
                 )
                 and angle_ema_9 > self.call_ema_angle_threshold
                 and angle_ema_21_1m is not None
@@ -888,8 +939,11 @@ class BbVwapEmaV2Strategy(BbVwapEmaStrategy):
 
             put_setup = (
                 (
-                    (open_price < bb_lower and close_price < bb_lower)
-                    or (close_price < bb_lower and candle_length > self.bb_candle_length_threshold)
+                    (open_price <= put_bb_lower and close_price <= put_bb_lower)
+                    or (
+                        close_price <= put_bb_lower
+                        and candle_length >= self.bb_candle_length_threshold
+                    )
                 )
                 and angle_ema_9 < self.put_ema_angle_threshold
                 and angle_ema_21_1m is not None
@@ -898,7 +952,8 @@ class BbVwapEmaV2Strategy(BbVwapEmaStrategy):
 
             logger.debug(
                 f"candle_time={latest_time}, Engine check open={open_price}, close={close_price}, bb_upper={bb_upper}, "
-                f"bb_lower={bb_lower}, candle_length={candle_length}, angle_ema={angle_ema_9}, "
+                f"call_bb_upper={call_bb_upper}, bb_lower={bb_lower}, put_bb_lower={put_bb_lower}, "
+                f"entry_tick_size={entry_tick_size}, candle_length={candle_length}, angle_ema={angle_ema_9}, "
                 f"ema_21_1m={ema_21_1m}, sma_50_1m={sma_50_1m}, "
                 f"angle_ema_21_1m={angle_ema_21_1m}, threshold_call_ema_21_1m={self.call_ema_21_angle_1m}, "
                 f"threshold_put_ema_21_1m={self.put_ema_21_angle_1m}, angle_sma_50_1m={angle_sma_50_1m}"

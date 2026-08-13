@@ -3,6 +3,7 @@ import json
 import yaml
 import pandas as pd
 import math
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 from zoneinfo import ZoneInfo
 import common.constants as constants
 import logger
@@ -1506,24 +1507,36 @@ class MeanRevVwapStrategy:
             ema_9 = float(required_values["ema_9"])
             angle_ema_9 = float(required_values["angle_ema_9"])
             band_width = upperbound - lowerbound
+            entry_band_tick_size = self._entry_band_tick_size()
+            upperbound_floor = self._round_entry_band_to_tick(
+                upperbound,
+                entry_band_tick_size,
+                "FLOOR",
+            )
+            lowerbound_ceiling = self._round_entry_band_to_tick(
+                lowerbound,
+                entry_band_tick_size,
+                "CEIL",
+            )
 
             logger.debug(
                 f"candle_time={candle_time}, Setup inputs open={open_price}, close={close_price}, "
                 f"vwap_session_upperband={upperbound}, vwap_session_lowerband={lowerbound}, "
+                f"upperbound_floor={upperbound_floor}, lowerbound_ceiling={lowerbound_ceiling}, "
                 f"band_width={band_width}, max_band_width=60, ema_9={ema_9}, "
                 f"angle_ema_9={angle_ema_9}, call_angle_threshold={self.call_ema_9_angle_threshold}, "
                 f"put_angle_threshold={self.put_ema_9_angle_threshold}"
             )
 
             call_setup = (
-                open_price < lowerbound
-                and close_price < lowerbound
+                open_price <= lowerbound_ceiling
+                and close_price <= lowerbound_ceiling
                 and band_width < 60
                 and angle_ema_9 > self.call_ema_9_angle_threshold
             )
             put_setup = (
-                open_price > upperbound
-                and close_price > upperbound
+                open_price >= upperbound_floor
+                and close_price >= upperbound_floor
                 and band_width < 60
                 and angle_ema_9 < self.put_ema_9_angle_threshold
             )
@@ -1597,3 +1610,39 @@ class MeanRevVwapStrategy:
         if mode == "CEIL":
             return math.ceil(n) * tick
         return round(n) * tick
+
+    def _entry_band_tick_size(self) -> float:
+        params = getattr(self, "params", {})
+        params = params if isinstance(params, dict) else {}
+        sp = params.get("strategy-parameters") or params.get("strategy_parameters") or {}
+        sp = sp if isinstance(sp, dict) else {}
+        configured_tick = sp.get(
+            "entry_band_tick_size",
+            sp.get(
+                "entry-band-tick-size",
+                params.get("entry_band_tick_size", params.get("entry-band-tick-size")),
+            ),
+        )
+        tick_size = safe_float(configured_tick)
+        return tick_size if tick_size is not None and tick_size > 0 else 0.05
+
+    @staticmethod
+    def _round_entry_band_to_tick(value: Any, tick_size: float, mode: str) -> float:
+        numeric_value = safe_float(value)
+        if numeric_value is None:
+            return np.nan
+
+        price = Decimal(str(numeric_value))
+        tick = Decimal(str(tick_size))
+        if tick <= 0:
+            return float(price)
+
+        if mode == "FLOOR":
+            rounding = ROUND_FLOOR
+        elif mode == "CEIL":
+            rounding = ROUND_CEILING
+        else:
+            raise ValueError(f"Unsupported entry-band rounding mode: {mode}")
+
+        ticks = (price / tick).to_integral_value(rounding=rounding)
+        return float(ticks * tick)
