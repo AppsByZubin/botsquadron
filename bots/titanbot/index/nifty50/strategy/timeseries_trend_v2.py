@@ -23,14 +23,8 @@ class TimeseriesTrendV2Strategy(TimeseriesTrendStrategy):
         super().__init__(*args, **kwargs)
         sp = self._strategy_params()
         self._max_daily_loss_pct_of_initial_cash = 0.08
-        self.call_ema_21_angle_1m = self._coerce_float(
-            sp.get("call_ema_21_angle_1m_threshold"),
-            30.0,
-        )
-        self.put_ema_21_angle_1m = self._coerce_float(
-            sp.get("put_ema_21_angle_1m_threshold"),
-            -30.0,
-        )
+        self.call_ema_21_angle_1m = 40
+        self.put_ema_21_angle_1m = -40
         self._ensure_v2_columns()
         self._ensure_v2_order_container()
 
