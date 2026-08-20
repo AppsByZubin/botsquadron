@@ -9,12 +9,44 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/AppsByZubin/botsquadron/services/ordersystem/internal/config"
 	"github.com/AppsByZubin/botsquadron/services/ordersystem/internal/model"
 	"github.com/AppsByZubin/botsquadron/services/ordersystem/internal/store"
 	"github.com/AppsByZubin/botsquadron/services/ordersystem/internal/upstox"
 )
+
+func TestThresholdKillSwitchExpiresAcrossTradingDays(t *testing.T) {
+	t.Parallel()
+
+	reason := "threshold_day_loss reached for 03-08-2026: day_loss=15047.29 threshold=10000.00 realized_pnl=-15047.29"
+	if !thresholdKillSwitchExpired(reason, "19-08-2026") {
+		t.Fatal("thresholdKillSwitchExpired returned false for a prior trading day")
+	}
+	if thresholdKillSwitchExpired(reason, "03-08-2026") {
+		t.Fatal("thresholdKillSwitchExpired returned true for the same trading day")
+	}
+	if thresholdKillSwitchExpired("manual kill", "19-08-2026") {
+		t.Fatal("manual kill was incorrectly treated as an expired threshold kill")
+	}
+}
+
+func TestNormalizeServiceDate(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, time.August, 19, 14, 0, 0, 0, time.FixedZone("IST", 5*60*60+30*60))
+	for input, want := range map[string]string{
+		"2026-08-19": "19-08-2026",
+		"19/08/2026": "19-08-2026",
+		"19-08-2026": "19-08-2026",
+		"":           "19-08-2026",
+	} {
+		if got := normalizeServiceDate(input, now); got != want {
+			t.Fatalf("normalizeServiceDate(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
 
 func TestModifyTradeRequiresTradeID(t *testing.T) {
 	t.Parallel()

@@ -103,7 +103,7 @@ func (s *Service) CreateTrade(ctx context.Context, req model.CreateTradeRequest)
 	if s.store == nil {
 		return model.CreateTradeResponse{}, fmt.Errorf("store is not configured")
 	}
-	killState, err := s.effectiveBotKillSwitch(ctx, req.BotName)
+	killState, err := s.effectiveBotKillSwitch(ctx, req.BotName, req.CurrDate)
 	if err != nil {
 		return model.CreateTradeResponse{}, err
 	}
@@ -427,7 +427,7 @@ func (s *Service) GetBotKillSwitch(ctx context.Context, botName string) (model.B
 		return model.BotKillSwitchResponse{}, fmt.Errorf("store is not configured")
 	}
 
-	state, err := s.effectiveBotKillSwitch(ctx, botName)
+	state, err := s.effectiveBotKillSwitch(ctx, botName, "")
 	if err != nil {
 		return model.BotKillSwitchResponse{}, err
 	}
@@ -1177,8 +1177,13 @@ func (s *Service) recordStopLossFill(ctx context.Context, trade model.TradeForSL
 	log.Printf("recorded SL fill in DB trade_id=%s order_id=%s exit_price=%.2f qty=%d brokerage=%s", trade.ID, orderID, exitPrice, exitQty, floatPtrForLog(brokerage))
 }
 
-func (s *Service) effectiveBotKillSwitch(ctx context.Context, botName string) (model.BotKillSwitch, error) {
+func (s *Service) effectiveBotKillSwitch(ctx context.Context, botName string, currDate string) (model.BotKillSwitch, error) {
+	currentDate := normalizeServiceDate(currDate, time.Now())
 	globalState, err := s.store.GetBotKillSwitch(ctx, model.AllStrategiesKillSwitchBotName)
+	if err != nil {
+		return model.BotKillSwitch{}, err
+	}
+	globalState, err = s.expireThresholdKillSwitch(ctx, globalState, currentDate)
 	if err != nil {
 		return model.BotKillSwitch{}, err
 	}
@@ -1186,7 +1191,49 @@ func (s *Service) effectiveBotKillSwitch(ctx context.Context, botName string) (m
 		globalState.BotName = strings.TrimSpace(botName)
 		return globalState, nil
 	}
-	return s.store.GetBotKillSwitch(ctx, botName)
+
+	botState, err := s.store.GetBotKillSwitch(ctx, botName)
+	if err != nil {
+		return model.BotKillSwitch{}, err
+	}
+	return s.expireThresholdKillSwitch(ctx, botState, currentDate)
+}
+
+const thresholdDayLossReasonPrefix = "threshold_day_loss reached for "
+
+func (s *Service) expireThresholdKillSwitch(ctx context.Context, state model.BotKillSwitch, currentDate string) (model.BotKillSwitch, error) {
+	if !state.KillEnabled || !thresholdKillSwitchExpired(state.Reason, currentDate) {
+		return state, nil
+	}
+
+	cleared, err := s.store.SetBotKillSwitch(ctx, state.BotName, false, "threshold_day_loss expired for "+currentDate)
+	if err != nil {
+		return model.BotKillSwitch{}, err
+	}
+	return cleared, nil
+}
+
+func thresholdKillSwitchExpired(reason string, currentDate string) bool {
+	if !strings.HasPrefix(strings.TrimSpace(reason), thresholdDayLossReasonPrefix) {
+		return false
+	}
+
+	dateText := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(reason), thresholdDayLossReasonPrefix))
+	dateText = strings.SplitN(dateText, ":", 2)[0]
+	return dateText != "" && dateText != currentDate
+}
+
+func normalizeServiceDate(currDate string, now time.Time) string {
+	trimmed := strings.TrimSpace(currDate)
+	for _, layout := range []string{"02-01-2006", "2006-01-02", "02/01/2006"} {
+		if parsed, err := time.ParseInLocation(layout, trimmed, now.Location()); err == nil {
+			return parsed.Format("02-01-2006")
+		}
+	}
+	if trimmed != "" {
+		return trimmed
+	}
+	return now.Format("02-01-2006")
 }
 
 func (s *Service) enforceThresholdDayLossAfterTradeClose(ctx context.Context, tradeID string) {
