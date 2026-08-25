@@ -1818,6 +1818,33 @@ class BbVwapEmaStrategy:
             constants.KILL_SWITCH.upper(),
         }
 
+    def _confirmed_square_off_trade_info(
+        self,
+        trade_id: str,
+        square_off_result: Optional[Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        if self._is_closed_trade_info(square_off_result):
+            return square_off_result
+
+        try:
+            trade_info = self.order_maneger.get_trade_by_id(trade_id)
+        except Exception as exc:
+            logger.warning(
+                f"Could not confirm square-off status for trade_id={trade_id}; "
+                f"keeping the bot trade ID active: {exc}"
+            )
+            return None
+
+        if self._is_closed_trade_info(trade_info):
+            return trade_info
+
+        logger.warning(
+            f"Square-off was not confirmed closed for trade_id={trade_id}; "
+            f"ordersystem status={str((trade_info or {}).get('status') or '').strip() or '<empty>'}. "
+            "Keeping the bot trade ID active for retry."
+        )
+        return None
+
     def _get_itm_contracts(self, side: str, index_price: float, itm_range: float) -> Dict[str, Dict[str, Any]]:
         output: Dict[str, Dict[str, Any]] = {}
         spot_price = safe_float(index_price)
@@ -2180,12 +2207,14 @@ class BbVwapEmaStrategy:
                             break
 
                     square_ts = self._resolve_reference_ts()
-                    self.order_maneger.square_off_trade(
+                    square_off_result = self.order_maneger.square_off_trade(
                         trade_id=trade_id,
                         exit_price=float(latest_ltp),
                         ts=square_ts,
                         reason=constants.EOD_SQUARE_OFF,
                     )
-                    trade_info = self.order_maneger.get_trade_by_id(trade_id)
+                    trade_info = self._confirmed_square_off_trade_info(trade_id, square_off_result)
+                    if trade_info is None:
+                        return
                     self._update_today_realized_pnl_on_trade_close(trade_info, ts=square_ts)
                     self._reset_order_container()

@@ -22,7 +22,7 @@ type Service struct {
 	upstox        *upstox.Client
 	slRefreshMu   sync.Mutex
 	slRefreshLast map[string]time.Time
-	dayLossMu     sync.Mutex
+	lossMu        sync.Mutex
 }
 
 func New(cfg config.Config, st *store.Store, upClient *upstox.Client) *Service {
@@ -103,7 +103,7 @@ func (s *Service) CreateTrade(ctx context.Context, req model.CreateTradeRequest)
 	if s.store == nil {
 		return model.CreateTradeResponse{}, fmt.Errorf("store is not configured")
 	}
-	killState, err := s.effectiveBotKillSwitch(ctx, req.BotName, req.CurrDate)
+	killState, err := s.effectiveBotKillSwitch(ctx, req.BotName)
 	if err != nil {
 		return model.CreateTradeResponse{}, err
 	}
@@ -427,7 +427,7 @@ func (s *Service) GetBotKillSwitch(ctx context.Context, botName string) (model.B
 		return model.BotKillSwitchResponse{}, fmt.Errorf("store is not configured")
 	}
 
-	state, err := s.effectiveBotKillSwitch(ctx, botName, "")
+	state, err := s.effectiveBotKillSwitch(ctx, botName)
 	if err != nil {
 		return model.BotKillSwitchResponse{}, err
 	}
@@ -677,7 +677,8 @@ func (s *Service) SquareOffTrade(ctx context.Context, tradeID string, req model.
 	if s.upstox == nil || !s.upstox.Enabled() {
 		return model.SquareOffTradeResponse{}, fmt.Errorf("%s mode is enabled but upstox client is not configured", mode)
 	}
-	exitOrderIDs, err = s.squareOffBrokerOrders(ctx, trade, validity, req.DisclosedQty)
+	var brokerAlreadyFlat bool
+	exitOrderIDs, brokerAlreadyFlat, err = s.squareOffBrokerOrders(ctx, trade, validity, req.DisclosedQty)
 	if err != nil {
 		return model.SquareOffTradeResponse{}, err
 	}
@@ -695,13 +696,16 @@ func (s *Service) SquareOffTrade(ctx context.Context, tradeID string, req model.
 				Message:   "trade already closed after stoploss broker sync",
 			}, nil
 		}
-		return model.SquareOffTradeResponse{}, fmt.Errorf("square-off did not produce exit order ids for trade_id=%s; trade status is %s", tradeID, closedTrade.Status)
+		if !brokerAlreadyFlat {
+			return model.SquareOffTradeResponse{}, fmt.Errorf("square-off did not produce exit order ids for trade_id=%s; trade status is %s", tradeID, closedTrade.Status)
+		}
+		log.Printf("square-off broker position already flat; reconciling open OMS trade trade_id=%s status=%s", tradeID, closedTrade.Status)
 	}
 
 	if err := s.store.SquareOffTrade(ctx, tradeID, exitOrderIDs, req.ExitPrice, trade.Qty, req.ExitTime, exitStatus); err != nil {
 		return model.SquareOffTradeResponse{}, err
 	}
-	s.enforceThresholdDayLossAfterTradeClose(ctx, tradeID)
+	s.enforceLossThresholdsAfterTradeClose(ctx, tradeID)
 
 	closedTrade, err := s.store.GetTradeByID(ctx, tradeID)
 	if err != nil {
@@ -718,16 +722,16 @@ func (s *Service) SquareOffTrade(ctx context.Context, tradeID string, req model.
 	}, nil
 }
 
-func (s *Service) squareOffBrokerOrders(ctx context.Context, trade model.Trade, validity string, disclosedQty int) ([]string, error) {
+func (s *Service) squareOffBrokerOrders(ctx context.Context, trade model.Trade, validity string, disclosedQty int) ([]string, bool, error) {
 	_ = validity
 	_ = disclosedQty
 
 	cancelledSLOrderIDs, stopLossFilled, err := s.cancelTradeStopLossOrders(ctx, trade)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if stopLossFilled {
-		return nil, nil
+		return nil, false, nil
 	}
 	if len(cancelledSLOrderIDs) > 0 {
 		log.Printf("square-off cancelled stoploss orders trade_id=%s order_ids=%s", trade.ID, strings.Join(cancelledSLOrderIDs, ","))
@@ -735,17 +739,53 @@ func (s *Service) squareOffBrokerOrders(ctx context.Context, trade model.Trade, 
 
 	tag := tradePositionExitTag(trade)
 	if tag == "" {
-		return nil, fmt.Errorf("trade tag_entry is required for Upstox exit-position square-off trade_id=%s", trade.ID)
+		return nil, false, fmt.Errorf("trade tag_entry is required for Upstox exit-position square-off trade_id=%s", trade.ID)
 	}
 
 	resp, err := s.upstox.ExitPositions(ctx, upstox.ExitPositionsRequest{Tag: tag})
 	if err != nil {
-		return nil, fmt.Errorf("exit positions by tag=%s: %w", tag, err)
+		if isNoOpenPositionError(err) {
+			positionQty, positionErr := s.openBrokerPositionQuantity(ctx, trade.InstrumentToken)
+			if positionErr != nil {
+				return nil, false, fmt.Errorf("verify broker position after no-position response trade_id=%s: %w", trade.ID, positionErr)
+			}
+			if positionQty != 0 {
+				return nil, false, fmt.Errorf(
+					"exit positions by tag=%s found no tagged position but instrument_token=%s still has broker quantity=%d",
+					tag,
+					trade.InstrumentToken,
+					positionQty,
+				)
+			}
+			log.Printf("square-off found no open broker position trade_id=%s tag=%s: %v", trade.ID, tag, err)
+			return nil, true, nil
+		}
+		return nil, false, fmt.Errorf("exit positions by tag=%s: %w", tag, err)
 	}
 	if len(resp.OrderIDs) == 0 {
-		return nil, fmt.Errorf("exit positions by tag=%s returned no order ids", tag)
+		return nil, false, fmt.Errorf("exit positions by tag=%s returned no order ids", tag)
 	}
-	return append([]string(nil), resp.OrderIDs...), nil
+	return append([]string(nil), resp.OrderIDs...), false, nil
+}
+
+func (s *Service) openBrokerPositionQuantity(ctx context.Context, instrumentToken string) (int, error) {
+	instrumentToken = strings.TrimSpace(instrumentToken)
+	if instrumentToken == "" {
+		return 0, fmt.Errorf("instrument token is required")
+	}
+
+	positions, err := s.upstox.GetPositions(ctx)
+	if err != nil {
+		return 0, err
+	}
+
+	quantity := 0
+	for _, position := range positions {
+		if strings.TrimSpace(position.InstrumentToken) == instrumentToken {
+			quantity += position.Quantity
+		}
+	}
+	return quantity, nil
 }
 
 func (s *Service) cancelTradeStopLossOrders(ctx context.Context, trade model.Trade) ([]string, bool, error) {
@@ -769,6 +809,10 @@ func (s *Service) cancelTradeStopLossOrders(ctx context.Context, trade model.Tra
 				return cancelled, false, fmt.Errorf("square-off cancel rate limited for trade_id=%s order_id=%s: %w", trade.ID, orderID, err)
 			}
 			if isTerminalOrderCancelError(err) {
+				if isOrderNotFoundError(err) {
+					log.Printf("square-off ignored missing stale stoploss order trade_id=%s order_id=%s: %v", trade.ID, orderID, err)
+					continue
+				}
 				message, outcome, _ := s.syncStopLossTerminalStateDetailed(ctx, trade, orderID, "square-off cancel rejected")
 				if outcome == stopLossFilled {
 					log.Printf("square-off synced already filled stoploss order trade_id=%s order_id=%s: %s", trade.ID, orderID, message)
@@ -1173,12 +1217,12 @@ func (s *Service) recordStopLossFill(ctx context.Context, trade model.TradeForSL
 		log.Printf("record SL fill failed for trade_id=%s order_id=%s: %v", trade.ID, orderID, err)
 		return
 	}
-	s.enforceThresholdDayLossAfterTradeClose(ctx, trade.ID)
+	s.enforceLossThresholdsAfterTradeClose(ctx, trade.ID)
 	log.Printf("recorded SL fill in DB trade_id=%s order_id=%s exit_price=%.2f qty=%d brokerage=%s", trade.ID, orderID, exitPrice, exitQty, floatPtrForLog(brokerage))
 }
 
-func (s *Service) effectiveBotKillSwitch(ctx context.Context, botName string, currDate string) (model.BotKillSwitch, error) {
-	currentDate := normalizeServiceDate(currDate, time.Now())
+func (s *Service) effectiveBotKillSwitch(ctx context.Context, botName string) (model.BotKillSwitch, error) {
+	currentDate := currentServiceDate(s.cfg.AppTimezone, time.Now())
 	globalState, err := s.store.GetBotKillSwitch(ctx, model.AllStrategiesKillSwitchBotName)
 	if err != nil {
 		return model.BotKillSwitch{}, err
@@ -1200,13 +1244,14 @@ func (s *Service) effectiveBotKillSwitch(ctx context.Context, botName string, cu
 }
 
 const thresholdDayLossReasonPrefix = "threshold_day_loss reached for "
+const thresholdMonthLossReasonPrefix = "threshold_month_loss reached for "
 
 func (s *Service) expireThresholdKillSwitch(ctx context.Context, state model.BotKillSwitch, currentDate string) (model.BotKillSwitch, error) {
 	if !state.KillEnabled || !thresholdKillSwitchExpired(state.Reason, currentDate) {
 		return state, nil
 	}
 
-	cleared, err := s.store.SetBotKillSwitch(ctx, state.BotName, false, "threshold_day_loss expired for "+currentDate)
+	cleared, err := s.store.SetBotKillSwitch(ctx, state.BotName, false, "loss threshold expired for "+currentDate)
 	if err != nil {
 		return model.BotKillSwitch{}, err
 	}
@@ -1214,70 +1259,98 @@ func (s *Service) expireThresholdKillSwitch(ctx context.Context, state model.Bot
 }
 
 func thresholdKillSwitchExpired(reason string, currentDate string) bool {
-	if !strings.HasPrefix(strings.TrimSpace(reason), thresholdDayLossReasonPrefix) {
-		return false
+	trimmedReason := strings.TrimSpace(reason)
+	if strings.HasPrefix(trimmedReason, thresholdDayLossReasonPrefix) {
+		dateText := strings.TrimSpace(strings.TrimPrefix(trimmedReason, thresholdDayLossReasonPrefix))
+		dateText = strings.SplitN(dateText, ":", 2)[0]
+		return dateText != "" && dateText != currentDate
 	}
 
-	dateText := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(reason), thresholdDayLossReasonPrefix))
-	dateText = strings.SplitN(dateText, ":", 2)[0]
-	return dateText != "" && dateText != currentDate
+	if strings.HasPrefix(trimmedReason, thresholdMonthLossReasonPrefix) {
+		monthText := strings.TrimSpace(strings.TrimPrefix(trimmedReason, thresholdMonthLossReasonPrefix))
+		monthText = strings.SplitN(monthText, ":", 2)[0]
+		return monthText != "" && monthText != monthFromServiceDate(currentDate)
+	}
+
+	return false
 }
 
-func normalizeServiceDate(currDate string, now time.Time) string {
-	trimmed := strings.TrimSpace(currDate)
-	for _, layout := range []string{"02-01-2006", "2006-01-02", "02/01/2006"} {
-		if parsed, err := time.ParseInLocation(layout, trimmed, now.Location()); err == nil {
-			return parsed.Format("02-01-2006")
-		}
+func currentServiceDate(timezone string, now time.Time) string {
+	loc, err := time.LoadLocation(strings.TrimSpace(timezone))
+	if err != nil {
+		loc = time.Local
 	}
-	if trimmed != "" {
-		return trimmed
-	}
-	return now.Format("02-01-2006")
+	return now.In(loc).Format("02-01-2006")
 }
 
-func (s *Service) enforceThresholdDayLossAfterTradeClose(ctx context.Context, tradeID string) {
-	if s.store == nil || s.cfg.ThresholdDayLoss <= 0 {
-		return
-	}
-
-	s.dayLossMu.Lock()
-	defer s.dayLossMu.Unlock()
-
-	summary, err := s.store.DailyLossSummaryForTrade(ctx, tradeID)
+func monthFromServiceDate(currentDate string) string {
+	parsed, err := time.Parse("02-01-2006", strings.TrimSpace(currentDate))
 	if err != nil {
-		log.Printf("daily loss threshold check failed for trade_id=%s: %v", tradeID, err)
-		return
+		return ""
 	}
-	if !dayLossThresholdReached(summary.Loss, s.cfg.ThresholdDayLoss) {
+	return parsed.Format("01-2006")
+}
+
+func (s *Service) enforceLossThresholdsAfterTradeClose(ctx context.Context, tradeID string) {
+	if s.store == nil || (s.cfg.ThresholdDayLoss <= 0 && s.cfg.ThresholdMonthLoss <= 0) {
 		return
 	}
 
-	globalState, err := s.store.GetBotKillSwitch(ctx, model.AllStrategiesKillSwitchBotName)
+	s.lossMu.Lock()
+	defer s.lossMu.Unlock()
+
+	daily, monthly, err := s.store.ProjectLossSummariesForTrade(ctx, tradeID)
 	if err != nil {
-		log.Printf("daily loss threshold global kill state check failed: %v", err)
+		log.Printf("project loss threshold check failed for trade_id=%s: %v", tradeID, err)
 		return
 	}
-	if globalState.KillEnabled {
+
+	dailyReached := lossThresholdReached(daily.Loss, s.cfg.ThresholdDayLoss)
+	monthlyReached := lossThresholdReached(monthly.Loss, s.cfg.ThresholdMonthLoss)
+	if !dailyReached && !monthlyReached {
 		return
 	}
 
 	reason := fmt.Sprintf(
 		"threshold_day_loss reached for %s: day_loss=%.2f threshold=%.2f realized_pnl=%.2f",
-		summary.CurrDate,
-		summary.Loss,
+		daily.Period,
+		daily.Loss,
 		s.cfg.ThresholdDayLoss,
-		summary.RealizedPNL,
+		daily.RealizedPNL,
 	)
-	if err := s.enableKillSwitchForAllStrategies(ctx, summary.CurrDate, reason); err != nil {
-		log.Printf("daily loss threshold kill-all failed: %v", err)
+	if monthlyReached {
+		reason = fmt.Sprintf(
+			"threshold_month_loss reached for %s: month_loss=%.2f threshold=%.2f realized_pnl=%.2f",
+			monthly.Period,
+			monthly.Loss,
+			s.cfg.ThresholdMonthLoss,
+			monthly.RealizedPNL,
+		)
+	}
+
+	globalState, err := s.store.GetBotKillSwitch(ctx, model.AllStrategiesKillSwitchBotName)
+	if err != nil {
+		log.Printf("project loss threshold global kill state check failed: %v", err)
 		return
 	}
-	log.Printf("daily loss threshold kill-all enabled: %s", reason)
+	if globalState.KillEnabled && !isLossThresholdReason(globalState.Reason) {
+		return
+	}
+
+	if err := s.enableKillSwitchForAllStrategies(ctx, daily.Period, reason); err != nil {
+		log.Printf("project loss threshold kill-all failed: %v", err)
+		return
+	}
+	log.Printf("project loss threshold kill-all enabled: %s", reason)
 }
 
-func dayLossThresholdReached(dayLoss float64, threshold float64) bool {
-	return threshold > 0 && dayLoss >= threshold
+func lossThresholdReached(loss float64, threshold float64) bool {
+	return threshold > 0 && loss >= threshold
+}
+
+func isLossThresholdReason(reason string) bool {
+	trimmed := strings.TrimSpace(reason)
+	return strings.HasPrefix(trimmed, thresholdDayLossReasonPrefix) || strings.HasPrefix(trimmed, thresholdMonthLossReasonPrefix)
 }
 
 func (s *Service) enableKillSwitchForAllStrategies(ctx context.Context, currDate string, reason string) error {
@@ -1292,7 +1365,7 @@ func (s *Service) enableKillSwitchForAllStrategies(ctx context.Context, currDate
 	botNames := append([]string(nil), s.cfg.StrategyBotNames...)
 	knownBotNames, err := s.store.ListKnownBotNames(ctx)
 	if err != nil {
-		log.Printf("daily loss threshold list known bots failed: %v", err)
+		log.Printf("project loss threshold list known bots failed: %v", err)
 	} else {
 		botNames = append(botNames, knownBotNames...)
 	}
@@ -1312,7 +1385,7 @@ func (s *Service) enableKillSwitchForAllStrategies(ctx context.Context, currDate
 			continue
 		}
 		for _, brokerErr := range resp.Errors {
-			log.Printf("daily loss threshold kill-all broker warning bot=%s: %s", botName, brokerErr)
+			log.Printf("project loss threshold kill-all broker warning bot=%s: %s", botName, brokerErr)
 		}
 	}
 	if len(errorsOut) > 0 {
@@ -1754,9 +1827,26 @@ func isTerminalOrderCancelError(err error) bool {
 		return false
 	}
 	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "udapi100040") ||
+	return isOrderNotFoundError(err) ||
+		strings.Contains(msg, "udapi100040") ||
 		strings.Contains(msg, "already cancelled") ||
 		strings.Contains(msg, "already canceled") ||
 		strings.Contains(msg, "already rejected") ||
 		strings.Contains(msg, "already completed")
+}
+
+func isOrderNotFoundError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "udapi100010") || strings.Contains(msg, "order not found")
+}
+
+func isNoOpenPositionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "udapi1111") || strings.Contains(msg, "no open position available to exit")
 }

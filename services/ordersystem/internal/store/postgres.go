@@ -74,8 +74,8 @@ type CreateAccountParams struct {
 	CurrentTime time.Time
 }
 
-type DailyLossSummary struct {
-	CurrDate    string
+type ProjectLossSummary struct {
+	Period      string
 	RealizedPNL float64
 	Loss        float64
 }
@@ -754,44 +754,56 @@ func (s *Store) ListClosedTradesByBotDate(ctx context.Context, botName string, c
 	return s.listTradesByBotDateStatus(ctx, botName, currDate, false)
 }
 
-func (s *Store) DailyLossSummaryForTrade(ctx context.Context, tradeID string) (DailyLossSummary, error) {
+func (s *Store) ProjectLossSummariesForTrade(ctx context.Context, tradeID string) (ProjectLossSummary, ProjectLossSummary, error) {
 	tradeID = strings.TrimSpace(tradeID)
 	if tradeID == "" {
-		return DailyLossSummary{}, fmt.Errorf("trade id is required")
+		return ProjectLossSummary{}, ProjectLossSummary{}, fmt.Errorf("trade id is required")
 	}
 
-	var currDate string
+	var closedAt time.Time
 	if err := s.pool.QueryRow(ctx, fmt.Sprintf(`
-SELECT COALESCE(a.curr_date, '')
-FROM %s AS t
-LEFT JOIN accounts AS a ON a.id = t.acct_id
-WHERE t.id::text = $1
-LIMIT 1`, s.tradesTable), tradeID).Scan(&currDate); err != nil {
-		return DailyLossSummary{}, fmt.Errorf("load trade curr_date: %w", err)
+SELECT COALESCE(MAX(o.exit_time), NOW())
+FROM %s AS o
+WHERE o.trade_id::text = $1`, ordersTableName), tradeID).Scan(&closedAt); err != nil {
+		return ProjectLossSummary{}, ProjectLossSummary{}, fmt.Errorf("load trade close time: %w", err)
 	}
 
-	return s.DailyLossSummary(ctx, currDate)
+	dayStart, dayEnd, monthStart, monthEnd, dayKey, monthKey := lossPeriodBounds(closedAt, s.loc)
+	daily, err := s.projectLossSummary(ctx, dayKey, dayStart, dayEnd)
+	if err != nil {
+		return ProjectLossSummary{}, ProjectLossSummary{}, fmt.Errorf("load project daily realized pnl: %w", err)
+	}
+	monthly, err := s.projectLossSummary(ctx, monthKey, monthStart, monthEnd)
+	if err != nil {
+		return ProjectLossSummary{}, ProjectLossSummary{}, fmt.Errorf("load project monthly realized pnl: %w", err)
+	}
+	return daily, monthly, nil
 }
 
-func (s *Store) DailyLossSummary(ctx context.Context, currDate string) (DailyLossSummary, error) {
-	normalizedDate := normalizeCurrDate(currDate, time.Now().In(s.loc))
-
+func (s *Store) projectLossSummary(ctx context.Context, period string, start time.Time, end time.Time) (ProjectLossSummary, error) {
 	var realizedPNL float64
 	if err := s.pool.QueryRow(ctx, fmt.Sprintf(`
 SELECT COALESCE(SUM(COALESCE(o.pnl, 0)), 0)::float8
-FROM accounts AS a
-JOIN %s AS t ON t.acct_id = a.id
-JOIN %s AS o ON o.trade_id = t.id
-WHERE a.curr_date = $1
-  AND o.exit_time IS NOT NULL`, s.tradesTable, ordersTableName), normalizedDate).Scan(&realizedPNL); err != nil {
-		return DailyLossSummary{}, fmt.Errorf("load daily realized pnl: %w", err)
+FROM %s AS o
+WHERE o.exit_time >= $1
+  AND o.exit_time < $2`, ordersTableName), start, end).Scan(&realizedPNL); err != nil {
+		return ProjectLossSummary{}, err
 	}
 
-	return DailyLossSummary{
-		CurrDate:    normalizedDate,
+	return ProjectLossSummary{
+		Period:      period,
 		RealizedPNL: realizedPNL,
 		Loss:        math.Max(-realizedPNL, 0),
 	}, nil
+}
+
+func lossPeriodBounds(at time.Time, loc *time.Location) (time.Time, time.Time, time.Time, time.Time, string, string) {
+	local := at.In(loc)
+	dayStart := time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, loc)
+	dayEnd := dayStart.AddDate(0, 0, 1)
+	monthStart := time.Date(local.Year(), local.Month(), 1, 0, 0, 0, 0, loc)
+	monthEnd := monthStart.AddDate(0, 1, 0)
+	return dayStart, dayEnd, monthStart, monthEnd, local.Format("02-01-2006"), local.Format("01-2006")
 }
 
 func (s *Store) listTradesByBotDateStatus(ctx context.Context, botName string, currDate string, wantOpen bool) ([]model.Trade, error) {

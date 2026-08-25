@@ -338,6 +338,43 @@ func TestClientExitPositionsSendsTagQuery(t *testing.T) {
 	}
 }
 
+func TestClientGetPositionsReturnsInstrumentQuantities(t *testing.T) {
+	t.Parallel()
+
+	var gotMethod string
+	var gotPath string
+	client := NewClient(config.Config{
+		UpstoxBaseURL:       "https://api.example.com",
+		UpstoxAccessToken:   "test-token",
+		UpstoxPositionsPath: "/v2/portfolio/short-term-positions",
+	})
+	client.httpClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body: io.NopCloser(strings.NewReader(
+				`{"status":"success","data":[{"instrument_token":"NSE_FO|123","product":"D","quantity":75,"last_price":54.25}]}`,
+			)),
+		}, nil
+	})}
+
+	positions, err := client.GetPositions(context.Background())
+	if err != nil {
+		t.Fatalf("GetPositions returned error: %v", err)
+	}
+	if gotMethod != http.MethodGet || gotPath != "/v2/portfolio/short-term-positions" {
+		t.Fatalf("request = %s %s, want GET /v2/portfolio/short-term-positions", gotMethod, gotPath)
+	}
+	if len(positions) != 1 {
+		t.Fatalf("positions = %#v, want one position", positions)
+	}
+	if positions[0].InstrumentToken != "NSE_FO|123" || positions[0].Quantity != 75 || positions[0].LastPrice != 54.25 {
+		t.Fatalf("position = %#v, want parsed instrument quantity and price", positions[0])
+	}
+}
+
 func TestClientGetOrderTradesComputesAveragePrice(t *testing.T) {
 	t.Parallel()
 

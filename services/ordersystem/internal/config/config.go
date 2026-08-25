@@ -21,6 +21,7 @@ type Config struct {
 	SLRefreshMinInterval    time.Duration
 	AccountInitialCash      float64
 	ThresholdDayLoss        float64
+	ThresholdMonthLoss      float64
 	StrategyBotNames        []string
 	UpstoxBaseURL           string
 	UpstoxAccessToken       string
@@ -28,6 +29,7 @@ type Config struct {
 	UpstoxOrderModifyPath   string
 	UpstoxOrderCancelPath   string
 	UpstoxExitPositionsPath string
+	UpstoxPositionsPath     string
 	UpstoxOrderDetailsPath  string
 	UpstoxOrderTradesPath   string
 	UpstoxBrokeragePath     string
@@ -57,6 +59,7 @@ func Load() (Config, error) {
 		SLRefreshMinInterval:    parseDurationEnv("ORDERSYSTEM_SL_REFRESH_MIN_INTERVAL", 10*time.Second),
 		AccountInitialCash:      parseFloatEnv("ACCOUNT_INITIAL_CASH", 0),
 		ThresholdDayLoss:        parseFloatEnvAny([]string{"threshold_day_loss", "THRESHOLD_DAY_LOSS", "ORDERSYSTEM_THRESHOLD_DAY_LOSS"}, 0),
+		ThresholdMonthLoss:      parseFloatEnvAny([]string{"threshold_month_loss", "THRESHOLD_MONTH_LOSS", "ORDERSYSTEM_THRESHOLD_MONTH_LOSS"}, 0),
 		StrategyBotNames:        resolveStrategyBotNames(),
 		UpstoxBaseURL:           resolveUpstoxBaseURL(appMode),
 		UpstoxAccessToken:       resolveUpstoxAccessToken(appMode),
@@ -64,6 +67,7 @@ func Load() (Config, error) {
 		UpstoxOrderModifyPath:   resolveUpstoxEndpoint(appMode, "UPSTOX_ORDER_MODIFY_PATH", upstoxHFTBaseURL, "/v3/order/modify"),
 		UpstoxOrderCancelPath:   resolveUpstoxEndpoint(appMode, "UPSTOX_ORDER_CANCEL_PATH", upstoxHFTBaseURL, "/v3/order/cancel"),
 		UpstoxExitPositionsPath: resolveUpstoxEndpoint(appMode, "UPSTOX_EXIT_POSITIONS_PATH", upstoxStandardBaseURL, "/v2/order/positions/exit"),
+		UpstoxPositionsPath:     resolveUpstoxEndpoint(appMode, "UPSTOX_POSITIONS_PATH", upstoxStandardBaseURL, "/v2/portfolio/short-term-positions"),
 		UpstoxOrderDetailsPath:  resolveUpstoxEndpoint(appMode, "UPSTOX_ORDER_DETAILS_PATH", upstoxStandardBaseURL, "/v2/order/details"),
 		UpstoxOrderTradesPath:   resolveUpstoxEndpoint(appMode, "UPSTOX_ORDER_TRADES_PATH", upstoxStandardBaseURL, "/v2/order/trades"),
 		UpstoxBrokeragePath:     resolveUpstoxEndpoint(appMode, "UPSTOX_BROKERAGE_PATH", upstoxStandardBaseURL, "/v2/charges/brokerage"),
@@ -102,6 +106,9 @@ func Load() (Config, error) {
 
 	if math.IsNaN(cfg.ThresholdDayLoss) || math.IsInf(cfg.ThresholdDayLoss, 0) || cfg.ThresholdDayLoss < 0 {
 		return Config{}, fmt.Errorf("threshold_day_loss must be >= 0")
+	}
+	if math.IsNaN(cfg.ThresholdMonthLoss) || math.IsInf(cfg.ThresholdMonthLoss, 0) || cfg.ThresholdMonthLoss < 0 {
+		return Config{}, fmt.Errorf("threshold_month_loss must be >= 0")
 	}
 
 	if cfg.UpstoxStatusRequestGap < 0 {

@@ -773,16 +773,16 @@ class BbVwapEmaV2Strategy(BbVwapEmaStrategy):
             f"angle_ema_21_1m={angle_ema_21_1m}, angle_sma_50_1m={angle_sma_50_1m}, "
             f"exit_ltp={latest_ltp}, candle_time={latest_time}"
         )
-        trade_closed = self.order_maneger.square_off_trade(
+        square_off_result = self.order_maneger.square_off_trade(
             trade_id=trade_id,
             exit_price=latest_ltp,
             ts=ref_ts,
             reason=constants.MANUAL_EXIT,
         )
-        if not trade_closed:
+        trade_info = self._confirmed_square_off_trade_info(trade_id, square_off_result)
+        if trade_info is None:
             return False
 
-        trade_info = self.order_maneger.get_trade_by_id(trade_id)
         self._update_today_realized_pnl_on_trade_close(trade_info, ts=ref_ts)
         self._log_order_event(
             "REVERSAL_CLOSE_REASON",
@@ -1158,18 +1158,19 @@ class BbVwapEmaV2Strategy(BbVwapEmaStrategy):
             return False
 
         square_ts = self._resolve_reference_ts()
-        trade_closed = self.order_maneger.square_off_trade(
+        square_off_result = self.order_maneger.square_off_trade(
             trade_id=trade_id,
             exit_price=float(exit_ltp),
             ts=square_ts,
             reason=reason,
         )
-        if trade_closed:
-            trade_info = self.order_maneger.get_trade_by_id(trade_id)
-            self._update_today_realized_pnl_on_trade_close(trade_info, ts=square_ts)
-            self._reset_order_container()
-            return True
-        return False
+        trade_info = self._confirmed_square_off_trade_info(trade_id, square_off_result)
+        if trade_info is None:
+            return False
+
+        self._update_today_realized_pnl_on_trade_close(trade_info, ts=square_ts)
+        self._reset_order_container()
+        return True
 
     def _current_order_event_trade(self) -> Dict[str, Any]:
         trade_id = self._order_container.get("trade_id")

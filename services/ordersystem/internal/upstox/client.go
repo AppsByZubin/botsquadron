@@ -25,6 +25,7 @@ type Client struct {
 	orderModifyPath   string
 	orderCancelPath   string
 	exitPositionsPath string
+	positionsPath     string
 	orderDetailsPath  string
 	orderTradesPath   string
 	brokeragePath     string
@@ -95,6 +96,13 @@ type ExitPositionsResult struct {
 	Status   string
 	OrderIDs []string
 	RawData  json.RawMessage
+}
+
+type Position struct {
+	InstrumentToken string  `json:"instrument_token"`
+	Product         string  `json:"product"`
+	Quantity        int     `json:"quantity"`
+	LastPrice       float64 `json:"last_price"`
 }
 
 type OrderStatus struct {
@@ -177,6 +185,7 @@ func NewClient(cfg config.Config) *Client {
 		orderModifyPath:   cfg.UpstoxOrderModifyPath,
 		orderCancelPath:   cfg.UpstoxOrderCancelPath,
 		exitPositionsPath: cfg.UpstoxExitPositionsPath,
+		positionsPath:     cfg.UpstoxPositionsPath,
 		orderDetailsPath:  cfg.UpstoxOrderDetailsPath,
 		orderTradesPath:   cfg.UpstoxOrderTradesPath,
 		brokeragePath:     cfg.UpstoxBrokeragePath,
@@ -455,6 +464,59 @@ func (c *Client) ExitPositions(ctx context.Context, req ExitPositionsRequest) (E
 	default:
 		return result, fmt.Errorf("upstox exit positions non-success status: %s", status)
 	}
+}
+
+func (c *Client) GetPositions(ctx context.Context) ([]Position, error) {
+	if !c.Enabled() {
+		return nil, fmt.Errorf("upstox client is not configured")
+	}
+	if strings.TrimSpace(c.positionsPath) == "" {
+		return nil, fmt.Errorf("upstox positions path is not configured")
+	}
+
+	if c.statusLimiter != nil {
+		if err := c.statusLimiter.Wait(ctx); err != nil {
+			return nil, fmt.Errorf("wait for upstox positions rate limiter: %w", err)
+		}
+	}
+
+	requestURL := c.buildURL(c.positionsPath, "")
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create positions request url=%s: %w", requestURL, err)
+	}
+	c.setHeadersWithVersion(httpReq, false)
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	httpResp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("positions request failed url=%s: %w", requestURL, err)
+	}
+	defer httpResp.Body.Close()
+
+	payload, err := io.ReadAll(io.LimitReader(httpResp.Body, 2<<20))
+	if err != nil {
+		return nil, fmt.Errorf("read positions response url=%s: %w", requestURL, err)
+	}
+	if httpResp.StatusCode >= 300 {
+		return nil, fmt.Errorf("upstox positions failed (%d) url=%s: %s", httpResp.StatusCode, requestURL, strings.TrimSpace(string(payload)))
+	}
+
+	status, data, err := decodeEnvelope(payload)
+	if err != nil {
+		return nil, fmt.Errorf("decode positions response url=%s: %w", requestURL, err)
+	}
+	if status != "" && !strings.EqualFold(status, "success") {
+		return nil, fmt.Errorf("upstox positions non-success status url=%s: %s", requestURL, status)
+	}
+
+	var positions []Position
+	if len(data) > 0 && string(data) != "null" {
+		if err := json.Unmarshal(data, &positions); err != nil {
+			return nil, fmt.Errorf("decode positions data url=%s: %w", requestURL, err)
+		}
+	}
+	return positions, nil
 }
 
 func (c *Client) GetOrderStatus(ctx context.Context, orderID string) (OrderStatus, error) {

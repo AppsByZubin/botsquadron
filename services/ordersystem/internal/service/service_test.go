@@ -32,19 +32,24 @@ func TestThresholdKillSwitchExpiresAcrossTradingDays(t *testing.T) {
 	}
 }
 
-func TestNormalizeServiceDate(t *testing.T) {
+func TestMonthlyThresholdKillSwitchExpiresAcrossMonths(t *testing.T) {
 	t.Parallel()
 
-	now := time.Date(2026, time.August, 19, 14, 0, 0, 0, time.FixedZone("IST", 5*60*60+30*60))
-	for input, want := range map[string]string{
-		"2026-08-19": "19-08-2026",
-		"19/08/2026": "19-08-2026",
-		"19-08-2026": "19-08-2026",
-		"":           "19-08-2026",
-	} {
-		if got := normalizeServiceDate(input, now); got != want {
-			t.Fatalf("normalizeServiceDate(%q) = %q, want %q", input, got, want)
-		}
+	reason := "threshold_month_loss reached for 08-2026: month_loss=22000.00 threshold=20000.00 realized_pnl=-22000.00"
+	if thresholdKillSwitchExpired(reason, "25-08-2026") {
+		t.Fatal("thresholdKillSwitchExpired returned true during the breached month")
+	}
+	if !thresholdKillSwitchExpired(reason, "01-09-2026") {
+		t.Fatal("thresholdKillSwitchExpired returned false in the following month")
+	}
+}
+
+func TestCurrentServiceDateUsesConfiguredTimezone(t *testing.T) {
+	t.Parallel()
+
+	nowUTC := time.Date(2026, time.August, 24, 19, 0, 0, 0, time.UTC)
+	if got := currentServiceDate("Asia/Kolkata", nowUTC); got != "25-08-2026" {
+		t.Fatalf("currentServiceDate = %q, want 25-08-2026", got)
 	}
 }
 
@@ -480,6 +485,33 @@ func TestIsTerminalModifyOrderError(t *testing.T) {
 	}
 }
 
+func TestIsTerminalOrderCancelErrorAcceptsMissingPriorDayOrder(t *testing.T) {
+	t.Parallel()
+
+	missingOrderErr := errors.New(`upstox cancel order failed (404): {"errors":[{"errorCode":"UDAPI100010","message":"Order not found"}]}`)
+	if !isTerminalOrderCancelError(missingOrderErr) {
+		t.Fatal("isTerminalOrderCancelError returned false for missing prior-day order")
+	}
+	if !isOrderNotFoundError(missingOrderErr) {
+		t.Fatal("isOrderNotFoundError returned false for UDAPI100010")
+	}
+	if isTerminalOrderCancelError(errors.New("temporary network failure")) {
+		t.Fatal("isTerminalOrderCancelError returned true for unrelated error")
+	}
+}
+
+func TestIsNoOpenPositionError(t *testing.T) {
+	t.Parallel()
+
+	alreadyFlatErr := errors.New(`upstox exit positions failed (400): {"errors":[{"errorCode":"UDAPI1111","message":"No open position available to exit"}]}`)
+	if !isNoOpenPositionError(alreadyFlatErr) {
+		t.Fatal("isNoOpenPositionError returned false for UDAPI1111")
+	}
+	if isNoOpenPositionError(errors.New("market is closed")) {
+		t.Fatal("isNoOpenPositionError returned true for unrelated error")
+	}
+}
+
 func TestSquareOffBrokerOrdersCancelsStopLossBeforeExitByTag(t *testing.T) {
 	t.Parallel()
 
@@ -536,7 +568,7 @@ func TestSquareOffBrokerOrdersCancelsStopLossBeforeExitByTag(t *testing.T) {
 	})
 	svc := New(config.Config{AppMode: config.ModeProduction}, nil, client)
 
-	exitOrderIDs, err := svc.squareOffBrokerOrders(context.Background(), model.Trade{
+	exitOrderIDs, alreadyFlat, err := svc.squareOffBrokerOrders(context.Background(), model.Trade{
 		ID:         "trade-1",
 		BotName:    "firebot",
 		Qty:        75,
@@ -545,6 +577,9 @@ func TestSquareOffBrokerOrdersCancelsStopLossBeforeExitByTag(t *testing.T) {
 	}, "DAY", 0)
 	if err != nil {
 		t.Fatalf("squareOffBrokerOrders returned error: %v", err)
+	}
+	if alreadyFlat {
+		t.Fatal("squareOffBrokerOrders alreadyFlat = true, want false")
 	}
 	if len(exitOrderIDs) != 1 || exitOrderIDs[0] != "exit-123" {
 		t.Fatalf("exit order ids = %#v, want [exit-123]", exitOrderIDs)
@@ -558,6 +593,85 @@ func TestSquareOffBrokerOrdersCancelsStopLossBeforeExitByTag(t *testing.T) {
 		"GET /v2/order/trades order_id=sl-123 tag=",
 		"DELETE /v3/order/cancel order_id=sl-123 tag=",
 		"POST /v2/order/positions/exit order_id= tag=firebot-entry",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("broker calls = %#v, want %#v", got, want)
+	}
+	for idx := range want {
+		if got[idx] != want[idx] {
+			t.Fatalf("broker calls = %#v, want %#v", got, want)
+		}
+	}
+}
+
+func TestSquareOffBrokerOrdersReconcilesMissingOrdersWhenPositionAlreadyFlat(t *testing.T) {
+	t.Parallel()
+
+	var mu sync.Mutex
+	calls := make([]string, 0, 4)
+	recordCall := func(r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		calls = append(calls, r.Method+" "+r.URL.Path)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		recordCall(r)
+		w.Header().Set("Content-Type", "application/json")
+
+		switch r.URL.Path {
+		case "/v2/order/details", "/v2/order/trades", "/v3/order/cancel":
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"status":"error","errors":[{"errorCode":"UDAPI100010","message":"Order not found"}]}`))
+		case "/v2/order/positions/exit":
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"status":"error","errors":[{"errorCode":"UDAPI1111","message":"No open position available to exit"}]}`))
+		case "/v2/portfolio/short-term-positions":
+			_, _ = w.Write([]byte(`{"status":"success","data":[{"instrument_token":"NSE_FO|123","quantity":0,"last_price":54.0}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := upstox.NewClient(config.Config{
+		UpstoxBaseURL:           server.URL,
+		UpstoxAccessToken:       "test-token",
+		UpstoxOrderCancelPath:   "/v3/order/cancel",
+		UpstoxExitPositionsPath: "/v2/order/positions/exit",
+		UpstoxPositionsPath:     "/v2/portfolio/short-term-positions",
+		UpstoxOrderDetailsPath:  "/v2/order/details",
+		UpstoxOrderTradesPath:   "/v2/order/trades",
+	})
+	svc := New(config.Config{AppMode: config.ModeProduction}, nil, client)
+
+	exitOrderIDs, alreadyFlat, err := svc.squareOffBrokerOrders(context.Background(), model.Trade{
+		ID:              "trade-yesterday",
+		BotName:         "firebot",
+		InstrumentToken: "NSE_FO|123",
+		Qty:             75,
+		SLOrderIDs:      []string{"sl-yesterday"},
+		TagEntry:        "firebot-entry",
+	}, "DAY", 0)
+	if err != nil {
+		t.Fatalf("squareOffBrokerOrders returned error: %v", err)
+	}
+	if !alreadyFlat {
+		t.Fatal("squareOffBrokerOrders alreadyFlat = false, want true")
+	}
+	if len(exitOrderIDs) != 0 {
+		t.Fatalf("exit order ids = %#v, want none for an already-flat position", exitOrderIDs)
+	}
+
+	mu.Lock()
+	got := append([]string(nil), calls...)
+	mu.Unlock()
+	want := []string{
+		"GET /v2/order/details",
+		"GET /v2/order/trades",
+		"DELETE /v3/order/cancel",
+		"POST /v2/order/positions/exit",
+		"GET /v2/portfolio/short-term-positions",
 	}
 	if len(got) != len(want) {
 		t.Fatalf("broker calls = %#v, want %#v", got, want)
@@ -640,7 +754,7 @@ func TestKillPositionTagsDefaultsToBotEntryTag(t *testing.T) {
 	}
 }
 
-func TestDayLossThresholdReached(t *testing.T) {
+func TestLossThresholdReached(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -660,8 +774,8 @@ func TestDayLossThresholdReached(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			if got := dayLossThresholdReached(tt.dayLoss, tt.threshold); got != tt.want {
-				t.Fatalf("dayLossThresholdReached(%v, %v) = %v, want %v", tt.dayLoss, tt.threshold, got, tt.want)
+			if got := lossThresholdReached(tt.dayLoss, tt.threshold); got != tt.want {
+				t.Fatalf("lossThresholdReached(%v, %v) = %v, want %v", tt.dayLoss, tt.threshold, got, tt.want)
 			}
 		})
 	}

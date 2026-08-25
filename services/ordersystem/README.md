@@ -148,6 +148,12 @@ Validation:
 
 The strategy owns square-off timing and sends the latest LTP as `exit_price`.
 
+Square-off is retry-safe across a restart. If a prior broker exit succeeded but
+the OMS update did not, ordersystem ignores stale SL `Order not found` replies,
+verifies the instrument has zero quantity through Upstox positions, and then
+records the trade as closed. The bot clears its active trade ID only after the
+ordersystem response confirms a closed status.
+
 ```json
 {
   "mode": "sandbox",
@@ -207,6 +213,10 @@ Optional:
 - `ORDERSYSTEM_SL_POLL_INTERVAL` default `10s`
 - `ORDERSYSTEM_SL_REFRESH_MIN_INTERVAL` default `10s`
 - `ACCOUNT_INITIAL_CASH` default `0`
+- `threshold_day_loss` default `0`; maximum realized net loss for one `APP_TIMEZONE` trading day across all bots (`0` disables it)
+- `threshold_month_loss` default `0`; maximum realized net loss for one `APP_TIMEZONE` calendar month across all bots (`0` disables it)
+
+When either loss threshold is reached after a trade closes, ordersystem enables the global and per-bot intake kill switches. Daily threshold locks expire on the next trading day; monthly threshold locks expire on the first day of the next calendar month. Existing open positions are not automatically closed.
 
 Upstox:
 
