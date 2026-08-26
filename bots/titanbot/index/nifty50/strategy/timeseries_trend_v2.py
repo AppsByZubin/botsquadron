@@ -808,20 +808,6 @@ class TimeseriesTrendV2Strategy(TimeseriesTrendStrategy):
     ) -> None:
         self._log_strategy_event(event_type, trade, ts=ts, extra=extra)
 
-    def _vwap_session_trail_atr_mult(self) -> Optional[float]:
-        band_width = self._latest_vwap_band_1_width()
-        if band_width is None:
-            return None
-        if band_width < 100:
-            return 1.5
-        if 100 < band_width < 130:
-            return 2.5
-        if 150 < band_width < 200:
-            return 3.0
-        if band_width > 200:
-            return 3.5
-        return None
-
     def _log_strategy_event(
         self,
         event_type: str,

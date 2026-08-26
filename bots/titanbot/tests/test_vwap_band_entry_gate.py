@@ -104,6 +104,50 @@ class VwapBandEntryGateTest(unittest.TestCase):
             }.isdisjoint(frame.columns)
         )
 
+    def test_v2_vwap_session_trail_atr_multiplier_comes_from_params(self):
+        strategy = TimeseriesTrendV2Strategy.__new__(TimeseriesTrendV2Strategy)
+        strategy.params = {
+            "strategy-parameters": {
+                "vwap_session_trail_atr_mult": {
+                    "below_100": 1.1,
+                    "between_100_and_130": 2.2,
+                    "between_150_and_200": 3.3,
+                    "above_200": 4.4,
+                }
+            }
+        }
+        strategy.df_index = None
+
+        for width, expected in ((99, 1.1), (115, 2.2), (175, 3.3), (201, 4.4)):
+            with self.subTest(width=width):
+                strategy.last_index_bar = {
+                    "vwap_upper_band_1": width,
+                    "vwap_lower_band_1": 0,
+                }
+                self.assertEqual(expected, strategy._vwap_session_trail_atr_mult())
+
+    def test_v2_vwap_session_trail_atr_multiplier_preserves_unmatched_widths(self):
+        strategy = TimeseriesTrendV2Strategy.__new__(TimeseriesTrendV2Strategy)
+        strategy.params = {
+            "strategy-parameters": {
+                "vwap_session_trail_atr_mult": {
+                    "below_100": 1.1,
+                    "between_100_and_130": 2.2,
+                    "between_150_and_200": 3.3,
+                    "above_200": 4.4,
+                }
+            }
+        }
+        strategy.df_index = None
+
+        for width in (100, 130, 150, 200):
+            with self.subTest(width=width):
+                strategy.last_index_bar = {
+                    "vwap_upper_band_1": width,
+                    "vwap_lower_band_1": 0,
+                }
+                self.assertIsNone(strategy._vwap_session_trail_atr_mult())
+
     def test_vwap_band_values_are_populated_by_indicator_calculation(self):
         strategy = TimeseriesTrendStrategy.__new__(TimeseriesTrendStrategy)
         strategy.params = {"strategy-parameters": {}}

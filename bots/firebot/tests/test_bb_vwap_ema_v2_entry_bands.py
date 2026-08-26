@@ -1,5 +1,7 @@
 import unittest
 
+import pandas as pd
+
 from index.nifty50.strategy.bb_vwap_ema_v2 import BbVwapEmaV2Strategy
 
 
@@ -39,6 +41,36 @@ class BbVwapEmaV2EntryBandTests(unittest.TestCase):
 
         self.assertEqual(24326.55, call_upper)
         self.assertEqual(24326.55, put_lower)
+
+    def test_vwap_session_trail_atr_multiplier_comes_from_params(self):
+        self.strategy.params["strategy-parameters"]["vwap_session_trail_atr_mult"] = {
+            "below_100": 1.1,
+            "between_100_and_130": 2.2,
+            "between_150_and_200": 3.3,
+            "above_200": 4.4,
+        }
+
+        for width, expected in ((99, 1.1), (115, 2.2), (175, 3.3), (201, 4.4)):
+            with self.subTest(width=width):
+                self.strategy.df_index = pd.DataFrame(
+                    [{"vwap_upper_band_1": width, "vwap_lower_band_1": 0}]
+                )
+                self.assertEqual(expected, self.strategy._vwap_session_trail_atr_mult())
+
+    def test_vwap_session_trail_atr_multiplier_preserves_unmatched_widths(self):
+        self.strategy.params["strategy-parameters"]["vwap_session_trail_atr_mult"] = {
+            "below_100": 1.1,
+            "between_100_and_130": 2.2,
+            "between_150_and_200": 3.3,
+            "above_200": 4.4,
+        }
+
+        for width in (100, 130, 150, 200):
+            with self.subTest(width=width):
+                self.strategy.df_index = pd.DataFrame(
+                    [{"vwap_upper_band_1": width, "vwap_lower_band_1": 0}]
+                )
+                self.assertIsNone(self.strategy._vwap_session_trail_atr_mult())
 
 
 if __name__ == "__main__":

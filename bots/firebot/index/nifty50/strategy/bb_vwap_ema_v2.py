@@ -1073,15 +1073,23 @@ class BbVwapEmaV2Strategy(BbVwapEmaStrategy):
         band_width = self._latest_vwap_band_1_width()
         if band_width is None:
             return None
+
+        multipliers = self._strategy_params().get("vwap_session_trail_atr_mult")
+        if not isinstance(multipliers, dict):
+            return None
+
+        key = None
         if band_width < 100:
-            return 1.5
-        if 100 < band_width < 130:
-            return 2.5
-        if 150 < band_width < 200:
-            return 3.0
-        if band_width > 200:
-            return 3.5
-        return None
+            key = "below_100"
+        elif 100 < band_width < 130:
+            key = "between_100_and_130"
+        elif 150 < band_width < 200:
+            key = "between_150_and_200"
+        elif band_width > 200:
+            key = "above_200"
+        if key is None:
+            return None
+        return safe_float(multipliers.get(key))
 
     def _clear_pending_contract(self):
         self._order_container["instrument_key"] = None
