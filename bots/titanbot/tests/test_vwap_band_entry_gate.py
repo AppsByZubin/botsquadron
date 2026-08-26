@@ -148,6 +148,18 @@ class VwapBandEntryGateTest(unittest.TestCase):
                 }
                 self.assertIsNone(strategy._vwap_session_trail_atr_mult())
 
+    def test_v2_long_trail_atr_multiplier_comes_from_params(self):
+        strategy = TimeseriesTrendV2Strategy.__new__(TimeseriesTrendV2Strategy)
+        strategy.params = {"strategy-parameters": {"long_atr_mult": 4.0}}
+        strategy._order_container = {
+            "enable_longer_trail": True,
+            "status": constants.OPEN,
+        }
+
+        result = strategy._set_start_trail_after(100.0, 10.0, 2.0)
+
+        self.assertEqual(0.4, result)
+
     def test_vwap_band_values_are_populated_by_indicator_calculation(self):
         strategy = TimeseriesTrendStrategy.__new__(TimeseriesTrendStrategy)
         strategy.params = {"strategy-parameters": {}}

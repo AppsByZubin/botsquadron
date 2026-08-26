@@ -466,7 +466,11 @@ class BbVwapEmaV2Strategy(BbVwapEmaStrategy):
             False,
         )
         if longer_trail_was_enabled or self._longer_trail_condition_active():
-            atr_mult = 3.0
+            atr_mult = self._coerce_float(
+                self._strategy_params().get("long_atr_mult"),
+                3.0,
+                minimum=0.0,
+            )
             self._order_container["enable_longer_trail"] = True
         else:
             if self._order_container.get("status") != constants.OPEN:

@@ -2,6 +2,7 @@ import unittest
 
 import pandas as pd
 
+from common import constants
 from index.nifty50.strategy.bb_vwap_ema_v2 import BbVwapEmaV2Strategy
 
 
@@ -71,6 +72,17 @@ class BbVwapEmaV2EntryBandTests(unittest.TestCase):
                     [{"vwap_upper_band_1": width, "vwap_lower_band_1": 0}]
                 )
                 self.assertIsNone(self.strategy._vwap_session_trail_atr_mult())
+
+    def test_long_trail_atr_multiplier_comes_from_params(self):
+        self.strategy.params["strategy-parameters"]["long_atr_mult"] = 4.0
+        self.strategy._order_container = {
+            "enable_longer_trail": True,
+            "status": constants.OPEN,
+        }
+
+        result = self.strategy._set_start_trail_after(100.0, 10.0, 2.0)
+
+        self.assertEqual(0.4, result)
 
 
 if __name__ == "__main__":
