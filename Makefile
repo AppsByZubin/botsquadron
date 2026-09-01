@@ -1,4 +1,4 @@
-.PHONY: build build-ordersystem docker-build docker-build-ordersystem docker-build-solobot docker-build-trendobot docker-build-haemabot docker-build-firebot docker-build-titanbot docker-build-fibobot docker-build-meanbot docker-build-all deploy-nats deploy-marketfeeder deploy-all clean test-nats install-python-deps install-trendobot-deps install-haemabot-deps install-firebot-deps install-titanbot-deps install-fibobot-deps install-meanbot-deps
+.PHONY: build build-ordersystem build-sidecar docker-build docker-build-ordersystem docker-build-sidecar docker-build-solobot docker-build-trendobot docker-build-haemabot docker-build-firebot docker-build-titanbot docker-build-fibobot docker-build-meanbot docker-build-all deploy-nats deploy-marketfeeder deploy-all clean test-nats test-sidecar install-python-deps install-trendobot-deps install-haemabot-deps install-firebot-deps install-titanbot-deps install-fibobot-deps install-meanbot-deps
 
 # Build the Go binary
 build:
@@ -8,6 +8,10 @@ build:
 build-ordersystem:
 	cd services/ordersystem && go build -o ordersystem ./cmd
 
+# Build the calculation sidecar Go binary
+build-sidecar:
+	cd services/sidecar && go build -o sidecar ./cmd
+
 # Build the Docker image
 docker-build: build
 	cd services/marketfeeder && docker build -t marketfeeder:latest .
@@ -15,6 +19,10 @@ docker-build: build
 # Build the order system Docker image
 docker-build-ordersystem: build-ordersystem
 	cd services/ordersystem && docker build -t ordersystem:latest .
+
+# Build the calculation sidecar Docker image
+docker-build-sidecar: build-sidecar
+	cd services/sidecar && docker build -t sidecar:latest .
 
 # Build the solobot Docker image from the repo root so its runtime paths stay stable
 docker-build-solobot:
@@ -45,7 +53,7 @@ docker-build-meanbot:
 	docker build -f bots/meanbot/Dockerfile -t meanbot:latest .
 
 # Build every runtime image
-docker-build-all: docker-build docker-build-ordersystem docker-build-solobot docker-build-trendobot docker-build-haemabot docker-build-firebot docker-build-titanbot docker-build-fibobot docker-build-meanbot
+docker-build-all: docker-build docker-build-ordersystem docker-build-sidecar docker-build-solobot docker-build-trendobot docker-build-haemabot docker-build-firebot docker-build-titanbot docker-build-fibobot docker-build-meanbot
 
 # Install Python dependencies
 install-python-deps:
@@ -79,6 +87,10 @@ install-meanbot-deps:
 test-nats: install-python-deps
 	cd bots && python -m solobot.test_nats
 
+# Test the calculation sidecar
+test-sidecar:
+	cd services/sidecar && go test ./...
+
 # Deploy NATS using Helm
 deploy-nats:
 	helm repo add nats https://nats-io.github.io/k8s/helm/charts/
@@ -98,6 +110,7 @@ clean:
 	helm uninstall nats --namespace default --ignore-not-found=true
 	docker rmi marketfeeder:latest --force
 	docker rmi ordersystem:latest --force
+	docker rmi sidecar:latest --force
 	docker rmi solobot:latest --force
 	docker rmi trendobot:latest --force
 	docker rmi haemabot:latest --force

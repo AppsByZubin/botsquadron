@@ -32,6 +32,9 @@ jobs:
           - service: ordersystem
             context: services/ordersystem
             dockerfile: services/ordersystem/Dockerfile
+          - service: sidecar
+            context: services/sidecar
+            dockerfile: services/sidecar/Dockerfile
           - service: solobot
             context: .
             dockerfile: bots/solobot/Dockerfile
@@ -177,6 +180,10 @@ jobs:
 
           data["marketfeeder"]["image"]["repository"] = repo
           data["marketfeeder"]["image"]["tag"] = f"marketfeeder-{tag}"
+
+          if "sidecar" in data:
+              data["sidecar"]["image"]["repository"] = repo
+              data["sidecar"]["image"]["tag"] = f"sidecar-{tag}"
 
           data["solobot"]["image"]["repository"] = repo
           data["solobot"]["image"]["tag"] = f"solobot-{tag}"

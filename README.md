@@ -1,6 +1,6 @@
 # BotSquadron - Trading Bot Platform
 
-BotSquadron is a distributed trading bot platform that uses NATS for communication between trading bots (solobot, trendobot, haemabot, firebot, titanbot, fibobot, meanbot) and market data feeders (marketfeeder).
+BotSquadron is a distributed trading bot platform that uses NATS for communication between trading bots (solobot, trendobot, haemabot, firebot, titanbot, fibobot, meanbot), market data feeders (marketfeeder), and shared calculation services (sidecar).
 
 ## Architecture
 
@@ -15,13 +15,15 @@ BotSquadron is a distributed trading bot platform that uses NATS for communicati
 7. **meanbot** (Python): NIFTY 50 options bot using the `meanrev_vwap` session-VWAP mean-reversion strategy
 8. **ordersystem** (Go): HTTP OMS that stores trades in PostgreSQL, places Upstox orders in sandbox/production, and polls SL status in production
 9. **marketfeeder** (Go): Market data feeder that connects to Upstox **v3** websockets
-10. **NATS**: Message broker for communication between components
+10. **sidecar** (Go): Builds NIFTY 50 one-minute candles and publishes persisted puller/dragger market classification through HTTP
+11. **NATS**: Message broker for communication between components
 
 ### Communication Flow
 
 ```
 solobot/trendobot/haemabot/firebot/titanbot/fibobot/meanbot -> ordersystem -> PostgreSQL
 solobot/trendobot/haemabot/firebot/titanbot/fibobot/meanbot -> NATS -> marketfeeder -> Upstox WebSocket -> NATS -> solobot/trendobot/haemabot/firebot/titanbot/fibobot/meanbot
+sidecar -> NATS instrument registration -> marketfeeder -> NATS ticks -> sidecar JSON/API -> active bots
 ordersystem (sandbox/production mode) → Upstox Orders API
 ```
 
@@ -29,12 +31,13 @@ ordersystem (sandbox/production mode) → Upstox Orders API
 2. marketfeeder creates Upstox websocket connections for those instruments
 3. marketfeeder receives tick data from Upstox and publishes it back to NATS
 4. The bot receives tick data from NATS and processes it for trading decisions
+5. sidecar independently registers the 50 NIFTY constituents plus the NIFTY index, calculates each completed minute, and makes the shared result available to bots over HTTP
 
 ## Setup
 
 ### Prerequisites
 
-- Go 1.21+
+- Go 1.23+
 - Python 3.8+
 - NATS server running
 - Upstox API access token
@@ -71,6 +74,11 @@ export UPSTOX_API_ACCESS_TOKEN="your_upstox_token"
 4. **Build ordersystem:**
    ```bash
    make build-ordersystem
+   ```
+
+5. **Build sidecar:**
+   ```bash
+   make build-sidecar
    ```
 
 ## Usage
@@ -120,6 +128,17 @@ go run ./cmd
 API docs and examples:
 
 `services/ordersystem/README.md`
+
+### Running sidecar
+
+```bash
+cd services/sidecar
+go run ./cmd
+```
+
+By default the service listens on `:8082`, loads `files/official_nifty50_weights.csv`, writes `files/dragger_puller.json` atomically, and connects to `NATS_URL`. In containers, set `SIDECAR_OUTPUT_PATH` to a persistent path such as `/data/sidecar/files/dragger_puller.json`.
+
+The API exposes `GET /v1/dragger-puller` for the latest calculation, `GET /v1/dragger-puller/history` for the persisted trading-day history, and `/healthz`/`/readyz` probes. See `services/sidecar/README.md` for the exact calculation and configuration.
 
 ### Running solobot
 
