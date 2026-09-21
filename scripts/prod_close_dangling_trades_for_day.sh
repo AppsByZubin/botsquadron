@@ -336,6 +336,9 @@ files_dirs = [
     os.environ.get("HAEMABOT_FILES_DIR", "").strip(),
     os.environ.get("HEMABOT_FILES_DIR", "").strip(),
     os.environ.get("FIREBOT_FILES_DIR", "").strip(),
+    os.environ.get("TITANBOT_FILES_DIR", "").strip(),
+    os.environ.get("FIBOBOT_FILES_DIR", "").strip(),
+    os.environ.get("MEANBOT_FILES_DIR", "").strip(),
     os.environ.get("BOT_FILES_DIR", "").strip(),
     "files",
     "/app/files",
@@ -355,6 +358,8 @@ for files_dir in files_dirs:
         f"{files_dir}/execution_results/sandbox/order_log.csv",
         f"{files_dir}/order_log.csv",
     ])
+    # Daily artifact directories, including files on the configured PVC mount.
+    candidates.extend(glob.glob(f"{files_dir}/execution_results/*/*/order_log.csv"))
 candidates.extend(glob.glob("files/**/order_log.csv", recursive=True))
 candidates.extend(glob.glob("/app/files/**/order_log.csv", recursive=True))
 

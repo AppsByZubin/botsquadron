@@ -10,8 +10,8 @@ It works entirely from the CSV logs produced by `UpstoxOrderManager`.
 
 Usage examples:
     python order_summary.py \
-        --orders-csv files/execution_results/prod/order_log.csv \
-        --daily-csv files/execution_results/prod/daily_pnl.csv
+        --orders-csv files/execution_results/prod/2026-09-18/order_log.csv \
+        --daily-csv files/state/prod/daily_pnl.csv
 
 """
 

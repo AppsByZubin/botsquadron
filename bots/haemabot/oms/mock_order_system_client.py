@@ -10,8 +10,10 @@ from datetime import datetime
 from typing import Any, Dict, Optional
 
 from common import constants
+from common.artifacts import trade_day, log
 from oms.order_system_client import (
     OrderSystemClient,
+    _curr_date_iso,
     _normalize_timestamp,
     _now_ist,
     _to_float,
@@ -301,7 +303,7 @@ class MockOrderSystemClient(OrderSystemClient):
             "month_year": self.month_year,
             "init_cash": self.initial_cash,
             "net_profit": self._local_net_profit(),
-            "trades": self._read_local_rows(),
+            "trades": self._active_day_rows(),
             "message": "mock account loaded locally",
         }
 
@@ -310,9 +312,20 @@ class MockOrderSystemClient(OrderSystemClient):
         normalized = "".join(ch.lower() if ch.isalnum() else "-" for ch in key).strip("-")
         return f"mock-{normalized or 'haemabot'}"
 
+    def _active_day_rows(self):
+        day = _curr_date_iso(self.curr_date)
+        rows = self._read_local_rows()
+        current = [row for row in rows if trade_day(row) == day]
+        stale = [row for row in rows if trade_day(row) != day
+                 and str(row.get("status") or "").strip().upper() == constants.OPEN]
+        if stale:
+            log.warning("Ignoring %s stale/undated OPEN mock trades for %s; retained in %s",
+                        len(stale), day, self.orders_csv)
+        return current
+
     def _local_net_profit(self) -> float:
         pnl = 0.0
-        for row in self._read_local_rows():
+        for row in self._active_day_rows():
             status = str(row.get("status") or "").strip().upper()
             if status in self.CLOSED_STATUSES:
                 pnl += _to_float(row.get("pnl"), 0.0) or 0.0

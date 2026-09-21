@@ -274,6 +274,61 @@ Set production credentials through the chart's `secretEnv` values, including `DA
 
 Persistent runtime storage and stop/start operations are managed in the `botyard` Helm chart.
 
+### Daily artifacts and PVC cleanup
+
+All seven Python bots write daily artifacts to
+`files/execution_results/<mock|sandbox|prod>/YYYY-MM-DD/`. Cumulative P&L lives
+separately at `files/state/<mode>/daily_pnl.csv` and survives artifact cleanup.
+On upgrade, same-day rows from the old flat order CSV and cumulative P&L are
+copied into the new layout without overwriting existing data. The original
+files remain available for archival. Mock startup restoration excludes trades
+from other days and trades without a valid entry timestamp, even when a custom
+CSV path is configured. Production restoration continues to use OMS.
+
+After the strategy finishes, the bot archives every file in the active mode's
+daily directory, a copy of cumulative accounting, and the day's log if present.
+It also retries retained earlier days and archives legacy flat files. Each S3
+snapshot has a manifest containing file sizes and SHA-256 hashes:
+
+```text
+<prefix>/<bot>/<DDMMYY>/<execution-mode>/snapshots/<manifest-sha256>/
+  execution_results/...
+  accounting/daily_pnl.csv
+  logs/...
+  manifest.json
+```
+
+Legacy flat files use `legacy` instead of `DDMMYY`. Snapshot keys prevent a
+later empty run from overwriting an earlier archive. Every uploaded object,
+including the manifest, is downloaded and its SHA-256 checked before cleanup;
+the S3 credentials need both upload and read access.
+
+`ARTIFACT_CLEANUP_ENABLED=true` (the default) enables local deletion only after
+15:31 Asia/Kolkata. Cleanup removes only the successfully verified artifact
+batch. An upload/verification failure, concurrent file change, or an unresolved
+trade (including a blank/unknown status) keeps the batch locally. Cleanup never
+closes a trade, deletes the cumulative accounting file, or touches another mode.
+Explicit custom CSV/JSON paths are archived as copies and disable automatic
+cleanup for that run. Application logs remain local because logging can continue
+during upload. Set `ARTIFACT_CLEANUP_ENABLED=false` to upload without deletion.
+
+Normal bot runs and offline archival share a filesystem lock so they cannot
+write/archive the same bot's files concurrently. To retry uploads independently,
+stop the bot first, use the same PVC, environment and new image, then run:
+
+```bash
+PYTHONPATH=/app/bots/titanbot python -m utils.s3_upload_utils --bot-name titanbot --mode mock
+```
+
+This frees **used space inside the existing PVC**. Keep persistence enabled:
+same-day recovery, unresolved trades, failed uploads, runtime JSON and cumulative
+accounting still need it. Cleanup does not change the PVC's allocated capacity.
+Deploy the new bot images before expecting this behavior; changing the Helm
+environment alone does not update existing images. Older open mock records are
+reported/retained until explicitly reconciled, so uploading them alone does not
+make them eligible for deletion. The older `cleanup_bot_order_files.sh` utility
+does not verify S3 archives and is not the automatic archival workflow.
+
 ### End-of-Day Dangling Trade Cleanup
 
 After market hours, use the production cleanup script to close any OMS trades that are still marked open for the day across all bot strategies. The script is intentionally a database/local-state cleanup only: it does not call Upstox, cancel broker orders, or delete trade history.

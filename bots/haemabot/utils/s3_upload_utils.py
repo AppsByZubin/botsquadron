@@ -7,13 +7,15 @@ Utilities for uploading end-of-day trading artifacts to DigitalOcean Spaces.
 from __future__ import annotations
 
 import os
-from datetime import datetime
+import tempfile
+from datetime import date, datetime
 from pathlib import Path
-from typing import Iterable, List, Optional, Set, Tuple
+from typing import Iterable, Set, Tuple
 from urllib.parse import urlparse, urlunparse
 from zoneinfo import ZoneInfo
 
 from common import constants
+from common.artifacts import archive_directory, artifact_run_lock, cleanup_allowed, migrate_legacy_ledgers
 from logger import create_logger
 
 logger = create_logger("S3UploadUtilsLogger")
@@ -73,43 +75,22 @@ def normalize_do_spaces_endpoint_url(endpoint_url: str, region: str, bucket_name
     return endpoint_with_scheme
 
 
-def _constant_path(name: str) -> Optional[Path]:
-    value = getattr(constants, name, None)
-    if not value:
-        return None
-    return Path(value)
-
-
-def _select_existing_source(*constant_names: str) -> Path:
-    candidates = [
-        candidate
-        for candidate in (_constant_path(name) for name in constant_names)
-        if candidate is not None
-    ]
-    for candidate in candidates:
-        if candidate.exists():
-            return candidate
-    if not candidates:
-        raise ValueError(f"No constants configured for source names: {constant_names}")
-    return candidates[0]
-
-
 def _order_sources_for_mode(execution_mode: str) -> Tuple[Path, Path]:
     mode = (execution_mode or "").strip().lower()
     if mode == constants.MOCK:
         return (
-            _select_existing_source("ORDER_MOCK_LOG", "ORDER_LOG"),
-            _select_existing_source("ORDER_MOCK_EVENT_LOG", "ORDER_EVENT_LOG"),
+            Path(constants.ORDER_MOCK_LOG),
+            Path(constants.ORDER_MOCK_EVENT_LOG),
         )
     if mode == constants.SANDBOX:
         return (
-            _select_existing_source("ORDER_SANDBOX_LOG"),
-            _select_existing_source("ORDER_SANDBOX_EVENT_LOG"),
+            Path(constants.ORDER_SANDBOX_LOG),
+            Path(constants.ORDER_SANDBOX_EVENT_LOG),
         )
     if mode == constants.PRODUCTION:
         return (
-            _select_existing_source("ORDER_PROD_LOG"),
-            _select_existing_source("ORDER_PROD_EVENT_LOG"),
+            Path(constants.ORDER_PROD_LOG),
+            Path(constants.ORDER_PROD_EVENT_LOG),
         )
     raise ValueError(
         f"Unsupported execution mode for S3 upload: {execution_mode!r}. "
@@ -133,15 +114,6 @@ def _candidate_log_paths(bot_name: str, log_file_name: str) -> Iterable[Path]:
         if candidate not in seen:
             seen.add(candidate)
             yield candidate
-
-
-def _first_existing(paths: Iterable[Path], description: str) -> Path:
-    candidates = list(paths)
-    for candidate in candidates:
-        if candidate.exists():
-            return candidate
-    checked = ", ".join(str(candidate) for candidate in candidates)
-    raise FileNotFoundError(f"{description} not found. Checked: {checked}")
 
 
 def _upload_key(bucket_name: str, *parts: str) -> str:
@@ -176,38 +148,25 @@ def upload_trade_artifacts_to_s3(bot_name: str, execution_mode: str) -> None:
         raise RuntimeError(f"Missing S3 configuration: {', '.join(missing)}")
 
     now = datetime.now(IST)
-    date_folder = now.strftime("%d%m%y")
-    log_file_name = f"{now.strftime('%d-%m-%y')}_{bot_name}.log"
     upload_prefix = normalize_s3_key(bucket_name, raw_prefix).strip("/")
     endpoint_url = normalize_do_spaces_endpoint_url(endpoint_url, region, bucket_name)
     mode = (execution_mode or "").strip().lower()
 
-    log_path = _first_existing(
-        _candidate_log_paths(bot_name, log_file_name),
-        "today's log file",
-    )
-    ledger_path, events_path = _order_sources_for_mode(mode)
-
-    uploads: List[Tuple[Path, str]] = [
-        (
-            log_path,
-            _upload_key(bucket_name, upload_prefix, bot_name, date_folder, log_file_name),
-        ),
-        (
-            ledger_path,
-            _upload_key(bucket_name, upload_prefix, bot_name, date_folder, mode, "orders", "order_log.csv"),
-        ),
-        (
-            events_path,
-            _upload_key(bucket_name, upload_prefix, bot_name, date_folder, mode, "orders", "order_events.json"),
-        ),
-    ]
-
-    missing_sources = [str(local_path) for local_path, _ in uploads if not local_path.exists()]
-    if missing_sources:
-        raise FileNotFoundError(
-            "S3 upload source file(s) not found: " + ", ".join(missing_sources)
-        )
+    ledger_path, _ = _order_sources_for_mode(mode)
+    mode_dir = ledger_path.parent.parent
+    if mode_dir.name not in {"mock", "sandbox", "prod"} or mode_dir.parent.name != "execution_results":
+        raise ValueError(f"Expected dated artifact directory, got {ledger_path.parent}")
+    pnl_constant = {
+        constants.MOCK: "DAILY_MOCK_PNL",
+        constants.SANDBOX: "DAILY_SANDBOX_PNL",
+        constants.PRODUCTION: "DAILY_PROD_PNL",
+    }[mode]
+    accounting_path = Path(getattr(constants, pnl_constant))
+    migrate_legacy_ledgers(str(ledger_path), str(accounting_path))
+    custom_sources = _custom_artifact_sources(mode)
+    cleanup = cleanup_allowed(now) and not custom_sources
+    if custom_sources:
+        logger.warning("Custom artifact paths configured; uploading copies and retaining local files")
 
     import boto3
     from botocore.config import Config
@@ -222,11 +181,83 @@ def upload_trade_artifacts_to_s3(bot_name: str, execution_mode: str) -> None:
         s3_client_kwargs["config"] = Config(s3={"addressing_style": "virtual"})
 
     s3 = boto3.client("s3", **s3_client_kwargs)
-    for local_path, destination_key in uploads:
-        file_size = local_path.stat().st_size
-        logger.info(
-            f"Uploading {local_path} ({file_size} bytes) to "
-            f"s3://{bucket_name}/{destination_key} via {endpoint_url}"
+    # Retry all retained days for this mode, using their original trading dates.
+    candidates = []
+    if mode_dir.exists():
+        for directory in sorted(mode_dir.iterdir()):
+            if not directory.is_dir():
+                continue
+            try:
+                day = date.fromisoformat(directory.name)
+            except ValueError:
+                continue
+            if day <= now.date():
+                candidates.append((directory, day, True))
+        if any(path.is_file() for path in mode_dir.iterdir()):
+            candidates.append((mode_dir, None, False))
+
+    if not candidates and custom_sources:
+        # Custom-only installations may have no managed daily files at all.
+        with tempfile.TemporaryDirectory(prefix="bot-custom-archive-") as temporary:
+            archive_directory(
+                s3, bucket_name,
+                _upload_key(bucket_name, upload_prefix, bot_name, now.strftime("%d%m%y"), mode),
+                Path(temporary), extras=custom_sources, cleanup=False,
+            )
+
+    for directory, day, recursive in candidates:
+        extras = dict(custom_sources)
+        if accounting_path.exists():
+            extras["accounting/daily_pnl.csv"] = accounting_path
+        log_day = day or now.date()
+        log_name = f"{log_day.strftime('%d-%m-%y')}_{bot_name}.log"
+        log_path = next((path for path in _candidate_log_paths(bot_name, log_name) if path.is_file()), None)
+        if log_path:
+            extras[f"logs/{log_name}"] = log_path
+        date_folder = day.strftime("%d%m%y") if day else "legacy"
+        archive_directory(
+            s3, bucket_name,
+            _upload_key(bucket_name, upload_prefix, bot_name, date_folder, mode),
+            directory, extras=extras, cleanup=cleanup, recursive=recursive,
         )
-        s3.upload_file(str(local_path), bucket_name, destination_key)
-        logger.info(f"Uploaded file to s3://{bucket_name}/{destination_key}")
+
+
+def _custom_artifact_sources(mode: str) -> dict[str, Path]:
+    """Preserve explicitly configured paths; only managed daily folders are cleaned."""
+    from utils.bot_utils import load_param_data
+
+    params = load_param_data(mode) or {}
+    cfg = next((params[key] for key in (
+        "oms", "ordersystem", "order_system", "order-system", "order-system-client"
+    ) if isinstance(params.get(key), dict)), {})
+    definitions = (
+        ("order_log.csv", ("orders_csv", "orders-csv", "local_orders_csv", "local-orders-csv"),
+         ("ORDERSYSTEM_ORDERS_CSV", "ORDER_SYSTEM_ORDERS_CSV", "OMS_ORDERS_CSV")),
+        ("daily_pnl.csv", ("daily_csv", "daily-csv", "daily_pnl_csv", "daily-pnl-csv", "local_daily_csv", "local-daily-csv"),
+         ("ORDERSYSTEM_DAILY_PNL_CSV", "ORDER_SYSTEM_DAILY_PNL_CSV", "OMS_DAILY_PNL_CSV")),
+        ("order_event_log.json", ("events_json", "events-json", "events_json_path", "events-json-path", "order_event_log", "order-event-log", "local_events_json", "local-events-json"),
+         ("ORDERSYSTEM_EVENTS_JSON", "ORDER_SYSTEM_EVENTS_JSON", "OMS_EVENTS_JSON")),
+    )
+    sources = {}
+    for name, keys, env_keys in definitions:
+        value = next((cfg[key] for key in keys if cfg.get(key)), None)
+        value = value or next((os.environ[key] for key in env_keys if os.getenv(key, "").strip()), None)
+        if value:
+            path = Path(value)
+            if not path.is_file():
+                raise FileNotFoundError(f"Configured artifact source not found: {path}")
+            sources[f"custom/{name}"] = path
+    return sources
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Retry artifact archival while the bot is stopped.")
+    parser.add_argument("--bot-name", required=True)
+    parser.add_argument("--mode", required=True, choices=constants.TRADING_EXECUTION_MODES)
+    args = parser.parse_args()
+    ledger, _ = _order_sources_for_mode(args.mode)
+    files_dir = ledger.parent.parent.parent.parent
+    with artifact_run_lock(files_dir):
+        upload_trade_artifacts_to_s3(args.bot_name, args.mode)

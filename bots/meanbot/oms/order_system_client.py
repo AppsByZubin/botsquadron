@@ -25,6 +25,7 @@ from requests import Response
 from zoneinfo import ZoneInfo
 
 from common import constants
+from common.artifacts import migrate_legacy_ledgers
 from logger import create_logger
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -164,7 +165,7 @@ class OrderSystemClient:
         self.orders_csv = str(
             orders_csv
             or _first_env("ORDERSYSTEM_ORDERS_CSV", "ORDER_SYSTEM_ORDERS_CSV", "OMS_ORDERS_CSV")
-            or _default_orders_csv(self.mode)
+            or _default_orders_csv(self.mode, self.curr_date)
         )
         self.daily_csv = str(
             daily_csv
@@ -174,7 +175,7 @@ class OrderSystemClient:
         self.events_json_path = str(
             events_json_path
             or _first_env("ORDERSYSTEM_EVENTS_JSON", "ORDER_SYSTEM_EVENTS_JSON", "OMS_EVENTS_JSON")
-            or _default_events_json(self.mode)
+            or _default_events_json(self.mode, self.curr_date)
         )
         self.session = session or requests.Session()
         self.modify_min_interval_sec = max(
@@ -933,6 +934,7 @@ class OrderSystemClient:
             return response
 
     def _init_local_ledger(self) -> None:
+        migrate_legacy_ledgers(self.orders_csv, self.daily_csv)
         _ensure_csv_file(self.orders_csv, ORDER_COLUMNS)
         _ensure_csv_file(self.daily_csv, DAILY_PNL_COLUMNS)
         _ensure_json_file(self.events_json_path, {"events": []})
@@ -1708,7 +1710,7 @@ def _clean_base_url(value: str) -> str:
     return value.rstrip("/")
 
 
-def _default_orders_csv(mode: str) -> str:
+def _default_orders_csv(mode: str, curr_date: Optional[str] = None) -> str:
     mode_key = str(mode or constants.MOCK).strip().lower()
     order_log_by_mode = {
         constants.PRODUCTION: constants.ORDER_PROD_LOG,
@@ -1716,7 +1718,10 @@ def _default_orders_csv(mode: str) -> str:
         constants.MOCK: constants.ORDER_MOCK_LOG,
     }
     if mode_key in order_log_by_mode:
-        return order_log_by_mode[mode_key]
+        path = Path(order_log_by_mode[mode_key])
+        if curr_date:
+            return str(path.parent.parent / _curr_date_iso(curr_date) / path.name)
+        return str(path)
     return str(Path(constants.MEANBOT_EXECUTION_RESULTS_DIR) / (mode_key or constants.MOCK) / "order_log.csv")
 
 
@@ -1732,7 +1737,7 @@ def _default_daily_csv(mode: str) -> str:
     return str(Path(constants.MEANBOT_EXECUTION_RESULTS_DIR) / (mode_key or constants.MOCK) / "daily_pnl.csv")
 
 
-def _default_events_json(mode: str) -> str:
+def _default_events_json(mode: str, curr_date: Optional[str] = None) -> str:
     mode_key = str(mode or constants.MOCK).strip().lower()
     events_by_mode = {
         constants.PRODUCTION: constants.ORDER_PROD_EVENT_LOG,
@@ -1740,7 +1745,10 @@ def _default_events_json(mode: str) -> str:
         constants.MOCK: constants.ORDER_MOCK_EVENT_LOG,
     }
     if mode_key in events_by_mode:
-        return events_by_mode[mode_key]
+        path = Path(events_by_mode[mode_key])
+        if curr_date:
+            return str(path.parent.parent / _curr_date_iso(curr_date) / path.name)
+        return str(path)
     return str(Path(constants.MEANBOT_EXECUTION_RESULTS_DIR) / (mode_key or constants.MOCK) / "order_event_log.json")
 
 
@@ -1756,6 +1764,7 @@ def initialize_local_ledgers_for_modes(modes: Optional[List[str]] = None) -> Dic
             "daily_csv": _default_daily_csv(mode),
             "events_json": _default_events_json(mode),
         }
+        migrate_legacy_ledgers(paths["orders_csv"], paths["daily_csv"])
         _ensure_csv_file(paths["orders_csv"], ORDER_COLUMNS)
         _ensure_csv_file(paths["daily_csv"], DAILY_PNL_COLUMNS)
         _ensure_json_file(paths["events_json"], {"events": []})

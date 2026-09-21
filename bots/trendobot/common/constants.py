@@ -11,6 +11,9 @@
 """
 
 import os
+from common.artifacts import execution_day
+
+EXECUTION_DATE = execution_day("trendobot")
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parents[1]
@@ -69,23 +72,23 @@ GAP_UP = "GAP_UP"
 GAP_DOWN = "GAP_DOWN"
 FLAT = "FLAT"
 
-PROD_FOLDER_PATH = os.path.join(TRENDOBOT_EXECUTION_RESULTS_DIR, "prod")
+PROD_FOLDER_PATH = os.path.join(TRENDOBOT_EXECUTION_RESULTS_DIR, "prod", EXECUTION_DATE)
 ORDER_PROD_EVENT_LOG = os.path.join(PROD_FOLDER_PATH, "order_event_log.json")
 ORDER_PROD_LOG = os.path.join(PROD_FOLDER_PATH, "order_log.csv")
 ORDER_PROD_STATUS_LOG = os.path.join(PROD_FOLDER_PATH, "order_status_log.csv")
-DAILY_PROD_PNL = os.path.join(PROD_FOLDER_PATH, "daily_pnl.csv")
+DAILY_PROD_PNL = os.path.join(TRENDOBOT_FILES_DIR, "state", "prod", "daily_pnl.csv")
 
-MOCK_FOLDER_PATH = os.path.join(TRENDOBOT_EXECUTION_RESULTS_DIR, "mock")
+MOCK_FOLDER_PATH = os.path.join(TRENDOBOT_EXECUTION_RESULTS_DIR, "mock", EXECUTION_DATE)
 ORDER_MOCK_EVENT_LOG = os.path.join(MOCK_FOLDER_PATH, "order_event_log.json")
 ORDER_MOCK_LOG = os.path.join(MOCK_FOLDER_PATH, "order_log.csv")
 ORDER_MOCK_STATUS_LOG = os.path.join(MOCK_FOLDER_PATH, "order_status_log.csv")
-DAILY_MOCK_PNL = os.path.join(MOCK_FOLDER_PATH, "daily_pnl.csv")
+DAILY_MOCK_PNL = os.path.join(TRENDOBOT_FILES_DIR, "state", "mock", "daily_pnl.csv")
 
-SANDBOX_FOLDER_PATH = os.path.join(TRENDOBOT_EXECUTION_RESULTS_DIR, "sandbox")
+SANDBOX_FOLDER_PATH = os.path.join(TRENDOBOT_EXECUTION_RESULTS_DIR, "sandbox", EXECUTION_DATE)
 ORDER_SANDBOX_EVENT_LOG = os.path.join(SANDBOX_FOLDER_PATH, "order_event_log.json")
 ORDER_SANDBOX_LOG = os.path.join(SANDBOX_FOLDER_PATH, "order_log.csv")
 ORDER_SANDBOX_STATUS_LOG = os.path.join(SANDBOX_FOLDER_PATH, "order_status_log.csv")
-DAILY_SANDBOX_PNL = os.path.join(SANDBOX_FOLDER_PATH, "daily_pnl.csv")
+DAILY_SANDBOX_PNL = os.path.join(TRENDOBOT_FILES_DIR, "state", "sandbox", "daily_pnl.csv")
 
 ORDER_EVENT_LOG = os.path.join(TRENDOBOT_FILES_DIR, "order_event_log.json")
 ORDER_LOG = os.path.join(TRENDOBOT_FILES_DIR, "order_log.csv")

@@ -55,8 +55,11 @@ if __name__ == "__main__":
     from index.orchestrator import orchestrator
     from utils.s3_upload_utils import upload_trade_artifacts_to_s3
 
-    did_run = orchestrator(args.instruments, args.strategy, mode=mode)
-    if did_run is False:
-        logger.info("Skipping S3 upload because strategy execution was skipped.")
-    else:
-        upload_trade_artifacts_to_s3(bot_name="titanbot", execution_mode=mode)
+    from common.artifacts import artifact_run_lock
+
+    with artifact_run_lock(constants.TITANBOT_FILES_DIR):
+        did_run = orchestrator(args.instruments, args.strategy, mode=mode)
+        if did_run is False:
+            logger.info("Skipping S3 upload because strategy execution was skipped.")
+        else:
+            upload_trade_artifacts_to_s3(bot_name="titanbot", execution_mode=mode)
