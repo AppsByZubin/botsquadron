@@ -229,7 +229,7 @@ def setup_uploader(bot, monkeypatch, s3, hour=16):
     monkeypatch.setitem(sys.modules, "boto3", boto3)
     monkeypatch.setitem(sys.modules, "botocore", ModuleType("botocore"))
     monkeypatch.setitem(sys.modules, "botocore.config", config)
-    for name in ("DO_S3_ENDPOINT_URL", "DO_S3_REGION", "DO_S3_ACCESS_KEY_ID", "DO_S3_SECRET_ACCESS_KEY", "DO_S3_BUCKET_NAME"):
+    for name in ("CLOUDPE_S3_ENDPOINT_URL", "CLOUDPE_S3_REGION", "CLOUDPE_S3_ACCESS_KEY_ID", "CLOUDPE_S3_SECRET_ACCESS_KEY", "CLOUDPE_S3_BUCKET_NAME"):
         monkeypatch.setenv(name, "test")
     monkeypatch.setattr(bot.upload, "datetime", SimpleNamespace(now=lambda tz: datetime(2026, 9, 18, hour, 0, tzinfo=IST)))
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Utilities for uploading end-of-day trading artifacts to DigitalOcean Spaces.
+Utilities for uploading end-of-day trading artifacts to CloudPE S3.
 """
 
 from __future__ import annotations
@@ -37,11 +37,11 @@ def normalize_s3_key(bucket_name: str, key: str) -> str:
     return normalized_key
 
 
-def normalize_do_spaces_endpoint_url(endpoint_url: str, region: str, bucket_name: str) -> str:
+def normalize_endpoint_url(endpoint_url: str, bucket_name: str) -> str:
     """
-    Boto3 expects a DigitalOcean Spaces region endpoint such as
-    https://sgp1.digitaloceanspaces.com. A bucket-scoped endpoint causes boto3
-    to compose invalid upload URLs once the Bucket argument is also supplied.
+    Boto3 expects a service endpoint such as https://s3.in-west2.purestore.io.
+    A bucket-scoped endpoint causes boto3 to compose invalid upload URLs once
+    the Bucket argument is also supplied.
     """
     endpoint_url = (endpoint_url or "").strip()
     if not endpoint_url:
@@ -51,15 +51,14 @@ def normalize_do_spaces_endpoint_url(endpoint_url: str, region: str, bucket_name
         endpoint_url if "://" in endpoint_url else f"https://{endpoint_url}"
     )
     parsed = urlparse(endpoint_with_scheme)
-    expected_host = f"{region}.digitaloceanspaces.com" if region else ""
-    bucket_host_suffix = f".{expected_host}" if expected_host else ""
+    bucket_host_prefix = f"{bucket_name}." if bucket_name else ""
 
-    if parsed.netloc and bucket_host_suffix and parsed.netloc.endswith(bucket_host_suffix):
-        bucket_from_endpoint = parsed.netloc[: -len(bucket_host_suffix)]
-        if bucket_from_endpoint:
+    if bucket_host_prefix and parsed.netloc.startswith(bucket_host_prefix):
+        service_host = parsed.netloc[len(bucket_host_prefix):]
+        if service_host:
             normalized = urlunparse(
                 parsed._replace(
-                    netloc=expected_host,
+                    netloc=service_host,
                     path="",
                     params="",
                     query="",
@@ -67,8 +66,8 @@ def normalize_do_spaces_endpoint_url(endpoint_url: str, region: str, bucket_name
                 )
             )
             logger.warning(
-                f"DO_S3_ENDPOINT_URL includes bucket host '{parsed.netloc}'. "
-                f"Using region endpoint '{normalized}' for bucket '{bucket_name}'."
+                f"CLOUDPE_S3_ENDPOINT_URL includes bucket host '{parsed.netloc}'. "
+                f"Using service endpoint '{normalized}' for bucket '{bucket_name}'."
             )
             return normalized
 
@@ -122,25 +121,25 @@ def _upload_key(bucket_name: str, *parts: str) -> str:
 
 
 def upload_trade_artifacts_to_s3(bot_name: str, execution_mode: str) -> None:
-    endpoint_url = os.getenv(constants.DO_S3_ENDPOINT_URL, "").strip()
-    region = os.getenv(constants.DO_S3_REGION, "").strip()
-    access_key_id = os.getenv(constants.DO_S3_ACCESS_KEY_ID, "").strip()
-    secret_access_key = os.getenv(constants.DO_S3_SECRET_ACCESS_KEY, "").strip()
-    configured_bucket_name = os.getenv(constants.DO_S3_BUCKET_NAME, "").strip()
-    bucket_name = configured_bucket_name or constants.DO_S3_REQUIRED_BUCKET_NAME
+    endpoint_url = os.getenv(constants.CLOUDPE_S3_ENDPOINT_URL, "").strip()
+    region = os.getenv(constants.CLOUDPE_S3_REGION, "").strip()
+    access_key_id = os.getenv(constants.CLOUDPE_S3_ACCESS_KEY_ID, "").strip()
+    secret_access_key = os.getenv(constants.CLOUDPE_S3_SECRET_ACCESS_KEY, "").strip()
+    configured_bucket_name = os.getenv(constants.CLOUDPE_S3_BUCKET_NAME, "").strip()
+    bucket_name = configured_bucket_name or constants.CLOUDPE_S3_REQUIRED_BUCKET_NAME
     raw_prefix = os.getenv(
-        constants.DO_S3_SPACES_PREFIX,
-        constants.DO_S3_DEFAULT_PREFIX,
+        constants.CLOUDPE_S3_PREFIX,
+        constants.CLOUDPE_S3_DEFAULT_PREFIX,
     ).strip()
 
     missing = [
         name
         for name, value in (
-            (constants.DO_S3_ENDPOINT_URL, endpoint_url),
-            (constants.DO_S3_REGION, region),
-            (constants.DO_S3_ACCESS_KEY_ID, access_key_id),
-            (constants.DO_S3_SECRET_ACCESS_KEY, secret_access_key),
-            (constants.DO_S3_BUCKET_NAME, bucket_name),
+            (constants.CLOUDPE_S3_ENDPOINT_URL, endpoint_url),
+            (constants.CLOUDPE_S3_REGION, region),
+            (constants.CLOUDPE_S3_ACCESS_KEY_ID, access_key_id),
+            (constants.CLOUDPE_S3_SECRET_ACCESS_KEY, secret_access_key),
+            (constants.CLOUDPE_S3_BUCKET_NAME, bucket_name),
         )
         if not value
     ]
@@ -149,7 +148,7 @@ def upload_trade_artifacts_to_s3(bot_name: str, execution_mode: str) -> None:
 
     now = datetime.now(IST)
     upload_prefix = normalize_s3_key(bucket_name, raw_prefix).strip("/")
-    endpoint_url = normalize_do_spaces_endpoint_url(endpoint_url, region, bucket_name)
+    endpoint_url = normalize_endpoint_url(endpoint_url, bucket_name)
     mode = (execution_mode or "").strip().lower()
 
     ledger_path, _ = _order_sources_for_mode(mode)
@@ -177,8 +176,9 @@ def upload_trade_artifacts_to_s3(bot_name: str, execution_mode: str) -> None:
         "aws_access_key_id": access_key_id,
         "aws_secret_access_key": secret_access_key,
     }
-    if "digitaloceanspaces.com" in endpoint_url:
-        s3_client_kwargs["config"] = Config(s3={"addressing_style": "virtual"})
+    # CloudPE S3 serves buckets path-style; DigitalOcean Spaces needs virtual hosts.
+    addressing_style = "virtual" if "digitaloceanspaces.com" in endpoint_url else "path"
+    s3_client_kwargs["config"] = Config(s3={"addressing_style": addressing_style})
 
     s3 = boto3.client("s3", **s3_client_kwargs)
     # Retry all retained days for this mode, using their original trading dates.
