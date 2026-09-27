@@ -33,7 +33,6 @@ def execution_day(bot_name: str) -> str:
         raise ValueError(f"Invalid {bot_name.upper()}_CURR_DATE: {configured!r}")
     return datetime.now(IST).date().isoformat()
 
-
 def trade_day(row: dict) -> str | None:
     raw = str(row.get("timestamp") or row.get("entry_time") or "").strip()
     try:
