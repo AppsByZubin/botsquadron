@@ -291,14 +291,35 @@ It also retries retained earlier days and archives legacy flat files. Each S3
 snapshot has a manifest containing file sizes and SHA-256 hashes:
 
 ```text
-<prefix>/<bot>/<DDMMYY>/<execution-mode>/snapshots/<manifest-sha256>/
+trades/<bot>/<YYYYDDMM>/<execution-mode>/snapshots/<manifest-sha256>/
   execution_results/...
   accounting/daily_pnl.csv
   logs/...
   manifest.json
 ```
 
-Legacy flat files use `legacy` instead of `DDMMYY`. Snapshot keys prevent a
+Daily objects are also published directly under
+`trades/<bot>/<YYYYDDMM>/<execution-mode>/`, including `orders/order_log.csv`
+and `orders/order_events.json`. For example, September 28, 2026 uses
+`trades/titanbot/20262809/mock/orders/order_events.json`. Direct paths contain
+the latest uploaded batch; immutable snapshots retain previous versions.
+Both copies are verified before local cleanup.
+
+Uploads read only `CLOUDPE_S3_ENDPOINT_URL`, `CLOUDPE_S3_REGION`,
+`CLOUDPE_S3_ACCESS_KEY_ID`, `CLOUDPE_S3_SECRET_ACCESS_KEY`, and
+`CLOUDPE_S3_BUCKET_NAME` (default `index-bucket`). The CloudPE service endpoint
+is `https://s3.in-west2.purestore.io`, region `in-west2`, with path-style bucket
+addressing. DigitalOcean endpoints are rejected. Set `CLOUDPE_S3_PREFIX=trades`;
+the former `index-bucket-holder/trades` prefix is normalized to `trades` for
+older deployments. Other explicit custom prefixes remain supported.
+
+The `botyard` Helm chart supplies the endpoint, region, bucket and prefix.
+CloudPE credentials must be available in the Secret imported by the bot pods;
+`DO_S3_*` credentials are not used. The botyard script
+`scripts/add_cloudpe_s3_secrets.sh` can provision these credentials separately.
+Deploy the updated chart and bot images together.
+
+Legacy flat files use `legacy` instead of `YYYYDDMM`. Snapshot keys prevent a
 later empty run from overwriting an earlier archive. Every uploaded object,
 including the manifest, is downloaded and its SHA-256 checked before cleanup;
 the S3 credentials need both upload and read access.

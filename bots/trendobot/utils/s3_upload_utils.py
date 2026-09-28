@@ -74,6 +74,24 @@ def normalize_endpoint_url(endpoint_url: str, bucket_name: str) -> str:
     return endpoint_with_scheme
 
 
+def cloudpe_endpoint_url(endpoint_url: str, bucket_name: str) -> str:
+    endpoint = normalize_endpoint_url(endpoint_url, bucket_name)
+    host = (urlparse(endpoint).hostname or "").lower().rstrip(".")
+    if host == "digitaloceanspaces.com" or host.endswith(".digitaloceanspaces.com"):
+        raise ValueError(
+            "CLOUDPE_S3_ENDPOINT_URL points to DigitalOcean Spaces. "
+            "Configure the CloudPE service endpoint and matching CLOUDPE_S3_* credentials."
+        )
+    return endpoint
+
+
+def normalize_upload_prefix(bucket_name: str, prefix: str) -> str:
+    prefix = normalize_s3_key(bucket_name, prefix).strip("/")
+    if not prefix or prefix == "index-bucket-holder/trades":
+        return constants.CLOUDPE_S3_DEFAULT_PREFIX
+    return prefix
+
+
 def _order_sources_for_mode(execution_mode: str) -> Tuple[Path, Path]:
     mode = (execution_mode or "").strip().lower()
     if mode == constants.MOCK:
@@ -147,8 +165,8 @@ def upload_trade_artifacts_to_s3(bot_name: str, execution_mode: str) -> None:
         raise RuntimeError(f"Missing S3 configuration: {', '.join(missing)}")
 
     now = datetime.now(IST)
-    upload_prefix = normalize_s3_key(bucket_name, raw_prefix).strip("/")
-    endpoint_url = normalize_endpoint_url(endpoint_url, bucket_name)
+    upload_prefix = normalize_upload_prefix(bucket_name, raw_prefix)
+    endpoint_url = cloudpe_endpoint_url(endpoint_url, bucket_name)
     mode = (execution_mode or "").strip().lower()
 
     ledger_path, _ = _order_sources_for_mode(mode)
@@ -176,10 +194,10 @@ def upload_trade_artifacts_to_s3(bot_name: str, execution_mode: str) -> None:
         "aws_access_key_id": access_key_id,
         "aws_secret_access_key": secret_access_key,
     }
-    # CloudPE S3 serves buckets path-style; DigitalOcean Spaces needs virtual hosts.
-    addressing_style = "virtual" if "digitaloceanspaces.com" in endpoint_url else "path"
-    s3_client_kwargs["config"] = Config(s3={"addressing_style": addressing_style})
+    s3_client_kwargs["config"] = Config(s3={"addressing_style": "path"})
 
+    logger.info("Archiving %s %s artifacts to s3://%s/%s via CloudPE endpoint %s",
+                bot_name, mode, bucket_name, upload_prefix, endpoint_url)
     s3 = boto3.client("s3", **s3_client_kwargs)
     # Retry all retained days for this mode, using their original trading dates.
     candidates = []
@@ -201,7 +219,7 @@ def upload_trade_artifacts_to_s3(bot_name: str, execution_mode: str) -> None:
         with tempfile.TemporaryDirectory(prefix="bot-custom-archive-") as temporary:
             archive_directory(
                 s3, bucket_name,
-                _upload_key(bucket_name, upload_prefix, bot_name, now.strftime("%d%m%y"), mode),
+                _upload_key(bucket_name, upload_prefix, bot_name, now.strftime("%Y%d%m"), mode),
                 Path(temporary), extras=custom_sources, cleanup=False,
             )
 
@@ -214,7 +232,7 @@ def upload_trade_artifacts_to_s3(bot_name: str, execution_mode: str) -> None:
         log_path = next((path for path in _candidate_log_paths(bot_name, log_name) if path.is_file()), None)
         if log_path:
             extras[f"logs/{log_name}"] = log_path
-        date_folder = day.strftime("%d%m%y") if day else "legacy"
+        date_folder = day.strftime("%Y%d%m") if day else "legacy"
         archive_directory(
             s3, bucket_name,
             _upload_key(bucket_name, upload_prefix, bot_name, date_folder, mode),

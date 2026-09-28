@@ -109,11 +109,11 @@ def test_verified_batch_cleanup_preserves_accounting_and_other_modes(bot):
     }
 
 
-@pytest.mark.parametrize("failure", ["partial_upload", "manifest_upload", "checksum"])
+@pytest.mark.parametrize("failure", ["partial_upload", "daily_path_upload", "manifest_upload", "checksum"])
 def test_upload_failure_retains_entire_batch_and_retry_works(bot, failure):
     directory = artifact_folder(bot)
     before = {p.relative_to(directory): p.read_bytes() for p in directory.rglob("*") if p.is_file()}
-    s3 = FakeS3(fail_at={"partial_upload": 2, "manifest_upload": 4}.get(failure),
+    s3 = FakeS3(fail_at={"partial_upload": 2, "daily_path_upload": 4, "manifest_upload": 7}.get(failure),
                 corrupt=failure == "checksum")
     with pytest.raises(RuntimeError):
         bot.artifacts.archive_directory(s3, "bucket", "archive", directory)
@@ -223,7 +223,11 @@ def test_runtime_and_archiver_cannot_share_active_files(bot, tmp_path):
 
 def setup_uploader(bot, monkeypatch, s3, hour=16):
     boto3 = ModuleType("boto3")
-    boto3.client = lambda *a, **kw: s3
+    s3.client_calls = []
+    def client(*args, **kwargs):
+        s3.client_calls.append((args, kwargs))
+        return s3
+    boto3.client = client
     config = ModuleType("botocore.config")
     config.Config = lambda **kw: kw
     monkeypatch.setitem(sys.modules, "boto3", boto3)
@@ -231,6 +235,9 @@ def setup_uploader(bot, monkeypatch, s3, hour=16):
     monkeypatch.setitem(sys.modules, "botocore.config", config)
     for name in ("CLOUDPE_S3_ENDPOINT_URL", "CLOUDPE_S3_REGION", "CLOUDPE_S3_ACCESS_KEY_ID", "CLOUDPE_S3_SECRET_ACCESS_KEY", "CLOUDPE_S3_BUCKET_NAME"):
         monkeypatch.setenv(name, "test")
+    monkeypatch.setenv("CLOUDPE_S3_ENDPOINT_URL", "https://s3.in-west2.purestore.io")
+    monkeypatch.setenv("CLOUDPE_S3_REGION", "in-west2")
+    monkeypatch.delenv("CLOUDPE_S3_PREFIX", raising=False)
     monkeypatch.setattr(bot.upload, "datetime", SimpleNamespace(now=lambda tz: datetime(2026, 9, 18, hour, 0, tzinfo=IST)))
 
 
@@ -254,8 +261,8 @@ def test_uploader_retries_prior_days_and_preserves_legacy_open_trades(bot, monke
     assert legacy.exists()
     assert future.exists()
     assert accounting.exists()
-    assert any("/170926/mock/" in key for key in s3.objects)
-    assert any("/180926/mock/" in key for key in s3.objects)
+    assert any("/20261709/mock/" in key for key in s3.objects)
+    assert any("/20261809/mock/" in key for key in s3.objects)
     assert any("/legacy/mock/" in key for key in s3.objects)
 
 
@@ -304,3 +311,72 @@ def test_live_oms_response_is_not_filtered_by_local_mock_rule(bot):
     old_trade = {"id": "live-trade", "status": "OPEN", "timestamp": "2026-09-07T10:00:00+05:30"}
     client._request = lambda *a, **kw: {"trades": [old_trade]}
     assert client.get_account_details()["trades"] == [old_trade]
+
+
+@pytest.mark.parametrize("mode", ["mock", "sandbox", "production"])
+@pytest.mark.parametrize("prefix", [None, "index-bucket-holder/trades", "/index-bucket/trades/"])
+def test_cloudpe_destination_and_exact_daily_order_keys(bot, monkeypatch, mode, prefix):
+    s3 = FakeS3()
+    setup_uploader(bot, monkeypatch, s3)
+    monkeypatch.setenv("CLOUDPE_S3_BUCKET_NAME", "index-bucket")
+    monkeypatch.setenv("CLOUDPE_S3_ENDPOINT_URL", "https://index-bucket.s3.in-west2.purestore.io")
+    # DigitalOcean credentials/settings must never override CloudPE configuration.
+    monkeypatch.setenv("DO_S3_ENDPOINT_URL", "https://sgp1.digitaloceanspaces.com")
+    if prefix is not None:
+        monkeypatch.setenv("CLOUDPE_S3_PREFIX", prefix)
+    monkeypatch.setattr(bot.upload, "datetime", SimpleNamespace(
+        now=lambda tz: datetime(2026, 9, 28, 16, 0, tzinfo=IST)))
+    monkeypatch.setattr(bot.upload, "_custom_artifact_sources", lambda mode: {})
+    ledger, _ = bot.upload._order_sources_for_mode(mode)
+    directory = ledger.parent.parent / "2026-09-28"
+    write_orders(directory / "order_log.csv", [{"id": "closed", "status": "MANUAL EXIT"}])
+    events = b'{"events": [{"id": "closed"}]}'
+    (directory / "order_event_log.json").write_bytes(events)
+    orders = (directory / "order_log.csv").read_bytes()
+
+    bot.upload.upload_trade_artifacts_to_s3(bot.name, mode)
+
+    root = f"trades/{bot.name}/20262809/{mode}"
+    assert s3.objects[f"{root}/orders/order_events.json"] == events
+    assert s3.objects[f"{root}/orders/order_log.csv"] == orders
+    assert all(key.startswith(root + "/") for key in s3.objects)
+    assert any("/snapshots/" in key for key in s3.objects)
+    assert not directory.exists()
+    [(args, kwargs)] = s3.client_calls
+    assert args == ("s3",)
+    assert kwargs["endpoint_url"] == "https://s3.in-west2.purestore.io"
+    assert kwargs["region_name"] == "in-west2"
+    assert kwargs["aws_access_key_id"] == "test"
+    assert kwargs["aws_secret_access_key"] == "test"
+    assert kwargs["config"] == {"s3": {"addressing_style": "path"}}
+
+
+@pytest.mark.parametrize("endpoint", [
+    "https://sgp1.digitaloceanspaces.com",
+    "index-bucket.sgp1.digitaloceanspaces.com",
+    "https://SGP1.DIGITALOCEANSPACES.COM./",
+])
+def test_digitalocean_endpoint_rejected_before_upload_or_cleanup(bot, monkeypatch, endpoint):
+    directory = artifact_folder(bot)
+    s3 = FakeS3()
+    setup_uploader(bot, monkeypatch, s3)
+    monkeypatch.setenv("CLOUDPE_S3_ENDPOINT_URL", endpoint)
+    with pytest.raises(ValueError, match="points to DigitalOcean"):
+        bot.upload.upload_trade_artifacts_to_s3(bot.name, "mock")
+    assert not s3.client_calls
+    assert not s3.uploads
+    assert (directory / "order_event_log.json").exists()
+
+
+def test_missing_cloudpe_credentials_do_not_fall_back_to_digitalocean(bot, monkeypatch):
+    directory = artifact_folder(bot)
+    s3 = FakeS3()
+    setup_uploader(bot, monkeypatch, s3)
+    monkeypatch.delenv("CLOUDPE_S3_ACCESS_KEY_ID")
+    monkeypatch.delenv("CLOUDPE_S3_SECRET_ACCESS_KEY")
+    monkeypatch.setenv("DO_S3_ACCESS_KEY_ID", "old-key")
+    monkeypatch.setenv("DO_S3_SECRET_ACCESS_KEY", "old-secret")
+    with pytest.raises(RuntimeError, match="Missing S3 configuration: CLOUDPE_S3_ACCESS_KEY_ID, CLOUDPE_S3_SECRET_ACCESS_KEY"):
+        bot.upload.upload_trade_artifacts_to_s3(bot.name, "mock")
+    assert not s3.client_calls
+    assert (directory / "order_event_log.json").exists()

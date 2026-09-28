@@ -181,6 +181,16 @@ def archive_directory(s3, bucket: str, prefix: str, directory: Path, *,
             key = f"{remote_root}/{name}"
             s3.upload_file(str(snapshot / name), bucket, key)
             _verify_remote(s3, bucket, key, info["size"], info["sha256"])
+        # Publish convenient daily paths as well as immutable recovery snapshots.
+        # Use the captured bytes and verify these uploads before local cleanup too.
+        order_names = {
+            "execution_results/order_log.csv": "orders/order_log.csv",
+            "execution_results/order_event_log.json": "orders/order_events.json",
+        }
+        for name, info in manifest.items():
+            key = f"{prefix.strip('/')}/{order_names.get(name, name)}"
+            s3.upload_file(str(snapshot / name), bucket, key)
+            _verify_remote(s3, bucket, key, info["size"], info["sha256"])
         manifest_path = snapshot / "manifest.json"
         manifest_path.write_bytes(manifest_bytes)
         key = f"{remote_root}/manifest.json"
