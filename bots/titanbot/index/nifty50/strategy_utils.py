@@ -34,7 +34,6 @@ def sma_crossover_strategy(feed, df, minutes_processed, ltt_dt, mock_order=None)
     Notes:
     - Apply sma crossover strategy using candles and greeks.
     """
-
     logger.info(f"Processing new minute: {ltt_dt}")
 
     df['sma_fast'] = ta.sma(df['close'], length=constants.SMA_SHORT)
