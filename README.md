@@ -291,7 +291,7 @@ It also retries retained earlier days and archives legacy flat files. Each S3
 snapshot has a manifest containing file sizes and SHA-256 hashes:
 
 ```text
-trades/<bot>/<YYYYDDMM>/<execution-mode>/snapshots/<manifest-sha256>/
+trades/<bot>/<YYYYMMDD>/<execution-mode>/snapshots/<manifest-sha256>/
   execution_results/...
   accounting/daily_pnl.csv
   logs/...
@@ -299,9 +299,9 @@ trades/<bot>/<YYYYDDMM>/<execution-mode>/snapshots/<manifest-sha256>/
 ```
 
 Daily objects are also published directly under
-`trades/<bot>/<YYYYDDMM>/<execution-mode>/`, including `orders/order_log.csv`
+`trades/<bot>/<YYYYMMDD>/<execution-mode>/`, including `orders/order_log.csv`
 and `orders/order_events.json`. For example, September 28, 2026 uses
-`trades/titanbot/20262809/mock/orders/order_events.json`. Direct paths contain
+`trades/titanbot/20260928/mock/orders/order_events.json`. Direct paths contain
 the latest uploaded batch; immutable snapshots retain previous versions.
 Both copies are verified before local cleanup.
 
@@ -319,7 +319,7 @@ CloudPE credentials must be available in the Secret imported by the bot pods;
 `scripts/add_cloudpe_s3_secrets.sh` can provision these credentials separately.
 Deploy the updated chart and bot images together.
 
-Legacy flat files use `legacy` instead of `YYYYDDMM`. Snapshot keys prevent a
+Legacy flat files use `legacy` instead of `YYYYMMDD`. Snapshot keys prevent a
 later empty run from overwriting an earlier archive. Every uploaded object,
 including the manifest, is downloaded and its SHA-256 checked before cleanup;
 the S3 credentials need both upload and read access.

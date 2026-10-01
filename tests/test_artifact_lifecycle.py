@@ -261,8 +261,8 @@ def test_uploader_retries_prior_days_and_preserves_legacy_open_trades(bot, monke
     assert legacy.exists()
     assert future.exists()
     assert accounting.exists()
-    assert any("/20261709/mock/" in key for key in s3.objects)
-    assert any("/20261809/mock/" in key for key in s3.objects)
+    assert any("/20260917/mock/" in key for key in s3.objects)
+    assert any("/20260918/mock/" in key for key in s3.objects)
     assert any("/legacy/mock/" in key for key in s3.objects)
 
 
@@ -278,7 +278,9 @@ def test_custom_paths_uploaded_and_retained(bot, monkeypatch, tmp_path, managed_
     assert custom.exists()
     if directory:
         assert directory.exists()
-    assert any(key.endswith("/custom/order_log.csv") for key in s3.objects)
+    root = f"trades/{bot.name}/20260918/mock"
+    assert s3.objects[f"{root}/custom/order_log.csv"] == custom.read_bytes()
+    assert all(key.startswith(root + "/") for key in s3.objects)
 
 
 def test_intraday_upload_does_not_delete_restart_state(bot, monkeypatch):
@@ -314,7 +316,7 @@ def test_live_oms_response_is_not_filtered_by_local_mock_rule(bot):
 
 
 @pytest.mark.parametrize("mode", ["mock", "sandbox", "production"])
-@pytest.mark.parametrize("prefix", [None, "index-bucket-holder/trades", "/index-bucket/trades/"])
+@pytest.mark.parametrize("prefix", [None, "index-bucket-holder/trades", "/index-bucket/trades/", "trades-staging"])
 def test_cloudpe_destination_and_exact_daily_order_keys(bot, monkeypatch, mode, prefix):
     s3 = FakeS3()
     setup_uploader(bot, monkeypatch, s3)
@@ -325,10 +327,10 @@ def test_cloudpe_destination_and_exact_daily_order_keys(bot, monkeypatch, mode, 
     if prefix is not None:
         monkeypatch.setenv("CLOUDPE_S3_PREFIX", prefix)
     monkeypatch.setattr(bot.upload, "datetime", SimpleNamespace(
-        now=lambda tz: datetime(2026, 9, 28, 16, 0, tzinfo=IST)))
+        now=lambda tz: datetime(2026, 10, 1, 16, 0, tzinfo=IST)))
     monkeypatch.setattr(bot.upload, "_custom_artifact_sources", lambda mode: {})
     ledger, _ = bot.upload._order_sources_for_mode(mode)
-    directory = ledger.parent.parent / "2026-09-28"
+    directory = ledger.parent.parent / "2026-10-01"
     write_orders(directory / "order_log.csv", [{"id": "closed", "status": "MANUAL EXIT"}])
     events = b'{"events": [{"id": "closed"}]}'
     (directory / "order_event_log.json").write_bytes(events)
@@ -336,7 +338,8 @@ def test_cloudpe_destination_and_exact_daily_order_keys(bot, monkeypatch, mode, 
 
     bot.upload.upload_trade_artifacts_to_s3(bot.name, mode)
 
-    root = f"trades/{bot.name}/20262809/{mode}"
+    expected_prefix = "trades-staging" if prefix == "trades-staging" else "trades"
+    root = f"{expected_prefix}/{bot.name}/20261001/{mode}"
     assert s3.objects[f"{root}/orders/order_events.json"] == events
     assert s3.objects[f"{root}/orders/order_log.csv"] == orders
     assert all(key.startswith(root + "/") for key in s3.objects)

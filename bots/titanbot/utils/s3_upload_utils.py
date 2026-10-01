@@ -219,7 +219,7 @@ def upload_trade_artifacts_to_s3(bot_name: str, execution_mode: str) -> None:
         with tempfile.TemporaryDirectory(prefix="bot-custom-archive-") as temporary:
             archive_directory(
                 s3, bucket_name,
-                _upload_key(bucket_name, upload_prefix, bot_name, now.strftime("%Y%d%m"), mode),
+                _upload_key(bucket_name, upload_prefix, bot_name, now.strftime("%Y%m%d"), mode),
                 Path(temporary), extras=custom_sources, cleanup=False,
             )
 
@@ -232,7 +232,7 @@ def upload_trade_artifacts_to_s3(bot_name: str, execution_mode: str) -> None:
         log_path = next((path for path in _candidate_log_paths(bot_name, log_name) if path.is_file()), None)
         if log_path:
             extras[f"logs/{log_name}"] = log_path
-        date_folder = day.strftime("%Y%d%m") if day else "legacy"
+        date_folder = day.strftime("%Y%m%d") if day else "legacy"
         archive_directory(
             s3, bucket_name,
             _upload_key(bucket_name, upload_prefix, bot_name, date_folder, mode),
