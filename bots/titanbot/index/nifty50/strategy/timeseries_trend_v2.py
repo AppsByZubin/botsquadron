@@ -440,6 +440,7 @@ class TimeseriesTrendV2Strategy(TimeseriesTrendStrategy):
             self._order_container.get("enable_longer_trail"),
             False,
         )
+        
         if longer_trail_was_enabled or self._longer_trail_condition_active():
             atr_mult = self._coerce_float(
                 self._strategy_params().get("long_atr_mult"),
