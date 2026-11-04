@@ -2142,7 +2142,7 @@ class BbVwapEmaStrategy:
                 f"OrderInfo TradeID: {trade_id}, Entry(PU): {entry_price:.2f}, Qty: {qty}, "
                 f"Target(PU): {target:.2f}, SL_trig(PU): {sl_trigger:.2f}, "
                 f"SL_lim(PU): {sl_limit:.2f}, TrailOn: {trailing_enabled}, TrailDist: {trail_points:.2f}, "
-                f"TrailStartAfterPts: {(entry_price + (entry_price * start_trail_after)):.2f} "
+                f"TrailStartAfterPts: {math.floor(entry_price + (entry_price * start_trail_after)):.2f} "
                 f"start_trail_after: {start_trail_after}, RiskMode: {risk_mode}, "
                 f"OptionATR: {option_atr}, VwapBandWidth: {vwap_band_width}, TrailingFactor: {trailing_factor}"
             )

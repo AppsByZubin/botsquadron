@@ -1074,7 +1074,7 @@ class FibEmaAtrVolStrategy:
             f"OrderInfo TradeID: {trade_id}, Entry(PU): {entry_price:.2f}, Qty: {qty}, "
             f"Target(PU): {target:.2f}, SL_trig(PU): {sl_trigger:.2f}, SL_lim(PU): {sl_limit:.2f}, "
             f"TrailOn: {trailing_enabled}, TrailDist: {trail_points:.2f}, "
-            f"TrailStartAfterPts: {(entry_price + (entry_price * start_trail_after)):.2f}, "
+            f"TrailStartAfterPts: {math.floor(entry_price + (entry_price * start_trail_after)):.2f}, "
             f"RiskMode: {risk_mode}, OptionATR: {option_atr}, "
             f"SignalContext: {self._order_container.get('signal_context')}"
         )

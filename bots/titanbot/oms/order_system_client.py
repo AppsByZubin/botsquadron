@@ -1548,7 +1548,7 @@ class OrderSystemClient:
             return None
 
         if side == constants.SELL:
-            start_price = entry - _start_after_points(entry, start_after)
+            start_price = _trail_start_price(entry, start_after, side)
             if not force and price > start_price:
                 return None
             if not force and trail_anchor > 0 and price > trail_anchor - trail_points:
@@ -1565,7 +1565,7 @@ class OrderSystemClient:
                 "next_trail_anchor": self._round_price(price - trail_points, "FLOOR"),
             }
 
-        start_price = entry + _start_after_points(entry, start_after)
+        start_price = _trail_start_price(entry, start_after, side)
         if not force and price < start_price:
             return None
         if not force and trail_anchor > 0 and price < trail_anchor + trail_points:
@@ -2164,6 +2164,18 @@ def _start_after_points(entry_price: float, start_after: float) -> float:
     if start_after <= 1:
         return entry_price * start_after
     return start_after
+
+
+def _trail_start_price(entry_price: float, start_after: float, side: str) -> float:
+    points = _start_after_points(entry_price, start_after)
+    if points <= 0:
+        return entry_price
+    # Round the trigger to a whole rupee toward entry, but never to entry itself.
+    if side == constants.SELL:
+        whole = float(math.ceil(entry_price - points))
+        return whole if whole < entry_price else entry_price - points
+    whole = float(math.floor(entry_price + points))
+    return whole if whole > entry_price else entry_price + points
 
 
 def _positive_gap(value: float, fallback: float) -> float:

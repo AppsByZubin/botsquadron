@@ -1068,7 +1068,7 @@ class MeanRevVwapStrategy:
                 f"OrderInfo TradeID: {trade_id}, Entry(PU): {entry_price:.2f}, Qty: {qty}, "
                 f"Target(PU): {target:.2f}, SL_trig(PU): {sl_trigger:.2f}, "
                 f"SL_lim(PU): {sl_limit:.2f}, TrailOn: {trailing_enabled}, TrailDist: {trail_points:.2f}, "
-                f"TrailStartAfterPts: {(entry_price + (entry_price*start_trail_after)):.2f} start_trail_after: {start_trail_after}, "
+                f"TrailStartAfterPts: {math.floor(entry_price + (entry_price * start_trail_after)):.2f} start_trail_after: {start_trail_after}, "
                 f"RiskMode: {risk_mode}, OptionATR: {option_atr}"
             )
 
