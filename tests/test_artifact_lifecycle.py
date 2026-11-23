@@ -60,7 +60,7 @@ class FakeS3:
         self.corrupt = corrupt
         self.callback = callback
 
-    def upload_file(self, filename, bucket, key):
+    def upload_file(self, filename, bucket, key, Config=None):
         self.uploads.append(key)
         if len(self.uploads) == self.fail_at:
             raise RuntimeError("upload failed")
@@ -351,7 +351,11 @@ def test_cloudpe_destination_and_exact_daily_order_keys(bot, monkeypatch, mode, 
     assert kwargs["region_name"] == "in-west2"
     assert kwargs["aws_access_key_id"] == "test"
     assert kwargs["aws_secret_access_key"] == "test"
-    assert kwargs["config"] == {"s3": {"addressing_style": "path"}}
+    assert kwargs["config"] == {
+        "s3": {"addressing_style": "path"},
+        "request_checksum_calculation": "when_required",
+        "response_checksum_validation": "when_required",
+    }
 
 
 @pytest.mark.parametrize("endpoint", [

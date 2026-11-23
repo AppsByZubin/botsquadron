@@ -123,6 +123,15 @@ def _files(directory: Path, recursive: bool) -> list[Path]:
     return sorted(path for path in entries if path.is_file())
 
 
+def _transfer_config():
+    """Single PUT up to 4 GiB: CloudPE has rejected multipart UploadPart requests."""
+    try:
+        from boto3.s3.transfer import TransferConfig
+    except ImportError:  # Only fake clients exist without boto3.
+        return None
+    return TransferConfig(multipart_threshold=4 * 1024 ** 3)
+
+
 def _verify_remote(s3, bucket: str, key: str, size: int, checksum: str) -> None:
     response = s3.get_object(Bucket=bucket, Key=key)
     body = response["Body"]
@@ -179,7 +188,7 @@ def archive_directory(s3, bucket: str, prefix: str, directory: Path, *,
         remote_root = f"{prefix.strip('/')}/snapshots/{archive_id}"
         for name, info in manifest.items():
             key = f"{remote_root}/{name}"
-            s3.upload_file(str(snapshot / name), bucket, key)
+            s3.upload_file(str(snapshot / name), bucket, key, Config=_transfer_config())
             _verify_remote(s3, bucket, key, info["size"], info["sha256"])
         # Publish convenient daily paths as well as immutable recovery snapshots.
         # Use the captured bytes and verify these uploads before local cleanup too.
@@ -189,12 +198,12 @@ def archive_directory(s3, bucket: str, prefix: str, directory: Path, *,
         }
         for name, info in manifest.items():
             key = f"{prefix.strip('/')}/{order_names.get(name, name)}"
-            s3.upload_file(str(snapshot / name), bucket, key)
+            s3.upload_file(str(snapshot / name), bucket, key, Config=_transfer_config())
             _verify_remote(s3, bucket, key, info["size"], info["sha256"])
         manifest_path = snapshot / "manifest.json"
         manifest_path.write_bytes(manifest_bytes)
         key = f"{remote_root}/manifest.json"
-        s3.upload_file(str(manifest_path), bucket, key)
+        s3.upload_file(str(manifest_path), bucket, key, Config=_transfer_config())
         _verify_remote(s3, bucket, key, len(manifest_bytes), _digest(manifest_path))
         log.info("Verified archive s3://%s/%s", bucket, remote_root)
 

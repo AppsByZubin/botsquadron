@@ -194,7 +194,13 @@ def upload_trade_artifacts_to_s3(bot_name: str, execution_mode: str) -> None:
         "aws_access_key_id": access_key_id,
         "aws_secret_access_key": secret_access_key,
     }
-    s3_client_kwargs["config"] = Config(s3={"addressing_style": "path"})
+    # CloudPE rejects boto3>=1.36 default CRC checksums on multipart UploadPart
+    # (AccessDenied); only send/validate checksums when an operation requires them.
+    s3_client_kwargs["config"] = Config(
+        s3={"addressing_style": "path"},
+        request_checksum_calculation="when_required",
+        response_checksum_validation="when_required",
+    )
 
     logger.info("Archiving %s %s artifacts to s3://%s/%s via CloudPE endpoint %s",
                 bot_name, mode, bucket_name, upload_prefix, endpoint_url)

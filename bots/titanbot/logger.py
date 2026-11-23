@@ -34,6 +34,32 @@ class LogFormatter(logging.Formatter):
         return super().format(record, *args, **kwargs)
 
 
+_stale_logs_checked = False
+
+
+def _remove_stale_logs(log_dir, current_log_name):
+    """Delete this bot's dated logs (dd-mm-yy_<bot>.log) except the current one, once per process."""
+    global _stale_logs_checked
+    if _stale_logs_checked:
+        return []
+    _stale_logs_checked = True
+    from fnmatch import fnmatch
+
+    suffix = current_log_name.split("_", 1)[1]
+    removed = []
+    for name in sorted(os.listdir(log_dir)):
+        path = os.path.join(log_dir, name)
+        if name == current_log_name or not fnmatch(name, f"[0-9][0-9]-[0-9][0-9]-[0-9][0-9]_{suffix}"):
+            continue
+        if os.path.isfile(path) and not os.path.islink(path):
+            try:
+                os.remove(path)
+                removed.append(name)
+            except OSError:
+                pass
+    return removed
+
+
 def create_logger(name):
     logger = logging.getLogger(name)
     if logger.handlers:
@@ -50,10 +76,13 @@ def create_logger(name):
     log_dir = os.getenv("TITANBOT_LOG_DIR") or os.getenv("BOT_LOG_DIR") or "logs"
     os.makedirs(log_dir, exist_ok=True)
     log_filename = os.path.join(log_dir, f"{datetime.now().strftime('%d-%m-%y')}_titanbot.log")
+    removed_logs = _remove_stale_logs(log_dir, os.path.basename(log_filename))
 
     file_handler = logging.FileHandler(log_filename)
     file_handler.setLevel(logging.DEBUG)
     file_handler.setFormatter(LogFormatter(fmt=format_str, color=False))
     logger.addHandler(file_handler)
+    if removed_logs:
+        logger.info("Removed %s stale log file(s): %s", len(removed_logs), ", ".join(removed_logs))
 
     return logger
